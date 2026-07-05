@@ -1,3 +1,6 @@
+# umux
+## A cmux alternative for ubuntu.
+
 **Project:** umux
 **Type:** Open-source desktop application
 **Platform:** Ubuntu (Wayland)
