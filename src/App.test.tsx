@@ -1,26 +1,29 @@
-// Assumptions encoded by this test (Phase 1 / Issue #2):
+// Assumptions encoded by this test (Phase 2 / Issue #3):
 //  - Input: <App /> takes no props (root composition component).
-//  - Output: renders the empty-state placeholder — i.e., the root composes
-//    <EmptyState />, so the welcome heading reaches the document.
-//  - Boundary: no props, no data, no interaction. Pure render-path wiring.
-//  - NOT tested here: styling, the create-workspace action, window/Tauri
-//    launching (those are integration checks verified manually on Ubuntu/Wayland).
+//  - Output: composes <TerminalSurface /> — the root now mounts a terminal
+//    panel on launch instead of the Phase 1 empty-state placeholder.
+//  - Boundary: no props, no data; TerminalSurface itself is mocked out here so
+//    the composition root is verified without pulling xterm.js into jsdom.
+//  - NOT tested here: xterm rendering, PTY I/O (those live in
+//    TerminalSurface.test.tsx and the Rust cargo tests respectively).
 //
-// Note: this is a wiring/characterization test. <App /> already renders
-// <EmptyState />, so the assertion passes without new production code. Its job
-// is to lock the composition root (main.tsx -> App -> EmptyState) so a future
-// change that drops the placeholder fails here.
+// Note: wiring/characterization test. Locks the composition root
+// (main.tsx -> App -> TerminalSurface) so a change that drops the terminal
+// fails here.
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
+
+vi.mock('./TerminalSurface', () => ({
+  TerminalSurface: () => <div data-testid="terminal-surface" />,
+}))
+
 import App from './App'
 
 describe('App', () => {
-  it('renders the empty-state placeholder', () => {
+  it('mounts the terminal surface on launch', () => {
     render(<App />)
 
-    expect(
-      screen.getByRole('heading', { name: /welcome to umux/i }),
-    ).toBeInTheDocument()
+    expect(screen.getByTestId('terminal-surface')).toBeInTheDocument()
   })
 })

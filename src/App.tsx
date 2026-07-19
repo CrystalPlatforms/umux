@@ -1,5 +1,5 @@
-import { EmptyState } from './EmptyState'
+import { TerminalSurface } from './TerminalSurface'
 
 export default function App() {
-  return <EmptyState />
+  return <TerminalSurface />
 }
