@@ -348,6 +348,61 @@ mod tests {
     }
 
     #[test]
+    fn close_returns_promptly() {
+        // AC #3: closing must be fast and not block the UI. close() holds the
+        // service Mutex while it kills + reaps the child; a blocking wait there
+        // would stall every other pty command. This test freezes the contract
+        // that close returns well under a perceptible delay.
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+
+        let start = Instant::now();
+        svc.close(&handle);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "close took {:?}, expected < 1s (would block the UI)",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn close_disconnects_output_channel() {
+        // Clean teardown: after close(), the reader thread must exit and the
+        // output channel must disconnect. A stuck reader thread would be a
+        // resource leak — not a "clean" close. We assert the Receiver reports
+        // Disconnected within a bounded time after close().
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+
+        svc.close(&handle);
+
+        let start = Instant::now();
+        let mut disconnected = false;
+        while start.elapsed() < Duration::from_secs(3) {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            disconnected,
+            "output channel never disconnected after close — reader thread leak"
+        );
+    }
+
+    #[test]
     fn write_after_close_does_not_panic() {
         let mut svc = PtyService::new();
         let (handle, _rx) = svc
@@ -360,5 +415,21 @@ mod tests {
         // crash the whole Tauri backend on a stale keystroke after panel close.
         let result = svc.write(&handle, b"hello\n");
         assert!(result.is_err(), "write after close should report an error");
+    }
+
+    #[test]
+    fn close_twice_does_not_panic() {
+        // Defensive contract: the frontend may fire pty_close twice (e.g. unmount
+        // + explicit close, or a stray rerender). A second close on an already
+        // removed handle must be a silent no-op, never a panic — a panic would
+        // poison the service Mutex and freeze every panel.
+        let mut svc = PtyService::new();
+        let (handle, _rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+
+        svc.close(&handle);
+        svc.close(&handle); // second close — unknown handle, must be a no-op
+        svc.close(&PtyHandle { id: 9999 }); // never-existed handle
     }
 }
