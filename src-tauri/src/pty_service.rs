@@ -85,6 +85,10 @@ impl PtyService {
             .map_err(pt_err)?;
 
         let mut cmd = CommandBuilder::new(shell);
+        // Launch as a login shell so the user's `.profile` / `.bash_profile`
+        // (and thus their environment + dotfiles) are loaded, matching the
+        // PRD requirement that a panel respects the chosen shell's config.
+        cmd.arg("-l");
         cmd.cwd(cwd);
         let child = pair.slave.spawn_command(cmd).map_err(pt_err)?;
 
@@ -161,6 +165,8 @@ impl PtyService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -431,5 +437,63 @@ mod tests {
         svc.close(&handle);
         svc.close(&handle); // second close — unknown handle, must be a no-op
         svc.close(&PtyHandle { id: 9999 }); // never-existed handle
+    }
+
+    // Unique counter for temp HOME dirs so parallel test runs don't collide.
+    static HOME_SEQ: AtomicU32 = AtomicU32::new(0);
+
+    // T3 (AC2 — the chosen shell's dotfiles are loaded):
+    //   Input:  bash launched through PtyService::open, with HOME pointed at a
+    //           throwaway dir whose `.profile` echoes a unique marker.
+    //   Output: the marker shows up in the PTY output stream.
+    //   Why `.profile`: it is sourced ONLY by a login shell. A non-login bash
+    //   (interactive on a PTY) reads `.bashrc`, not `.profile`, so this marker
+    //   appearing is positive proof the shell was launched as a login shell.
+    //
+    //   Boundary/assumption: we temporarily mutate the process-global HOME var
+    //   for the duration of open() so portable-pty captures it into the child
+    //   env, then restore it. The other tests in this module don't read
+    //   dotfiles, so a briefly-wrong HOME can't break their assertions.
+    //   NOT tested: the `/bin/sh` fallback when $SHELL is unset (see lib.rs T2).
+    #[test]
+    fn open_launches_login_shell_loading_dotfiles() {
+        // Build a unique temp HOME with a `.profile` marker.
+        let seq = HOME_SEQ.fetch_add(1, Ordering::SeqCst);
+        let home = std::env::temp_dir().join(format!(
+            "umux-test-home-{}-{}",
+            std::process::id(),
+            seq
+        ));
+        fs::create_dir_all(&home).expect("create temp home");
+        let marker = "LOGIN_DOTFILE_MARKER_42";
+        fs::write(home.join(".profile"), format!("echo {}\n", marker))
+            .expect("write .profile");
+
+        let saved_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open("/bin/bash", home.clone(), 80, 24)
+            .expect("open pty");
+
+        let saw_marker =
+            wait_for_output(&rx, marker.as_bytes(), Duration::from_secs(8));
+
+        svc.close(&handle);
+
+        // Restore HOME no matter how the assertion lands.
+        match saved_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(&home);
+
+        assert!(
+            saw_marker,
+            "expected `.profile` marker {:?} in output — shell was not launched \
+             as a login shell, so dotfiles did not load",
+            marker
+        );
     }
 }

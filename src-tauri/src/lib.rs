@@ -18,9 +18,14 @@ struct PtyOutputPayload {
 }
 
 #[tauri::command]
-fn pty_open(app: AppHandle, state: State<'_, Mutex<PtyService>>) -> Result<u32, String> {
-    // Default to the user's $SHELL, falling back to /bin/sh.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+fn pty_open(
+    app: AppHandle,
+    state: State<'_, Mutex<PtyService>>,
+    shell: Option<String>,
+) -> Result<u32, String> {
+    // Default to the user's $SHELL, falling back to /bin/sh; an explicit
+    // `shell` override (from a future WorkspaceStore config) wins.
+    let shell = resolve_shell(shell.as_deref());
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
     let (handle, rx) = {
@@ -60,6 +65,16 @@ fn pty_close(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<(), String>
     Ok(())
 }
 
+/// Decide which shell binary to launch for a panel.
+///
+/// An explicit override (from a future WorkspaceStore config) wins; otherwise
+/// we fall back to the user's `$SHELL`, then `/bin/sh` as a last resort.
+pub fn resolve_shell(shell: Option<&str>) -> String {
+    shell
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -82,4 +97,29 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // T1 (AC3 — non-default shell can be used when configured):
+    //   Input:  Some("/bin/dash")
+    //   Output: "/bin/dash" verbatim — an explicit override wins, untouched.
+    #[test]
+    fn resolve_shell_with_override_returns_override() {
+        assert_eq!(resolve_shell(Some("/bin/dash")), "/bin/dash");
+    }
+
+    // T2 (AC1 — default to the user's $SHELL):
+    //   Input:  None
+    //   Output: whatever $SHELL currently is in the process env (or "/bin/sh"
+    //           if unset — that fallback branch is intentionally NOT tested
+    //           here, since exercising it would require mutating the global
+    //           SHELL var, unsafe under cargo's parallel test threads).
+    #[test]
+    fn resolve_shell_none_uses_shell_env() {
+        let expected = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        assert_eq!(resolve_shell(None), expected);
+    }
 }
