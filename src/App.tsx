@@ -1,5 +1,5 @@
-import { TerminalSurface } from './TerminalSurface'
+import { WorkspaceShell } from './WorkspaceShell'
 
 export default function App() {
-  return <TerminalSurface />
+  return <WorkspaceShell />
 }

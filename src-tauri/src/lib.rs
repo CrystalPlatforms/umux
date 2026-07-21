@@ -1,4 +1,5 @@
 pub mod pty_service;
+pub mod workspace_store;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -7,6 +8,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use pty_service::{PtyHandle, PtyService};
+use workspace_store::{WorkspaceData, WorkspaceStore};
 
 /// One chunk of PTY output, ferried to the renderer over the `pty_output` event.
 /// `data` is raw bytes serialized as a JSON array of numbers; the frontend
@@ -65,6 +67,26 @@ fn pty_close(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<(), String>
     Ok(())
 }
 
+/// Where the workspace config file lives: `$XDG_CONFIG_HOME/umux/workspaces.json`
+/// or `~/.config/umux/workspaces.json` when XDG is unset.
+fn config_path() -> PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|_| PathBuf::from("."));
+    base.join("umux").join("workspaces.json")
+}
+
+#[tauri::command]
+fn load_workspaces(state: State<'_, WorkspaceStore>) -> WorkspaceData {
+    state.load()
+}
+
+#[tauri::command]
+fn save_workspaces(state: State<'_, WorkspaceStore>, data: WorkspaceData) -> Result<(), String> {
+    state.save(&data).map_err(|e| e.to_string())
+}
+
 /// Decide which shell binary to launch for a panel.
 ///
 /// An explicit override (from a future WorkspaceStore config) wins; otherwise
@@ -79,11 +101,14 @@ pub fn resolve_shell(shell: Option<&str>) -> String {
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(PtyService::new()))
+        .manage(WorkspaceStore::new(config_path()))
         .invoke_handler(tauri::generate_handler![
             pty_open,
             pty_write,
             pty_resize,
             pty_close,
+            load_workspaces,
+            save_workspaces,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

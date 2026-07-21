@@ -1,0 +1,332 @@
+:root {
+  /* Surface palette — calm dark, easy on the eyes for terminal work. */
+  --bg-app: #111317;
+  --bg-sidebar: #171a21;
+  --bg-sidebar-hover: #1f232c;
+  --bg-sidebar-active: #232a36;
+  --bg-elevated: #1c2029;
+  --bg-input: #0f1116;
+
+  --border: #262b35;
+  --border-soft: #20242d;
+
+  --text: #e6e9ef;
+  --text-dim: #8b93a4;
+  --text-faint: #5b6373;
+
+  --accent: #6aa0ff;
+  --accent-soft: rgba(106, 160, 255, 0.14);
+  --accent-line: rgba(106, 160, 255, 0.55);
+
+  --danger: #ff6b6b;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Consolas,
+    monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ---- Layout shell -------------------------------------------------------- */
+
+.shell {
+  position: relative;
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 240px;
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-soft);
+}
+
+/* ---- Sidebar header ------------------------------------------------------ */
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Floating expand toggle shown in the corner when the sidebar is collapsed. */
+
+.sidebar-expand {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #0b1020;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  transition: filter 0.12s ease;
+}
+
+.sidebar-expand:hover {
+  filter: brightness(1.08);
+}
+
+.sidebar-expand svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Icon buttons: ghost, square, only an SVG inside (no visible button chrome). */
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.icon-btn:hover {
+  background: var(--bg-sidebar-hover);
+  color: var(--text);
+}
+
+.icon-btn:active {
+  background: var(--bg-sidebar-active);
+}
+
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---- Create form (revealed by the +) ------------------------------------- */
+
+.create-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.text-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.text-input:focus {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.btn-primary {
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #0b1020;
+  font-weight: 600;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: filter 0.12s ease;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Workspace list ------------------------------------------------------ */
+
+.workspace-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.workspace-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+  border-radius: var(--radius-sm);
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  color: var(--text-dim);
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.workspace-row:hover {
+  background: var(--bg-sidebar-hover);
+  color: var(--text);
+}
+
+.workspace-row.is-active {
+  background: var(--bg-sidebar-active);
+  border-left-color: var(--accent-line);
+  color: var(--text);
+}
+
+.workspace-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* ---- Main / terminal area ------------------------------------------------ */
+
+.main {
+  position: relative;
+  flex: 1;
+  background: #000;
+  overflow: hidden;
+}
+
+.panel {
+  position: absolute;
+  inset: 0;
+}
+
+.panel.is-hidden {
+  display: none;
+}
+
+/* ---- Empty state --------------------------------------------------------- */
+
+.empty-hint {
+  padding: 14px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+/* ---- Context menu -------------------------------------------------------- */
+
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 184px;
+  padding: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  user-select: none;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+.menu-item:hover {
+  background: var(--bg-sidebar-hover);
+}
+
+.menu-item.danger {
+  color: var(--danger);
+}
+
+.menu-item svg {
+  width: 15px;
+  height: 15px;
+  color: var(--text-dim);
+}
+
+.menu-item.danger svg {
+  color: var(--danger);
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border-soft);
+}
