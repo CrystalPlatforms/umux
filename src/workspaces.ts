@@ -5,7 +5,16 @@
 // WorkspaceStore; this module is fed by it on startup and triggers a save on
 // every mutation. Trivially unit-testable.
 
-export type Workspace = { id: string; name: string }
+// Forward-compat slot for Phase 9 (split into panels). `workingDirectory` and
+// `sshTarget` are optional: absent = local panel in the default cwd. Kept
+// byte-identical to the Rust `Panel` in workspace_store.rs.
+export type Panel = {
+  id: string
+  workingDirectory?: string
+  sshTarget?: string
+}
+
+export type Workspace = { id: string; name: string; panels: Panel[] }
 
 export type WorkspaceState = {
   workspaces: Workspace[]
@@ -29,7 +38,7 @@ export function createWorkspace(
   name: string,
   genId: () => string = defaultGenId,
 ): WorkspaceState {
-  const workspace: Workspace = { id: genId(), name }
+  const workspace: Workspace = { id: genId(), name, panels: [] }
   return {
     workspaces: [...state.workspaces, workspace],
     activeId: workspace.id,

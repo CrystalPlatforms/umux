@@ -37,7 +37,9 @@ describe('workspace state', () => {
 
       const next = createWorkspace(state, 'my-project', () => 'ws-1')
 
-      expect(next.workspaces).toEqual([{ id: 'ws-1', name: 'my-project' }])
+      expect(next.workspaces).toEqual([
+        { id: 'ws-1', name: 'my-project', panels: [] },
+      ])
       expect(next.activeId).toBe('ws-1')
     })
 
@@ -45,6 +47,15 @@ describe('workspace state', () => {
       const next = createWorkspace(emptyState, 'my-project', () => 'ws-1')
 
       expect(next.openIds).toEqual(['ws-1'])
+    })
+
+    // Phase 8 / #9 — forward-compat schema: a fresh workspace starts with an
+    // empty panels slot so the persisted shape already matches the model
+    // Phase 9 will populate (and stays byte-identical to the Rust Workspace).
+    it('creates the workspace with an empty panels slot', () => {
+      const next = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(next.workspaces[0].panels).toEqual([])
     })
   })
 

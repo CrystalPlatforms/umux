@@ -15,9 +15,25 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
+pub struct Panel {
+    pub id: String,
+    // None = launch in the default cwd as a local panel (PRD story 37 / 38).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    // None = local panel; Some -> remote shell target (Phase 15 / ssh).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_target: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
+    // Forward-compat slot for Phase 9 (split into panels). `#[serde(default)]`
+    // means a config written before panels existed loads with an empty vec,
+    // so old files keep working (PRD story 38).
+    #[serde(default)]
+    pub panels: Vec<Panel>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
@@ -104,8 +120,8 @@ mod tests {
     fn serialize_config_round_trips() {
         let data = WorkspaceData {
             workspaces: vec![
-                Workspace { id: "ws-1".into(), name: "alpha".into() },
-                Workspace { id: "ws-2".into(), name: "beta".into() },
+                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![] },
+                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![] },
             ],
         };
 
@@ -126,6 +142,47 @@ mod tests {
         assert_eq!(store.load(), WorkspaceData::default());
     }
 
+    // T6 (Phase 8 / #9 — forward-compat schema round-trips through the pure layer):
+    //   Input:  WorkspaceData with a workspace carrying one panel that has a
+    //           working directory and an ssh target.
+    //   Output: serialize_config -> parse_config returns identical data,
+    //           including the nested panel. Pure layer, no fs.
+    //   NOT tested here: panel logic (split/cwd selection/ssh) — Phase 9/15.
+    #[test]
+    fn serialize_round_trips_workspace_with_panel() {
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![Panel {
+                    id: "p-1".into(),
+                    working_directory: Some("/home/adam/proj".into()),
+                    ssh_target: Some("adam@host".into()),
+                }],
+            }],
+        };
+
+        let text = serialize_config(&data);
+        let back = parse_config(&text);
+
+        assert_eq!(back, data);
+    }
+
+    // T7 (Phase 8 / #9 — backward compat with pre-panel config files):
+    //   Input:  JSON written by an older umux that knew nothing of panels —
+    //           workspaces carry only {id, name}.
+    //   Output: parse_config yields workspaces with `panels: []` (NOT an error
+    //           and NOT missing data). Guards the #[serde(default)] invariant.
+    #[test]
+    fn parse_config_old_file_without_panels_loads_empty() {
+        let text = r#"{"workspaces":[{"id":"ws-1","name":"alpha"},{"id":"ws-2","name":"beta"}]}"#;
+
+        let data = parse_config(text);
+
+        assert_eq!(data.workspaces.len(), 2);
+        assert!(data.workspaces.iter().all(|w| w.panels.is_empty()));
+    }
+
     // T5 (save then load round-trips through the file):
     //   Input:  WorkspaceData with one workspace, persisted via save().
     //   Output: load() reads it back unchanged.
@@ -134,7 +191,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = WorkspaceStore::new(dir.path().join("config.json"));
         let data = WorkspaceData {
-            workspaces: vec![Workspace { id: "ws-1".into(), name: "alpha".into() }],
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+            }],
+        };
+
+        store.save(&data).unwrap();
+        let back = store.load();
+
+        assert_eq!(back, data);
+    }
+
+    // T8 (Phase 8 / #9 — fs round-trip with a panel):
+    //   Input:  WorkspaceData with a workspace + a panel carrying cwd & ssh,
+    //           persisted via save() to a real temp file.
+    //   Output: load() reads it back byte-for-byte identical, proving the
+    //           richer schema survives the filesystem, not just the pure layer.
+    #[test]
+    fn save_then_load_round_trips_with_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path().join("config.json"));
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![Panel {
+                    id: "p-1".into(),
+                    working_directory: Some("/home/adam/proj".into()),
+                    ssh_target: Some("adam@host".into()),
+                }],
+            }],
         };
 
         store.save(&data).unwrap();

@@ -77,7 +77,9 @@ describe('WorkspaceShell', () => {
     expect(await screen.findByText('my-project')).toBeInTheDocument()
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [{ id: expect.any(String), name: 'my-project' }],
+        workspaces: [
+          { id: expect.any(String), name: 'my-project', panels: [] },
+        ],
       }),
     )
   })
