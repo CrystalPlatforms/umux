@@ -182,4 +182,133 @@ describe('WorkspaceShell', () => {
     expect(screen.getByText('umux')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /new workspace/i })).toBeInTheDocument()
   })
+
+  // --- Phase 7 / Issue #8: close, reopen, delete, reorder -------------------
+
+  it('closing a workspace unmounts its panel but keeps it listed (no persistence)', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /close alpha/i }))
+
+    // The panel is gone (unmounted -> its shell is torn down via pty_close).
+    expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
+    // The definition stays in the sidebar.
+    expect(screen.getByText('alpha')).toBeInTheDocument()
+    // Close is runtime-only: definitions did not change, so nothing is saved.
+    expect(invokeMock).not.toHaveBeenCalledWith('save_workspaces', expect.anything())
+  })
+
+  it('clicking a closed workspace reopens it', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+      return Promise.resolve(undefined)
+    })
+
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /close alpha/i }))
+    expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('alpha'))
+
+    expect(await screen.findByTestId('panel-ws-1')).toBeInTheDocument()
+  })
+
+  it('deletes a workspace from the row context menu after confirmation', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    fireEvent.contextMenu(screen.getByText('alpha'))
+    fireEvent.click(screen.getByRole('menuitem', { name: /delete workspace/i }))
+
+    expect(screen.queryByText('alpha')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
+        workspaces: [{ id: 'ws-2', name: 'beta' }],
+      }),
+    )
+
+    confirmSpy.mockRestore()
+  })
+
+  it('canceling the delete confirmation leaves the workspace in place', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+      return Promise.resolve(undefined)
+    })
+
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    fireEvent.contextMenu(screen.getByText('alpha'))
+    fireEvent.click(screen.getByRole('menuitem', { name: /delete workspace/i }))
+
+    expect(screen.getByText('alpha')).toBeInTheDocument()
+    expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument()
+    expect(invokeMock).not.toHaveBeenCalledWith('save_workspaces', expect.anything())
+
+    confirmSpy.mockRestore()
+  })
+
+  it('reorders workspaces via drag-and-drop and persists the new order', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+            { id: 'ws-3', name: 'gamma' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByText('gamma')).toBeInTheDocument())
+
+    // Drag the alpha row onto the gamma row -> alpha moves to the end.
+    fireEvent.dragStart(screen.getByTestId('workspace-row-ws-1'))
+    fireEvent.drop(screen.getByTestId('workspace-row-ws-3'))
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
+        workspaces: [
+          { id: 'ws-2', name: 'beta' },
+          { id: 'ws-3', name: 'gamma' },
+          { id: 'ws-1', name: 'alpha' },
+        ],
+      }),
+    )
+  })
 })

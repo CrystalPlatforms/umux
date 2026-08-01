@@ -7,6 +7,15 @@
 //    stays a system boundary and tests are deterministic.
 //  - Boundary NOT tested in this file: disk persistence (Rust WorkspaceStore),
 //    terminal rendering, PTY I/O.
+//
+// Phase 7 / Issue #8 additions (open/closed model):
+//  - WorkspaceState gains `openIds: string[]` — runtime-only (NOT persisted,
+//    same as activeId). A workspace is "open" while it has a live, mounted
+//    panel (and thus a live shell); "closed" keeps its definition but unmounts
+//    the panel, killing the shell.
+//  - A newly created workspace is open from the start (in openIds) and active.
+//  - Deleting or closing the active workspace hands activation to the next open
+//    sibling, else the previous open one, else null (EmptyState).
 
 import { describe, it, expect } from 'vitest'
 import {
@@ -15,6 +24,10 @@ import {
   listWorkspaces,
   renameWorkspace,
   switchWorkspace,
+  deleteWorkspace,
+  closeWorkspace,
+  openWorkspace,
+  moveWorkspace,
 } from './workspaces'
 
 describe('workspace state', () => {
@@ -26,6 +39,12 @@ describe('workspace state', () => {
 
       expect(next.workspaces).toEqual([{ id: 'ws-1', name: 'my-project' }])
       expect(next.activeId).toBe('ws-1')
+    })
+
+    it('opens the new workspace (adds it to openIds)', () => {
+      const next = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(next.openIds).toEqual(['ws-1'])
     })
   })
 
@@ -76,6 +95,170 @@ describe('workspace state', () => {
       const state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
 
       const next = switchWorkspace(state, 'nope')
+
+      expect(next).toBe(state)
+    })
+  })
+
+  describe('deleteWorkspace', () => {
+    it('removes the workspace from definitions and from openIds', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+
+      const next = deleteWorkspace(state, 'ws-1')
+
+      expect(listWorkspaces(next).map((w) => w.id)).toEqual(['ws-2'])
+      expect(next.openIds).toEqual(['ws-2'])
+    })
+
+    it('hands activation to the next open sibling when the active one is deleted', () => {
+      // [alpha(open) beta(open,active) gamma(open)] -- delete beta -> gamma active
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      state = createWorkspace(state, 'gamma', () => 'ws-3')
+
+      const next = deleteWorkspace(state, 'ws-3')
+
+      expect(next.activeId).toBe('ws-2')
+    })
+
+    it('falls back to the previous open sibling when there is no next one', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      // active is beta (ws-2); delete it -> fall back to alpha (ws-1)
+      const next = deleteWorkspace(state, 'ws-2')
+
+      expect(next.activeId).toBe('ws-1')
+    })
+
+    it('clears activation when the last open workspace is deleted', () => {
+      const state = createWorkspace(emptyState, 'solo', () => 'ws-1')
+
+      const next = deleteWorkspace(state, 'ws-1')
+
+      expect(next.activeId).toBeNull()
+      expect(next.openIds).toEqual([])
+    })
+
+    it('is a no-op for an unknown id', () => {
+      const state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+
+      const next = deleteWorkspace(state, 'nope')
+
+      expect(next).toBe(state)
+    })
+  })
+
+  describe('closeWorkspace', () => {
+    it('keeps the definition but removes the workspace from openIds', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+
+      const next = closeWorkspace(state, 'ws-1')
+
+      expect(listWorkspaces(next).map((w) => w.id)).toEqual(['ws-1', 'ws-2'])
+      expect(next.openIds).toEqual(['ws-2'])
+    })
+
+    it('hands activation to the next open sibling when the active one is closed', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      state = createWorkspace(state, 'gamma', () => 'ws-3')
+
+      const next = closeWorkspace(state, 'ws-3')
+
+      expect(next.activeId).toBe('ws-2')
+    })
+
+    it('is a no-op for an already-closed workspace', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      state = closeWorkspace(state, 'ws-1') // alpha now closed but still defined
+
+      const next = closeWorkspace(state, 'ws-1')
+
+      expect(next).toBe(state)
+    })
+
+    it('is a no-op for an unknown id', () => {
+      const state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+
+      const next = closeWorkspace(state, 'nope')
+
+      expect(next).toBe(state)
+    })
+  })
+
+  describe('openWorkspace', () => {
+    it('activates an already-open workspace', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      // beta is active; open alpha again -> alpha active, openIds unchanged
+      const next = openWorkspace(state, 'ws-1')
+
+      expect(next.activeId).toBe('ws-1')
+      expect(next.openIds).toEqual(['ws-1', 'ws-2'])
+    })
+
+    it('reopens a closed workspace (idempotent if already open)', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      state = closeWorkspace(state, 'ws-1') // alpha closed but still defined
+
+      const next = openWorkspace(state, 'ws-1')
+
+      expect(next.activeId).toBe('ws-1')
+      expect(next.openIds).toEqual(['ws-2', 'ws-1'])
+    })
+
+    it('is a no-op for an unknown id', () => {
+      const state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+
+      const next = openWorkspace(state, 'nope')
+
+      expect(next).toBe(state)
+    })
+  })
+
+  describe('moveWorkspace', () => {
+    it('moves a workspace to a new position in the list', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      state = createWorkspace(state, 'gamma', () => 'ws-3')
+
+      // drag alpha (index 0) to the end (index 2)
+      const next = moveWorkspace(state, 'ws-1', 2)
+
+      expect(listWorkspaces(next).map((w) => w.id)).toEqual([
+        'ws-2',
+        'ws-3',
+        'ws-1',
+      ])
+    })
+
+    it('clamps an out-of-range index to the end of the list', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+
+      const next = moveWorkspace(state, 'ws-1', 99)
+
+      expect(listWorkspaces(next).map((w) => w.id)).toEqual(['ws-2', 'ws-1'])
+    })
+
+    it('does not touch openIds (reorder is definitions-only)', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+
+      const next = moveWorkspace(state, 'ws-1', 1)
+
+      expect(next.openIds).toEqual(['ws-1', 'ws-2'])
+    })
+
+    it('is a no-op for an unknown id', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+
+      const next = moveWorkspace(state, 'nope', 1)
 
       expect(next).toBe(state)
     })

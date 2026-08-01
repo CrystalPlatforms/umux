@@ -21,7 +21,10 @@ import {
   emptyState,
   createWorkspace,
   renameWorkspace,
-  switchWorkspace,
+  openWorkspace,
+  closeWorkspace,
+  deleteWorkspace,
+  moveWorkspace,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
@@ -95,7 +98,12 @@ function SidebarExpandIcon({ className }: IconProps) {
 
 // --- Context menu state ------------------------------------------------------
 
-type MenuState = { x: number; y: number; header: boolean } | null
+type MenuState = {
+  x: number
+  y: number
+  header: boolean
+  workspaceId?: string
+} | null
 
 export function WorkspaceShell() {
   const [state, setState] = useState<WorkspaceState>(emptyState)
@@ -105,11 +113,17 @@ export function WorkspaceShell() {
   const [editName, setEditName] = useState('')
   const [menu, setMenu] = useState<MenuState>(null)
   const [collapsed, setCollapsed] = useState(false)
+  const [draggedId, setDraggedId] = useState<string | null>(null)
 
   useEffect(() => {
     void invoke<{ workspaces: Workspace[] }>('load_workspaces').then((data) => {
       const workspaces = data.workspaces ?? []
-      setState({ workspaces, activeId: workspaces[0]?.id ?? null })
+      setState({
+        workspaces,
+        activeId: workspaces[0]?.id ?? null,
+        // On startup every defined workspace is open (has a live panel).
+        openIds: workspaces.map((w) => w.id),
+      })
     })
   }, [])
 
@@ -153,10 +167,18 @@ export function WorkspaceShell() {
     if (name !== '') persist(renameWorkspace(state, id, name))
   }
 
-  const openMenu = (e: React.MouseEvent, header: boolean) => {
+  const openMenu = (e: React.MouseEvent, header: boolean, workspaceId?: string) => {
     e.preventDefault()
     e.stopPropagation()
-    setMenu({ x: e.clientX, y: e.clientY, header })
+    setMenu({ x: e.clientX, y: e.clientY, header, workspaceId })
+  }
+
+  const deleteFromMenu = () => {
+    const id = menu?.workspaceId
+    setMenu(null)
+    if (id == null) return
+    if (!window.confirm('Delete this workspace? This cannot be undone.')) return
+    persist(deleteWorkspace(state, id))
   }
 
   const minimize = () => { void getCurrentWindow().minimize() }
@@ -227,8 +249,22 @@ export function WorkspaceShell() {
           {state.workspaces.map((ws) => (
             <li
               key={ws.id}
+              data-testid={`workspace-row-${ws.id}`}
               className={`workspace-row ${ws.id === state.activeId ? 'is-active' : ''}`}
-              onClick={() => setState(switchWorkspace(state, ws.id))}
+              draggable
+              onDragStart={() => setDraggedId(ws.id)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault()
+                if (draggedId == null || draggedId === ws.id) return
+                const targetIndex = state.workspaces.findIndex(
+                  (w) => w.id === ws.id,
+                )
+                persist(moveWorkspace(state, draggedId, targetIndex))
+                setDraggedId(null)
+              }}
+              onClick={() => setState(openWorkspace(state, ws.id))}
+              onContextMenu={(e) => openMenu(e, false, ws.id)}
             >
               {editingId === ws.id ? (
                 <input
@@ -257,6 +293,17 @@ export function WorkspaceShell() {
                   >
                     <PencilIcon />
                   </button>
+                  <button
+                    className="icon-btn"
+                    aria-label={`Close ${ws.name}`}
+                    title="Close (keep workspace)"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setState(closeWorkspace(state, ws.id))
+                    }}
+                  >
+                    <CloseIcon />
+                  </button>
                 </>
               )}
             </li>
@@ -269,15 +316,17 @@ export function WorkspaceShell() {
       )}
 
       <main className="main">
-        {state.workspaces.map((ws) => (
-          <div
-            key={ws.id}
-            data-testid={`panel-${ws.id}`}
-            className={`panel ${ws.id === state.activeId ? '' : 'is-hidden'}`}
-          >
-            <TerminalSurface />
-          </div>
-        ))}
+        {state.workspaces
+          .filter((ws) => state.openIds.includes(ws.id))
+          .map((ws) => (
+            <div
+              key={ws.id}
+              data-testid={`panel-${ws.id}`}
+              className={`panel ${ws.id === state.activeId ? '' : 'is-hidden'}`}
+            >
+              <TerminalSurface />
+            </div>
+          ))}
       </main>
 
       {menu && (
@@ -290,6 +339,19 @@ export function WorkspaceShell() {
             <PlusIcon />
             New workspace
           </button>
+          {menu.workspaceId && (
+            <>
+              <div className="menu-separator" />
+              <button
+                className="menu-item danger"
+                role="menuitem"
+                onClick={deleteFromMenu}
+              >
+                <CloseIcon />
+                Delete workspace
+              </button>
+            </>
+          )}
           {menu.header && (
             <>
               <div className="menu-separator" />
