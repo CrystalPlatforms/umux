@@ -35,6 +35,11 @@ export type WorkspaceState = {
   // one) instead of remounting into a blank terminal. Re-seeded to a single
   // fresh panel on reload (story 37 is the persistence phase).
   panelIds: Record<string, string[]>
+  // Runtime-only (NOT persisted): the focused panel id per workspace (Phase 11
+  // / #12, story 34). Absent entry means "no explicit focus" — the first
+  // panel is treated as active (see activePanelOf). The renderer draws a ring
+  // on the active panel so it is always obvious where keystrokes will go.
+  activePanelId: Record<string, string>
 }
 
 export const emptyState: WorkspaceState = {
@@ -43,6 +48,7 @@ export const emptyState: WorkspaceState = {
   openIds: [],
   layouts: {},
   panelIds: {},
+  activePanelId: {},
 }
 
 const defaultGenId = (): string => crypto.randomUUID()
@@ -60,12 +66,14 @@ export function createWorkspace(
   genId: () => string = defaultGenId,
 ): WorkspaceState {
   const workspace: Workspace = { id: genId(), name, panels: [] }
+  const panelId = genId()
   return {
     workspaces: [...state.workspaces, workspace],
     activeId: workspace.id,
     openIds: [...state.openIds, workspace.id],
     layouts: { ...state.layouts, [workspace.id]: createLayout() },
-    panelIds: { ...state.panelIds, [workspace.id]: [genId()] },
+    panelIds: { ...state.panelIds, [workspace.id]: [panelId] },
+    activePanelId: { ...state.activePanelId, [workspace.id]: panelId },
   }
 }
 
@@ -129,6 +137,7 @@ export function deleteWorkspace(
     openIds: state.openIds.filter((openId) => openId !== id),
     layouts: removeKey(state.layouts, id),
     panelIds: removeKey(state.panelIds, id),
+    activePanelId: removeKey(state.activePanelId, id),
   }
 }
 
@@ -196,10 +205,15 @@ export function splitPanel(
   const current = state.layouts[id] ?? createLayout()
   const next = split(current, orientation)
   if (next == null) return state
+  // The newly split-in panel becomes the focused one (Phase 11 / #12) so
+  // keystrokes follow the split.
+  const newPanelId = genId()
+  const existing = state.panelIds[id] ?? [genId()]
   return {
     ...state,
     layouts: { ...state.layouts, [id]: next },
-    panelIds: { ...state.panelIds, [id]: [...(state.panelIds[id] ?? [genId()]), genId()] },
+    panelIds: { ...state.panelIds, [id]: [...existing, newPanelId] },
+    activePanelId: { ...state.activePanelId, [id]: newPanelId },
   }
 }
 
@@ -238,9 +252,45 @@ export function closePanel(
   const current = state.layouts[id] ?? createLayout()
   const next = closePanelLayout(current)
   if (next === current) return state
+  const survivors = currentPanels.filter((p) => p !== panelId)
+  // If the closed panel was the focused one, hand focus to the survivor so
+  // keystrokes always land somewhere (Phase 11 / #12, story 34).
+  const activePanelId =
+    activePanelOf(state, id) === panelId
+      ? { ...state.activePanelId, [id]: survivors[0] }
+      : state.activePanelId
   return {
     ...state,
     layouts: { ...state.layouts, [id]: next },
-    panelIds: { ...state.panelIds, [id]: currentPanels.filter((p) => p !== panelId) },
+    panelIds: { ...state.panelIds, [id]: survivors },
+    activePanelId,
   }
+}
+
+/// Mark `panelId` as the focused panel of workspace `id` (Phase 11 / #12,
+/// story 34). Runtime-only — not persisted (story 37). No-op (returns `state`
+/// unchanged) when the workspace id is unknown or `panelId` is not one of its
+/// mounted panels.
+export function focusPanel(
+  state: WorkspaceState,
+  id: string,
+  panelId: string,
+): WorkspaceState {
+  if (!state.workspaces.some((w) => w.id === id)) return state
+  const panels = state.panelIds[id] ?? []
+  if (!panels.includes(panelId)) return state
+  return { ...state, activePanelId: { ...state.activePanelId, [id]: panelId } }
+}
+
+/// The currently focused panel of workspace `id` — the panel that should wear
+/// the focus ring. Falls back to the first mounted panel when none has been
+/// focused explicitly (so a single-panel workspace is always "focused"), and
+/// to null when the workspace is unknown or has no panels.
+export function activePanelOf(
+  state: WorkspaceState,
+  id: string,
+): string | null {
+  const panels = state.panelIds[id] ?? []
+  if (panels.length === 0) return null
+  return state.activePanelId[id] ?? panels[0]
 }

@@ -31,6 +31,8 @@ import {
   splitPanel,
   resizePanel,
   closePanel,
+  focusPanel,
+  activePanelOf,
 } from './workspaces'
 
 describe('workspace state', () => {
@@ -426,6 +428,93 @@ describe('workspace state', () => {
       const next = moveWorkspace(state, 'nope', 1)
 
       expect(next).toBe(state)
+    })
+  })
+
+  // Phase 11 / #12 — active panel focus (story 34). Each workspace tracks
+  // which of its panels is focused; the renderer draws a ring on it. The
+  // active panel is runtime-only (NOT persisted), like activeId.
+  describe('active panel focus', () => {
+    // A helper that builds a split workspace with two known panel ids, so the
+    // focus tests have stable panel ids to point at. genId yields ws-1 then
+    // p-1 for createWorkspace's workspace+seed-panel, then p-2 for the split.
+    function splitState(): ReturnType<typeof splitPanel> {
+      const ids = ['ws-1', 'p-1', 'p-2']
+      let i = 0
+      const state = createWorkspace(
+        emptyState,
+        'my-project',
+        () => ids[i++],
+      )
+      return splitPanel(state, 'ws-1', 'horizontal', () => ids[i++])
+    }
+
+    it('defaults to the first panel when none has been focused', () => {
+      // A workspace with panels but no activePanelId entry — e.g. state built
+      // before focus was ever set. activePanelOf must fall back to panels[0].
+      const state = {
+        ...emptyState,
+        workspaces: [{ id: 'ws-1', name: 'x', panels: [] }],
+        panelIds: { 'ws-1': ['p-1', 'p-2'] },
+        activePanelId: {},
+      }
+
+      expect(activePanelOf(state, 'ws-1')).toBe('p-1')
+    })
+
+    it('focusPanel sets the active panel', () => {
+      const state = splitState()
+
+      const next = focusPanel(state, 'ws-1', 'p-2')
+
+      expect(activePanelOf(next, 'ws-1')).toBe('p-2')
+    })
+
+    it('focusPanel is a no-op for an unknown panel', () => {
+      const state = splitState()
+
+      const next = focusPanel(state, 'ws-1', 'nope')
+
+      expect(next).toBe(state)
+    })
+
+    it('splitting makes the new panel active (keystrokes follow the split)', () => {
+      // Start single, focused on its only panel, then split.
+      const ids = ['ws-1', 'p-1', 'p-2']
+      let i = 0
+      const single = createWorkspace(emptyState, 'my-project', () => ids[i++])
+
+      const next = splitPanel(single, 'ws-1', 'horizontal', () => ids[i++])
+
+      expect(activePanelOf(next, 'ws-1')).toBe('p-2')
+    })
+
+    it('closing the active panel hands focus to the survivor', () => {
+      const state = splitState()
+      // p-2 is active after the split (above); close it -> p-1 becomes active.
+      const focused = focusPanel(state, 'ws-1', 'p-2')
+
+      const next = closePanel(focused, 'ws-1', 'p-2')
+
+      expect(activePanelOf(next, 'ws-1')).toBe('p-1')
+    })
+
+    it('closing a non-active panel leaves focus where it was', () => {
+      const state = splitState()
+      // p-2 active after split; close p-1 -> p-2 still active.
+      const focused = focusPanel(state, 'ws-1', 'p-2')
+
+      const next = closePanel(focused, 'ws-1', 'p-1')
+
+      expect(activePanelOf(next, 'ws-1')).toBe('p-2')
+    })
+
+    it('deleting a workspace drops its active-panel entry', () => {
+      const state = splitState()
+
+      const next = deleteWorkspace(state, 'ws-1')
+
+      expect(next.activePanelId['ws-1']).toBeUndefined()
     })
   })
 })

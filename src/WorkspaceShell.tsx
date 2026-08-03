@@ -28,10 +28,13 @@ import {
   splitPanel,
   resizePanel,
   closePanel,
+  focusPanel,
+  activePanelOf,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
 import { createLayout, type Orientation } from './PaneLayout'
+import { matchShortcut } from './shortcuts'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -142,11 +145,13 @@ type PanelAreaProps = {
   panelIds: string[]
   orientation: Orientation
   ratio: number
+  activePanelId: string | null
   onResize: (ratio: number, container: { width: number; height: number }) => void
   onClose: (panelId: string) => void
+  onFocusPanel: (panelId: string) => void
 }
 
-function PanelArea({ id, panelIds, orientation, ratio, onResize, onClose }: PanelAreaProps) {
+function PanelArea({ id, panelIds, orientation, ratio, activePanelId, onResize, onClose, onFocusPanel }: PanelAreaProps) {
   const surfacesRef = useRef<HTMLDivElement | null>(null)
   const horizontal = orientation === 'horizontal'
   const isSplit = panelIds.length > 1
@@ -183,7 +188,13 @@ function PanelArea({ id, panelIds, orientation, ratio, onResize, onClose }: Pane
       className={`panel-surfaces ${isSplit ? `split-${orientation}` : ''}`}
       data-testid={`panel-surfaces-${id}`}
     >
-      <div key={panelIds[0]} className="surface" style={{ flex: firstFlex }}>
+      <div
+        key={panelIds[0]}
+        className={`surface ${activePanelId === panelIds[0] ? 'is-active' : ''}`}
+        data-panel-id={panelIds[0]}
+        style={{ flex: firstFlex }}
+        onClick={() => onFocusPanel(panelIds[0])}
+      >
         <TerminalSurface />
         {isSplit && <PanelCloseButton onClose={() => onClose(panelIds[0])} which="first" />}
       </div>
@@ -195,7 +206,13 @@ function PanelArea({ id, panelIds, orientation, ratio, onResize, onClose }: Pane
             aria-label="Resize panels"
             onPointerDown={onPointerDown}
           />
-          <div key={panelIds[1]} className="surface" style={{ flex: secondFlex }}>
+          <div
+            key={panelIds[1]}
+            className={`surface ${activePanelId === panelIds[1] ? 'is-active' : ''}`}
+            data-panel-id={panelIds[1]}
+            style={{ flex: secondFlex }}
+            onClick={() => onFocusPanel(panelIds[1])}
+          >
             <TerminalSurface />
             <PanelCloseButton onClose={() => onClose(panelIds[1])} which="second" />
           </div>
@@ -236,6 +253,12 @@ export function WorkspaceShell() {
   useEffect(() => {
     void invoke<{ workspaces: Workspace[] }>('load_workspaces').then((data) => {
       const workspaces = data.workspaces ?? []
+      // Each open workspace starts with one fresh panel (one live shell), and
+      // that seed panel is focused from the start (Phase 11 / #12). Both are
+      // runtime-only and re-seeded on every reload (persistence is story 37).
+      const panelIds = Object.fromEntries(
+        workspaces.map((w) => [w.id, [crypto.randomUUID()]]),
+      )
       setState({
         workspaces,
         activeId: workspaces[0]?.id ?? null,
@@ -244,9 +267,10 @@ export function WorkspaceShell() {
         // Panel layout is runtime-only (Phase 9): each workspace starts single.
         // Re-seeded on every reload (persistence is story 37).
         layouts: Object.fromEntries(workspaces.map((w) => [w.id, createLayout()])),
-        // Each open workspace starts with one fresh panel (one live shell).
-        // Re-seeded on every reload (persistence is story 37).
-        panelIds: Object.fromEntries(workspaces.map((w) => [w.id, [crypto.randomUUID()]])),
+        panelIds,
+        activePanelId: Object.fromEntries(
+          workspaces.map((w) => [w.id, (panelIds[w.id] ?? [])[0]]),
+        ),
       })
     })
   }, [])
@@ -267,6 +291,78 @@ export function WorkspaceShell() {
     setState(next)
     void invoke('save_workspaces', { workspaces: next.workspaces })
   }
+
+  // --- Keyboard shortcuts (Phase 11 / #12, story 33) -----------------------
+  //
+  // A window-level keydown listener in the CAPTURE phase so umux sees the key
+  // before xterm's hidden textarea does — otherwise the shell would swallow
+  // our combos. matchShortcut returns null for anything that isn't one of our
+  // Ctrl+Shift combos (and while editing text), so plain shell shortcuts
+  // (Ctrl+C/D/Z/...) fall through untouched (AC3). The effect re-binds on
+  // every state change so the dispatchers always see fresh state.
+  const defaultWorkspaceName = (s: WorkspaceState): string => {
+    const taken = new Set(s.workspaces.map((w) => w.name))
+    let n = s.workspaces.length + 1
+    let name = `Workspace ${n}`
+    while (taken.has(name)) name = `Workspace ${++n}`
+    return name
+  }
+
+  const cycleWorkspace = (dir: 1 | -1): WorkspaceState => {
+    const ids = state.workspaces.map((w) => w.id)
+    if (ids.length < 2) return state
+    const idx = state.activeId != null ? ids.indexOf(state.activeId) : -1
+    const nextIdx = (idx + dir + ids.length) % ids.length
+    return openWorkspace(state, ids[nextIdx])
+  }
+
+  const dispatchShortcut = (cmd: ReturnType<typeof matchShortcut>) => {
+    if (cmd == null) return
+    const activeId = state.activeId
+    switch (cmd) {
+      case 'new-workspace':
+        persist(createWorkspace(state, defaultWorkspaceName(state)))
+        break
+      case 'next-workspace':
+        setState(cycleWorkspace(1))
+        break
+      case 'prev-workspace':
+        setState(cycleWorkspace(-1))
+        break
+      case 'split-horizontal':
+        if (activeId != null) setState(splitPanel(state, activeId, 'horizontal'))
+        break
+      case 'split-vertical':
+        if (activeId != null) setState(splitPanel(state, activeId, 'vertical'))
+        break
+      case 'close-panel': {
+        if (activeId == null) break
+        const panel = activePanelOf(state, activeId)
+        if (panel != null) setState(closePanel(state, activeId, panel))
+        break
+      }
+    }
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const cmd = matchShortcut({
+        key: e.key,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+        activeTag: document.activeElement?.tagName ?? null,
+      })
+      if (cmd == null) return
+      e.preventDefault()
+      dispatchShortcut(cmd)
+    }
+    // Capture phase: intercept before xterm's textarea handles the key.
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state])
 
   const startCreate = () => {
     setCreating(true)
@@ -485,10 +581,14 @@ export function WorkspaceShell() {
                   panelIds={panelIds}
                   orientation={splitOrientation}
                   ratio={layout.kind === 'split' ? layout.ratio : 0.5}
+                  activePanelId={activePanelOf(state, ws.id)}
                   onResize={(ratio, container) =>
                     setState(resizePanel(state, ws.id, ratio, container))
                   }
                   onClose={(panelId) => closeWorkspacePanel(ws.id, panelId)}
+                  onFocusPanel={(panelId) =>
+                    setState(focusPanel(state, ws.id, panelId))
+                  }
                 />
               </div>
             )

@@ -416,4 +416,113 @@ describe('WorkspaceShell', () => {
       expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe(undefined)
     })
   })
+
+  // Phase 11 / #12 — focus & keyboard shortcuts (stories 33/34).
+  describe('focus & keyboard shortcuts', () => {
+    const seedOne = () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        return Promise.resolve(undefined)
+      })
+    }
+
+    // Helper: wait for mount, split horizontally, return the two surface
+    // wrappers (the .surface divs that carry data-panel-id).
+    const splitIntoTwo = async () => {
+      seedOne()
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      await screen.findAllByTestId('terminal-surface')
+      return container.querySelectorAll<HTMLElement>('[data-panel-id]')
+    }
+
+    const press = (key: string) =>
+      fireEvent.keyDown(window, {
+        key,
+        ctrlKey: true,
+        shiftKey: true,
+        altKey: false,
+        metaKey: false,
+      })
+
+    // AC1 / story 34 — clicking a panel moves focus to it and the active
+    // panel is visually indicated (the .is-active class on its surface).
+    it('marks the clicked surface as the active panel', async () => {
+      const surfaces = await splitIntoTwo()
+      expect(surfaces).toHaveLength(2)
+
+      // After a split the newly added (second) panel is active. Click the
+      // first surface to move focus there.
+      expect(surfaces[1].classList.contains('is-active')).toBe(true)
+      fireEvent.click(surfaces[0])
+
+      expect(surfaces[0].classList.contains('is-active')).toBe(true)
+      expect(surfaces[1].classList.contains('is-active')).toBe(false)
+    })
+
+    // AC2 — Ctrl+Shift+N creates a new workspace (with a default name, no
+    // prompt — the whole point of a shortcut is speed; rename later).
+    it('Ctrl+Shift+N creates a new workspace', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      expect(document.querySelectorAll('.workspace-row')).toHaveLength(1)
+
+      press('n')
+
+      expect(await screen.findAllByText('alpha')).toHaveLength(1)
+      expect(document.querySelectorAll('.workspace-row')).toHaveLength(2)
+    })
+
+    // AC2 — Ctrl+Shift+W closes the focused panel of the active workspace.
+    it('Ctrl+Shift+W closes the active panel of a split', async () => {
+      await splitIntoTwo()
+      expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2)
+
+      press('w')
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(1)
+    })
+
+    // AC2 — Ctrl+Shift+H splits the active workspace horizontally.
+    it('Ctrl+Shift+H splits the active workspace', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      expect(screen.getAllByTestId('terminal-surface')).toHaveLength(1)
+
+      press('h')
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
+      expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe('horizontal')
+    })
+
+    // AC2 — Ctrl+Shift+→ cycles activation to the next workspace.
+    it('Ctrl+Shift+ArrowRight switches to the next workspace', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              { id: 'ws-1', name: 'alpha' },
+              { id: 'ws-2', name: 'beta' },
+            ],
+          })
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      // alpha is active initially; its panel is visible, beta's is hidden.
+      expect(screen.getByTestId('panel-ws-1').className).not.toContain('is-hidden')
+      expect(screen.getByTestId('panel-ws-2').className).toContain('is-hidden')
+
+      press('ArrowRight')
+
+      // After cycling, beta is active: its panel shows, alpha's hides.
+      expect(screen.getByTestId('panel-ws-2').className).not.toContain('is-hidden')
+      expect(screen.getByTestId('panel-ws-1').className).toContain('is-hidden')
+    })
+  })
 })
