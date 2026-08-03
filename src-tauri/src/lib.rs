@@ -24,15 +24,28 @@ fn pty_open(
     app: AppHandle,
     state: State<'_, Mutex<PtyService>>,
     shell: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<u32, String> {
     // Default to the user's $SHELL, falling back to /bin/sh; an explicit
     // `shell` override (from a future WorkspaceStore config) wins.
     let shell = resolve_shell(shell.as_deref());
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
+    // Open the PTY at the renderer's measured size from the very first moment.
+    // If the frontend hasn't measured yet (or sends nothing), fall back to
+    // 80x24 — but the normal path forwards the real cols/rows so the shell's
+    // idea of the line width matches xterm immediately. Without this the PTY
+    // opens at 80x24 and the first `fit()` doesn't change xterm's size (so
+    // `onResize` never fires, `pty_resize` never lands), leaving the shell and
+    // xterm disagreed about width — long lines overwrite the prompt and
+    // backspace scrambles the line.
+    let cols = cols.unwrap_or(80);
+    let rows = rows.unwrap_or(24);
+
     let (handle, rx) = {
         let mut svc = state.lock().map_err(|e| e.to_string())?;
-        svc.open(&shell, cwd, 80, 24).map_err(|e| e.to_string())?
+        svc.open(&shell, cwd, cols, rows).map_err(|e| e.to_string())?
     };
     let id = handle.id;
 

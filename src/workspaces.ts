@@ -5,6 +5,8 @@
 // WorkspaceStore; this module is fed by it on startup and triggers a save on
 // every mutation. Trivially unit-testable.
 
+import { createLayout, split, type PaneLayout, type Orientation } from './PaneLayout'
+
 // Forward-compat slot for Phase 9 (split into panels). `workingDirectory` and
 // `sshTarget` are optional: absent = local panel in the default cwd. Kept
 // byte-identical to the Rust `Panel` in workspace_store.rs.
@@ -23,15 +25,27 @@ export type WorkspaceState = {
   // have a live, mounted panel — i.e. an open shell. A workspace not in this
   // list is "closed": its definition stays but its panel (and shell) is gone.
   openIds: string[]
+  // Runtime-only (NOT persisted): per-workspace panel layout (Phase 9 / #10).
+  // Absent entry defaults to single. Re-seeded single on reload (story 37 is
+  // the persistence phase).
+  layouts: Record<string, PaneLayout>
 }
 
 export const emptyState: WorkspaceState = {
   workspaces: [],
   activeId: null,
   openIds: [],
+  layouts: {},
 }
 
 const defaultGenId = (): string => crypto.randomUUID()
+
+/// Return a shallow copy of `map` without `key`. Pure helper for runtime-only
+/// records keyed by workspace id.
+function removeKey<V>(map: Record<string, V>, key: string): Record<string, V> {
+  const { [key]: _removed, ...rest } = map
+  return rest
+}
 
 export function createWorkspace(
   state: WorkspaceState,
@@ -43,6 +57,7 @@ export function createWorkspace(
     workspaces: [...state.workspaces, workspace],
     activeId: workspace.id,
     openIds: [...state.openIds, workspace.id],
+    layouts: { ...state.layouts, [workspace.id]: createLayout() },
   }
 }
 
@@ -104,6 +119,7 @@ export function deleteWorkspace(
     workspaces: state.workspaces.filter((w) => w.id !== id),
     activeId: nextActive,
     openIds: state.openIds.filter((openId) => openId !== id),
+    layouts: removeKey(state.layouts, id),
   }
 }
 
@@ -154,4 +170,20 @@ export function moveWorkspace(
   const clamped = Math.max(0, Math.min(newIndex, next.length))
   next.splice(clamped, 0, moved)
   return { ...state, workspaces: next }
+}
+
+/// Split the active area of workspace `id` in `orientation` (Phase 9 / #10,
+/// stories 15–17). No-op (returns `state` unchanged) when the id is unknown or
+/// the workspace is already split — two panels is the maximum (story 16).
+/// Runtime-only: not persisted (story 37).
+export function splitPanel(
+  state: WorkspaceState,
+  id: string,
+  orientation: Orientation,
+): WorkspaceState {
+  if (!state.workspaces.some((w) => w.id === id)) return state
+  const current = state.layouts[id] ?? createLayout()
+  const next = split(current, orientation)
+  if (next == null) return state
+  return { ...state, layouts: { ...state.layouts, [id]: next } }
 }

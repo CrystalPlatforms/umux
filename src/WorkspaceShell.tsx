@@ -25,9 +25,11 @@ import {
   closeWorkspace,
   deleteWorkspace,
   moveWorkspace,
+  splitPanel,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
+import { createLayout, type Orientation } from './PaneLayout'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -96,6 +98,26 @@ function SidebarExpandIcon({ className }: IconProps) {
   )
 }
 
+function SplitHorizontalIcon({ className }: IconProps) {
+  // A panel split into left | right by a vertical divider.
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M12 3v18" />
+    </svg>
+  )
+}
+
+function SplitVerticalIcon({ className }: IconProps) {
+  // A panel split into top / bottom by a horizontal divider.
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M3 12h18" />
+    </svg>
+  )
+}
+
 // --- Context menu state ------------------------------------------------------
 
 type MenuState = {
@@ -123,6 +145,9 @@ export function WorkspaceShell() {
         activeId: workspaces[0]?.id ?? null,
         // On startup every defined workspace is open (has a live panel).
         openIds: workspaces.map((w) => w.id),
+        // Panel layout is runtime-only (Phase 9): each workspace starts single.
+        // Re-seeded on every reload (persistence is story 37).
+        layouts: Object.fromEntries(workspaces.map((w) => [w.id, createLayout()])),
       })
     })
   }, [])
@@ -181,9 +206,23 @@ export function WorkspaceShell() {
     persist(deleteWorkspace(state, id))
   }
 
+  const splitFromMenu = (orientation: Orientation) => {
+    const id = menu?.workspaceId
+    setMenu(null)
+    if (id == null) return
+    splitWorkspace(id, orientation)
+  }
+
   const minimize = () => { void getCurrentWindow().minimize() }
   const toggleMaximize = () => { void getCurrentWindow().toggleMaximize() }
   const close = () => { void getCurrentWindow().close() }
+
+  // Split a workspace's area (Phase 9 / #10). Runtime-only state — not
+  // persisted (story 37), so no save_workspaces here. splitPanel is a no-op
+  // past two panels; the menu items are also disabled to signal the cap.
+  const splitWorkspace = (id: string, orientation: Orientation) => {
+    setState(splitPanel(state, id, orientation))
+  }
 
   return (
     <div className="shell">
@@ -318,15 +357,35 @@ export function WorkspaceShell() {
       <main className="main">
         {state.workspaces
           .filter((ws) => state.openIds.includes(ws.id))
-          .map((ws) => (
-            <div
-              key={ws.id}
-              data-testid={`panel-${ws.id}`}
-              className={`panel ${ws.id === state.activeId ? '' : 'is-hidden'}`}
-            >
-              <TerminalSurface />
-            </div>
-          ))}
+          .map((ws) => {
+            const layout = state.layouts[ws.id] ?? createLayout()
+            const splitOrientation =
+              layout.kind === 'split' ? layout.orientation : null
+            const isActive = ws.id === state.activeId
+            return (
+              <div
+                key={ws.id}
+                data-testid={`panel-${ws.id}`}
+                className={`panel ${isActive ? '' : 'is-hidden'}`}
+                data-split-orientation={splitOrientation ?? undefined}
+              >
+                <div
+                  className={`panel-surfaces ${
+                    splitOrientation != null ? `split-${splitOrientation}` : ''
+                  }`}
+                >
+                  {splitOrientation == null ? (
+                    <TerminalSurface />
+                  ) : (
+                    <>
+                      <TerminalSurface />
+                      <TerminalSurface />
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })}
       </main>
 
       {menu && (
@@ -339,19 +398,42 @@ export function WorkspaceShell() {
             <PlusIcon />
             New workspace
           </button>
-          {menu.workspaceId && (
-            <>
-              <div className="menu-separator" />
-              <button
-                className="menu-item danger"
-                role="menuitem"
-                onClick={deleteFromMenu}
-              >
-                <CloseIcon />
-                Delete workspace
-              </button>
-            </>
-          )}
+          {menu.workspaceId && (() => {
+            const isSplit =
+              state.layouts[menu.workspaceId!]?.kind === 'split'
+            return (
+              <>
+                <div className="menu-separator" />
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  disabled={isSplit}
+                  onClick={() => splitFromMenu('horizontal')}
+                >
+                  <SplitHorizontalIcon />
+                  Split horizontal
+                </button>
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  disabled={isSplit}
+                  onClick={() => splitFromMenu('vertical')}
+                >
+                  <SplitVerticalIcon />
+                  Split vertical
+                </button>
+                <div className="menu-separator" />
+                <button
+                  className="menu-item danger"
+                  role="menuitem"
+                  onClick={deleteFromMenu}
+                >
+                  <CloseIcon />
+                  Delete workspace
+                </button>
+              </>
+            )
+          })()}
           {menu.header && (
             <>
               <div className="menu-separator" />
