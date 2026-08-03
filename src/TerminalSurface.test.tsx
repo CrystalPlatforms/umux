@@ -45,6 +45,10 @@ const disposeMock = vi.fn()
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
+    // Measured geometry, as the real Terminal exposes after fit(). The default
+    // 80x24 mirrors a fresh xterm before fit; tests that care can override.
+    cols = 80
+    rows = 24
     constructor(_opts?: unknown) {}
     loadAddon() {}
     open() {}
@@ -75,7 +79,14 @@ describe('TerminalSurface', () => {
   it('opens a PTY on mount', async () => {
     render(<TerminalSurface />)
 
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('pty_open'))
+    // Opened at xterm's measured size so the shell agrees with the renderer
+    // from the first byte (cols/rows forwarded through pty_open).
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('pty_open', {
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+      }),
+    )
   })
 
   it('writes matching-id PTY output to xterm', async () => {
@@ -115,7 +126,12 @@ describe('TerminalSurface', () => {
 
   it('closes the PTY and disposes xterm on unmount', async () => {
     const { unmount } = render(<TerminalSurface />)
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('pty_open'))
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('pty_open', {
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+      }),
+    )
 
     unmount()
 

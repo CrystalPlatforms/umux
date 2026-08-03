@@ -28,6 +28,7 @@ import {
   closeWorkspace,
   openWorkspace,
   moveWorkspace,
+  splitPanel,
 } from './workspaces'
 
 describe('workspace state', () => {
@@ -56,6 +57,60 @@ describe('workspace state', () => {
       const next = createWorkspace(emptyState, 'my-project', () => 'ws-1')
 
       expect(next.workspaces[0].panels).toEqual([])
+    })
+
+    // Phase 9 / #10 — a fresh workspace starts with a single-panel layout so
+    // the shell area is filled immediately. Runtime-only (NOT persisted, like
+    // openIds): a reload re-seeds single (persistence is story 37).
+    it('seeds a single-panel layout for the new workspace', () => {
+      const next = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(next.layouts['ws-1']).toEqual({ kind: 'single' })
+    })
+  })
+
+  describe('splitPanel', () => {
+    // T-AC story 15/17 — splitting a single workspace sets a split layout.
+    it('splits a workspace into a horizontal split layout', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      const next = splitPanel(state, 'ws-1', 'horizontal')
+
+      expect(next.layouts['ws-1']).toEqual({
+        kind: 'split',
+        orientation: 'horizontal',
+      })
+    })
+
+    it('splits a workspace into a vertical split layout', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      const next = splitPanel(state, 'ws-1', 'vertical')
+
+      expect(next.layouts['ws-1']).toEqual({
+        kind: 'split',
+        orientation: 'vertical',
+      })
+    })
+
+    // T-AC story 16 — two-panel max: a second split is rejected (no-op).
+    it('is a no-op when the workspace is already split', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      const once = splitPanel(state, 'ws-1', 'horizontal')
+
+      const twice = splitPanel(once, 'ws-1', 'vertical')
+
+      expect(twice).toBe(once)
+      expect(twice.layouts['ws-1']).toEqual({
+        kind: 'split',
+        orientation: 'horizontal',
+      })
+    })
+
+    it('is a no-op for an unknown workspace id', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(splitPanel(state, 'nope', 'horizontal')).toBe(state)
     })
   })
 

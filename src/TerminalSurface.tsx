@@ -54,7 +54,13 @@ export function TerminalSurface() {
       writeIfOurs(event.payload)
     })
 
-    const opened = invoke<number>('pty_open').then((id) => {
+    // Open the PTY at xterm's measured size so the shell agrees with the
+    // renderer from the first byte (see lib.rs pty_open). term.cols/rows are
+    // already set by the fit() above.
+    const opened = invoke<number>('pty_open', {
+      cols: term.cols,
+      rows: term.rows,
+    }).then((id) => {
       if (disposed) {
         void invoke('pty_close', { id })
         return
@@ -81,9 +87,18 @@ export function TerminalSurface() {
     const onWindowResize = () => fit.fit()
     window.addEventListener('resize', onWindowResize)
 
+    // Re-fit whenever the container itself resizes — most importantly when the
+    // panel is split (or later, when the divider is dragged): the container
+    // shrinks/grows inside the window, so the window 'resize' event never
+    // fires. Without this xterm keeps the old cols/rows, so a split panel
+    // wraps at the wrong width and a vertical split miscounts rows.
+    const resizeObserver = new ResizeObserver(() => fit.fit())
+    resizeObserver.observe(container)
+
     return () => {
       disposed = true
       window.removeEventListener('resize', onWindowResize)
+      resizeObserver.disconnect()
       void unlistenP.then((fn) => fn())
       void opened.then(() => {
         if (panelId != null) void invoke('pty_close', { id: panelId })
@@ -95,7 +110,7 @@ export function TerminalSurface() {
   return (
     <div
       ref={containerRef}
-      style={{ width: '100%', height: '100vh', background: '#000' }}
+      style={{ width: '100%', height: '100%', background: '#000' }}
     />
   )
 }

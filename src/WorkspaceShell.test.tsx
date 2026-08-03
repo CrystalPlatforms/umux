@@ -313,4 +313,79 @@ describe('WorkspaceShell', () => {
       }),
     )
   })
+
+  // Phase 9 / #10 — split into two panels (stories 15–17). Split actions live
+  // in the workspace's right-click context menu, not a persistent toolbar.
+  describe('panel split', () => {
+    const seedOne = () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        return Promise.resolve(undefined)
+      })
+    }
+
+    // Right-click a workspace row to open its context menu.
+    const openRowMenu = () =>
+      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+
+    it('mounts a single terminal surface per open workspace', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      expect(screen.getAllByTestId('terminal-surface')).toHaveLength(1)
+    })
+
+    it('offers the split actions in the workspace context menu', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      openRowMenu()
+
+      expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeInTheDocument()
+      expect(screen.getByRole('menuitem', { name: /split vertical/i })).toBeInTheDocument()
+    })
+
+    it('splits horizontally into two independent surfaces side by side', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
+      expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe('horizontal')
+    })
+
+    it('splits vertically into two stacked surfaces', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split vertical/i }))
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
+      expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe('vertical')
+    })
+
+    // AC story 16 — two-panel cap: the split actions are disabled once split.
+    it('disables both split actions once the workspace is already split', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      // First split applies and closes the menu.
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+
+      // Reopen — both actions must now be disabled (cap reached).
+      openRowMenu()
+      expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeDisabled()
+      expect(screen.getByRole('menuitem', { name: /split vertical/i })).toBeDisabled()
+    })
+  })
 })
