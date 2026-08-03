@@ -13,7 +13,7 @@
 // UI glue verified by Adam on Ubuntu/Wayland; the testable core lives in
 // ./workspaces (pure state) and the Rust WorkspaceStore (persistence).
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { TerminalSurface } from './TerminalSurface'
@@ -26,6 +26,8 @@ import {
   deleteWorkspace,
   moveWorkspace,
   splitPanel,
+  resizePanel,
+  closePanel,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
@@ -127,6 +129,100 @@ type MenuState = {
   workspaceId?: string
 } | null
 
+// PanelArea — one or two terminal surfaces under a single parent, so a panel
+// keeps its shell across layout changes (Phase 10 / #11). Each surface is keyed
+// by its stable panel id: splitting adds a keyed surface (the original keeps
+// its shell), closing one drops its key (the survivor stays mounted under this
+// same parent instead of remounting into a blank terminal).
+//
+// With two panels a draggable divider is rendered between them; the split ratio
+// (in workspace state) sizes the surfaces. Pointer events drive the drag.
+type PanelAreaProps = {
+  id: string
+  panelIds: string[]
+  orientation: Orientation
+  ratio: number
+  onResize: (ratio: number, container: { width: number; height: number }) => void
+  onClose: (panelId: string) => void
+}
+
+function PanelArea({ id, panelIds, orientation, ratio, onResize, onClose }: PanelAreaProps) {
+  const surfacesRef = useRef<HTMLDivElement | null>(null)
+  const horizontal = orientation === 'horizontal'
+  const isSplit = panelIds.length > 1
+
+  // flex-grow shares the row/column between the two surfaces in proportion to
+  // `ratio`; the fixed-width divider sits between them. A single panel just
+  // takes the whole area.
+  const firstFlex = isSplit ? `${ratio} 1 0%` : '1 1 100%'
+  const secondFlex = `${1 - ratio} 1 0%`
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault()
+    const container = surfacesRef.current
+    if (container == null) return
+    const rect = container.getBoundingClientRect()
+
+    const onMove = (ev: PointerEvent) => {
+      const next = horizontal
+        ? (ev.clientX - rect.left) / rect.width
+        : (ev.clientY - rect.top) / rect.height
+      onResize(next, { width: rect.width, height: rect.height })
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  return (
+    <div
+      ref={surfacesRef}
+      className={`panel-surfaces ${isSplit ? `split-${orientation}` : ''}`}
+      data-testid={`panel-surfaces-${id}`}
+    >
+      <div key={panelIds[0]} className="surface" style={{ flex: firstFlex }}>
+        <TerminalSurface />
+        {isSplit && <PanelCloseButton onClose={() => onClose(panelIds[0])} which="first" />}
+      </div>
+      {isSplit && (
+        <>
+          <div
+            className={`divider divider-${orientation}`}
+            role="separator"
+            aria-label="Resize panels"
+            onPointerDown={onPointerDown}
+          />
+          <div key={panelIds[1]} className="surface" style={{ flex: secondFlex }}>
+            <TerminalSurface />
+            <PanelCloseButton onClose={() => onClose(panelIds[1])} which="second" />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+type PanelCloseButtonProps = { onClose: () => void; which: 'first' | 'second' }
+
+function PanelCloseButton({ onClose, which }: PanelCloseButtonProps) {
+  return (
+    <button
+      className="panel-close"
+      aria-label={`Close panel (${which})`}
+      title="Close panel"
+      onClick={(e) => {
+        e.stopPropagation()
+        onClose()
+      }}
+    >
+      <CloseIcon />
+    </button>
+  )
+}
+
 export function WorkspaceShell() {
   const [state, setState] = useState<WorkspaceState>(emptyState)
   const [creating, setCreating] = useState(false)
@@ -148,6 +244,9 @@ export function WorkspaceShell() {
         // Panel layout is runtime-only (Phase 9): each workspace starts single.
         // Re-seeded on every reload (persistence is story 37).
         layouts: Object.fromEntries(workspaces.map((w) => [w.id, createLayout()])),
+        // Each open workspace starts with one fresh panel (one live shell).
+        // Re-seeded on every reload (persistence is story 37).
+        panelIds: Object.fromEntries(workspaces.map((w) => [w.id, [crypto.randomUUID()]])),
       })
     })
   }, [])
@@ -222,6 +321,18 @@ export function WorkspaceShell() {
   // past two panels; the menu items are also disabled to signal the cap.
   const splitWorkspace = (id: string, orientation: Orientation) => {
     setState(splitPanel(state, id, orientation))
+  }
+
+  // Drag the divider of a split workspace (Phase 10 / #11, story 18). The
+  // ratio is the pointer's position along the split axis, clamped to the
+  // minimum panel size by resizePanel (story 19). Pointer events drive the
+  // whole drag — capture on pointerdown, track on pointermove, release on
+  // pointerup — so the divider can be dragged beyond its own thin hit area.
+  //
+  // The drag handler lives in <SplitPanels> (one per workspace) so its
+  // container ref is scoped to a single .panel-surfaces element.
+  const closeWorkspacePanel = (id: string, panelId: string) => {
+    setState(closePanel(state, id, panelId))
   }
 
   return (
@@ -359,30 +470,26 @@ export function WorkspaceShell() {
           .filter((ws) => state.openIds.includes(ws.id))
           .map((ws) => {
             const layout = state.layouts[ws.id] ?? createLayout()
-            const splitOrientation =
-              layout.kind === 'split' ? layout.orientation : null
             const isActive = ws.id === state.activeId
+            const splitOrientation = layout.kind === 'split' ? layout.orientation : 'horizontal'
+            const panelIds = state.panelIds[ws.id] ?? [crypto.randomUUID()]
             return (
               <div
                 key={ws.id}
                 data-testid={`panel-${ws.id}`}
                 className={`panel ${isActive ? '' : 'is-hidden'}`}
-                data-split-orientation={splitOrientation ?? undefined}
+                data-split-orientation={layout.kind === 'split' ? layout.orientation : undefined}
               >
-                <div
-                  className={`panel-surfaces ${
-                    splitOrientation != null ? `split-${splitOrientation}` : ''
-                  }`}
-                >
-                  {splitOrientation == null ? (
-                    <TerminalSurface />
-                  ) : (
-                    <>
-                      <TerminalSurface />
-                      <TerminalSurface />
-                    </>
-                  )}
-                </div>
+                <PanelArea
+                  id={ws.id}
+                  panelIds={panelIds}
+                  orientation={splitOrientation}
+                  ratio={layout.kind === 'split' ? layout.ratio : 0.5}
+                  onResize={(ratio, container) =>
+                    setState(resizePanel(state, ws.id, ratio, container))
+                  }
+                  onClose={(panelId) => closeWorkspacePanel(ws.id, panelId)}
+                />
               </div>
             )
           })}

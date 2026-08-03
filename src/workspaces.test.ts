@@ -29,6 +29,8 @@ import {
   openWorkspace,
   moveWorkspace,
   splitPanel,
+  resizePanel,
+  closePanel,
 } from './workspaces'
 
 describe('workspace state', () => {
@@ -79,6 +81,7 @@ describe('workspace state', () => {
       expect(next.layouts['ws-1']).toEqual({
         kind: 'split',
         orientation: 'horizontal',
+        ratio: 0.5,
       })
     })
 
@@ -90,6 +93,7 @@ describe('workspace state', () => {
       expect(next.layouts['ws-1']).toEqual({
         kind: 'split',
         orientation: 'vertical',
+        ratio: 0.5,
       })
     })
 
@@ -104,6 +108,7 @@ describe('workspace state', () => {
       expect(twice.layouts['ws-1']).toEqual({
         kind: 'split',
         orientation: 'horizontal',
+        ratio: 0.5,
       })
     })
 
@@ -111,6 +116,100 @@ describe('workspace state', () => {
       const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
 
       expect(splitPanel(state, 'nope', 'horizontal')).toBe(state)
+    })
+  })
+
+  describe('panel identity (split keeps shells, close keeps the survivor)', () => {
+    it('seeds one stable panel id when a workspace is created', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(state.panelIds['ws-1']).toHaveLength(1)
+    })
+
+    it('keeps the existing panel id and adds a new one on split', () => {
+      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      const firstPanel = state.panelIds['ws-1'][0]
+      // Force deterministic ids for the second panel: workspace id is ws-1, so
+      // the next genId call here produces the second panel id.
+      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
+
+      expect(state.panelIds['ws-1']).toEqual([firstPanel, 'panel-B'])
+    })
+
+    it('keeps the surviving panel id when one panel is closed', () => {
+      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
+      const [survivor] = state.panelIds['ws-1']
+
+      // Close the second panel -> only the survivor remains.
+      const next = closePanel(state, 'ws-1', 'panel-B')
+
+      expect(next.panelIds['ws-1']).toEqual([survivor])
+      expect(next.layouts['ws-1']).toEqual({ kind: 'single' })
+    })
+
+    it('keeps the other panel when the first one is closed', () => {
+      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      const firstPanel = state.panelIds['ws-1'][0]
+      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
+
+      const next = closePanel(state, 'ws-1', firstPanel)
+
+      expect(next.panelIds['ws-1']).toEqual(['panel-B'])
+    })
+  })
+
+  describe('resizePanel', () => {
+    it('updates the split ratio, clamped by the container and minimum', () => {
+      const state = splitPanel(
+        createWorkspace(emptyState, 'my-project', () => 'ws-1'),
+        'ws-1',
+        'horizontal',
+      )
+
+      const next = resizePanel(state, 'ws-1', 0.25, { width: 100, height: 50 }, 10)
+
+      expect(next.layouts['ws-1']).toEqual({
+        kind: 'split',
+        orientation: 'horizontal',
+        ratio: 0.25,
+      })
+    })
+
+    it('is a no-op on a single (un-split) workspace', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      // single layout has no divider — resize returns the same state object.
+      expect(resizePanel(state, 'ws-1', 0.3, { width: 100, height: 50 })).toBe(state)
+    })
+
+    it('is a no-op for an unknown workspace id', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(resizePanel(state, 'nope', 0.3, { width: 100, height: 50 })).toBe(state)
+    })
+  })
+
+  describe('closePanel', () => {
+    it('collapses a split workspace back to a single panel', () => {
+      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
+
+      const next = closePanel(state, 'ws-1', 'panel-B')
+
+      expect(next.layouts['ws-1']).toEqual({ kind: 'single' })
+    })
+
+    it('is a no-op when the workspace only has one panel', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(closePanel(state, 'ws-1', state.panelIds['ws-1'][0])).toBe(state)
+    })
+
+    it('is a no-op for an unknown workspace id', () => {
+      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+
+      expect(closePanel(state, 'nope', 'whatever')).toBe(state)
     })
   })
 

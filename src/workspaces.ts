@@ -5,7 +5,7 @@
 // WorkspaceStore; this module is fed by it on startup and triggers a save on
 // every mutation. Trivially unit-testable.
 
-import { createLayout, split, type PaneLayout, type Orientation } from './PaneLayout'
+import { createLayout, split, resize, closePanel as closePanelLayout, type PaneLayout, type Orientation, type Container } from './PaneLayout'
 
 // Forward-compat slot for Phase 9 (split into panels). `workingDirectory` and
 // `sshTarget` are optional: absent = local panel in the default cwd. Kept
@@ -29,6 +29,12 @@ export type WorkspaceState = {
   // Absent entry defaults to single. Re-seeded single on reload (story 37 is
   // the persistence phase).
   layouts: Record<string, PaneLayout>
+  // Runtime-only (NOT persisted): the ordered, stable panel ids per workspace
+  // (1 or 2). These are the React keys for the terminal surfaces — they let a
+  // panel keep its shell across layout changes (split adds one; close drops
+  // one) instead of remounting into a blank terminal. Re-seeded to a single
+  // fresh panel on reload (story 37 is the persistence phase).
+  panelIds: Record<string, string[]>
 }
 
 export const emptyState: WorkspaceState = {
@@ -36,6 +42,7 @@ export const emptyState: WorkspaceState = {
   activeId: null,
   openIds: [],
   layouts: {},
+  panelIds: {},
 }
 
 const defaultGenId = (): string => crypto.randomUUID()
@@ -58,6 +65,7 @@ export function createWorkspace(
     activeId: workspace.id,
     openIds: [...state.openIds, workspace.id],
     layouts: { ...state.layouts, [workspace.id]: createLayout() },
+    panelIds: { ...state.panelIds, [workspace.id]: [genId()] },
   }
 }
 
@@ -120,6 +128,7 @@ export function deleteWorkspace(
     activeId: nextActive,
     openIds: state.openIds.filter((openId) => openId !== id),
     layouts: removeKey(state.layouts, id),
+    panelIds: removeKey(state.panelIds, id),
   }
 }
 
@@ -173,17 +182,65 @@ export function moveWorkspace(
 }
 
 /// Split the active area of workspace `id` in `orientation` (Phase 9 / #10,
-/// stories 15–17). No-op (returns `state` unchanged) when the id is unknown or
-/// the workspace is already split — two panels is the maximum (story 16).
+/// stories 15–17). The existing panel keeps its shell; a new panel id is
+/// appended. No-op (returns `state` unchanged) when the id is unknown or the
+/// workspace is already split — two panels is the maximum (story 16).
 /// Runtime-only: not persisted (story 37).
 export function splitPanel(
   state: WorkspaceState,
   id: string,
   orientation: Orientation,
+  genId: () => string = defaultGenId,
 ): WorkspaceState {
   if (!state.workspaces.some((w) => w.id === id)) return state
   const current = state.layouts[id] ?? createLayout()
   const next = split(current, orientation)
   if (next == null) return state
+  return {
+    ...state,
+    layouts: { ...state.layouts, [id]: next },
+    panelIds: { ...state.panelIds, [id]: [...(state.panelIds[id] ?? [genId()]), genId()] },
+  }
+}
+
+/// Move the divider of workspace `id` to `ratio` (Phase 10 / #11, story 18),
+/// clamped so neither panel shrinks below `minSize` px along the split axis
+/// (story 19). No-op (returns `state` unchanged) when the id is unknown or the
+/// workspace is a single panel — there is no divider to move. Runtime-only:
+/// not persisted (story 37).
+export function resizePanel(
+  state: WorkspaceState,
+  id: string,
+  ratio: number,
+  container: Container,
+  minSize?: number,
+): WorkspaceState {
+  if (!state.workspaces.some((w) => w.id === id)) return state
+  const current = state.layouts[id] ?? createLayout()
+  const next = resize(current, ratio, container, minSize)
+  if (next === current) return state
   return { ...state, layouts: { ...state.layouts, [id]: next } }
+}
+
+/// Close one panel of workspace `id` — the panel whose id is `panelId`
+/// (Phase 10 / #11, story 20). The remaining panel keeps its shell and fills
+/// the workspace, so the layout collapses to single. No-op (returns `state`
+/// unchanged) when the workspace id is unknown or only one panel is mounted.
+/// Runtime-only: not persisted (story 37).
+export function closePanel(
+  state: WorkspaceState,
+  id: string,
+  panelId: string,
+): WorkspaceState {
+  if (!state.workspaces.some((w) => w.id === id)) return state
+  const currentPanels = state.panelIds[id] ?? []
+  if (currentPanels.length <= 1) return state
+  const current = state.layouts[id] ?? createLayout()
+  const next = closePanelLayout(current)
+  if (next === current) return state
+  return {
+    ...state,
+    layouts: { ...state.layouts, [id]: next },
+    panelIds: { ...state.panelIds, [id]: currentPanels.filter((p) => p !== panelId) },
+  }
 }
