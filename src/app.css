@@ -287,6 +287,13 @@ body {
   overflow: hidden;
 }
 
+/* Phase 11 / #12 — the focused panel wears an accent outline so it is always
+   obvious where keystrokes will go. Inset so the terminal fill is unchanged. */
+.panel-surfaces .surface.is-active {
+  outline: 2px solid var(--accent-line);
+  outline-offset: -2px;
+}
+
 .panel-surfaces .surface > :first-child {
   width: 100%;
   height: 100%;
