@@ -387,5 +387,33 @@ describe('WorkspaceShell', () => {
       expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeDisabled()
       expect(screen.getByRole('menuitem', { name: /split vertical/i })).toBeDisabled()
     })
+
+    // AC story 18 — a draggable divider is rendered between the two panels.
+    it('renders a divider between the two panels of a split', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+
+      expect(await screen.findByRole('separator', { name: /resize panels/i })).toBeInTheDocument()
+    })
+
+    // AC story 20 — closing one panel leaves a single panel that fills the area.
+    it('collapses back to one surface after closing a panel', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
+
+      fireEvent.click(screen.getByRole('button', { name: /close panel \(first\)/i }))
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(1)
+      expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe(undefined)
+    })
   })
 })
