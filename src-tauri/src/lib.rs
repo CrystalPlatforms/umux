@@ -1,3 +1,4 @@
+pub mod osc_parser;
 pub mod pty_service;
 pub mod workspace_store;
 
