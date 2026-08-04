@@ -71,6 +71,24 @@ impl PtyService {
         cols: u16,
         rows: u16,
     ) -> io::Result<(PtyHandle, Receiver<Vec<u8>>)> {
+        // Launch as a login shell so the user's `.profile` / `.bash_profile`
+        // (and thus their environment + dotfiles) are loaded, matching the
+        // PRD requirement that a panel respects the chosen shell's config.
+        let argv = vec![shell.to_string(), "-l".to_string()];
+        self.spawn_argv(argv, cwd, cols, rows)
+    }
+
+    /// Spawn an arbitrary command (argv[0] + args) on a fresh PTY and return
+    /// its output stream. This is the shared spawn primitive: `open` uses it
+    /// for a local login shell, and `SshManager` uses it to spawn the `ssh`
+    /// binary, so local and remote panels share one output-stream shape.
+    pub fn spawn_argv(
+        &mut self,
+        argv: Vec<String>,
+        cwd: PathBuf,
+        cols: u16,
+        rows: u16,
+    ) -> io::Result<(PtyHandle, Receiver<Vec<u8>>)> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -84,11 +102,10 @@ impl PtyService {
             })
             .map_err(pt_err)?;
 
-        let mut cmd = CommandBuilder::new(shell);
-        // Launch as a login shell so the user's `.profile` / `.bash_profile`
-        // (and thus their environment + dotfiles) are loaded, matching the
-        // PRD requirement that a panel respects the chosen shell's config.
-        cmd.arg("-l");
+        let mut cmd = CommandBuilder::new(&argv[0]);
+        for arg in &argv[1..] {
+            cmd.arg(arg);
+        }
         cmd.cwd(cwd);
         let child = pair.slave.spawn_command(cmd).map_err(pt_err)?;
 
