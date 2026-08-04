@@ -1,6 +1,7 @@
 pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_service;
+pub mod ssh_manager;
 pub mod workspace_store;
 
 use std::path::PathBuf;
