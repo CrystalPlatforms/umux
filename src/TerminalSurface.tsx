@@ -19,7 +19,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import '@xterm/xterm/css/xterm.css'
 
-export function TerminalSurface() {
+export function TerminalSurface({ label }: { label?: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -60,6 +60,7 @@ export function TerminalSurface() {
     const opened = invoke<number>('pty_open', {
       cols: term.cols,
       rows: term.rows,
+      label,
     }).then((id) => {
       if (disposed) {
         void invoke('pty_close', { id })

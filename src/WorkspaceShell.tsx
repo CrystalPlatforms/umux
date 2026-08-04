@@ -146,12 +146,13 @@ type PanelAreaProps = {
   orientation: Orientation
   ratio: number
   activePanelId: string | null
+  workspaceName: string
   onResize: (ratio: number, container: { width: number; height: number }) => void
   onClose: (panelId: string) => void
   onFocusPanel: (panelId: string) => void
 }
 
-function PanelArea({ id, panelIds, orientation, ratio, activePanelId, onResize, onClose, onFocusPanel }: PanelAreaProps) {
+function PanelArea({ id, panelIds, orientation, ratio, activePanelId, workspaceName, onResize, onClose, onFocusPanel }: PanelAreaProps) {
   const surfacesRef = useRef<HTMLDivElement | null>(null)
   const horizontal = orientation === 'horizontal'
   const isSplit = panelIds.length > 1
@@ -161,6 +162,11 @@ function PanelArea({ id, panelIds, orientation, ratio, activePanelId, onResize, 
   // takes the whole area.
   const firstFlex = isSplit ? `${ratio} 1 0%` : '1 1 100%'
   const secondFlex = `${1 - ratio} 1 0%`
+
+  // Human-readable panel labels for desktop notifications, so the user can tell
+  // which workspace/panel finished a long-running task.
+  const firstLabel = `${workspaceName} · ${horizontal ? 'left' : 'top'}`
+  const secondLabel = `${workspaceName} · ${horizontal ? 'right' : 'bottom'}`
 
   const onPointerDown = (e: React.PointerEvent) => {
     e.preventDefault()
@@ -195,7 +201,7 @@ function PanelArea({ id, panelIds, orientation, ratio, activePanelId, onResize, 
         style={{ flex: firstFlex }}
         onClick={() => onFocusPanel(panelIds[0])}
       >
-        <TerminalSurface />
+        <TerminalSurface label={firstLabel} />
         {isSplit && <PanelCloseButton onClose={() => onClose(panelIds[0])} which="first" />}
       </div>
       {isSplit && (
@@ -213,7 +219,7 @@ function PanelArea({ id, panelIds, orientation, ratio, activePanelId, onResize, 
             style={{ flex: secondFlex }}
             onClick={() => onFocusPanel(panelIds[1])}
           >
-            <TerminalSurface />
+            <TerminalSurface label={secondLabel} />
             <PanelCloseButton onClose={() => onClose(panelIds[1])} which="second" />
           </div>
         </>
@@ -582,6 +588,7 @@ export function WorkspaceShell() {
                   orientation={splitOrientation}
                   ratio={layout.kind === 'split' ? layout.ratio : 0.5}
                   activePanelId={activePanelOf(state, ws.id)}
+                  workspaceName={ws.name}
                   onResize={(ratio, container) =>
                     setState(resizePanel(state, ws.id, ratio, container))
                   }

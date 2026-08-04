@@ -85,6 +85,19 @@ describe('TerminalSurface', () => {
       expect(invokeMock).toHaveBeenCalledWith('pty_open', {
         cols: expect.any(Number),
         rows: expect.any(Number),
+        label: undefined,
+      }),
+    )
+  })
+
+  it('forwards the panel label so notifications can name the origin', async () => {
+    render(<TerminalSurface label="main · left" />)
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('pty_open', {
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+        label: 'main · left',
       }),
     )
   })
@@ -130,6 +143,7 @@ describe('TerminalSurface', () => {
       expect(invokeMock).toHaveBeenCalledWith('pty_open', {
         cols: expect.any(Number),
         rows: expect.any(Number),
+        label: undefined,
       }),
     )
 
