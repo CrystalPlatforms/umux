@@ -1,3 +1,4 @@
+pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_service;
 pub mod workspace_store;
@@ -8,6 +9,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use notification_service::{NotificationService, Notifier, PanelOrigin};
+use osc_parser::OscParser;
 use pty_service::{PtyHandle, PtyService};
 use workspace_store::{WorkspaceData, WorkspaceStore};
 
@@ -27,6 +30,7 @@ fn pty_open(
     shell: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    label: Option<String>,
 ) -> Result<u32, String> {
     // Default to the user's $SHELL, falling back to /bin/sh; an explicit
     // `shell` override (from a future WorkspaceStore config) wins.
@@ -52,10 +56,27 @@ fn pty_open(
 
     // Drain the PTY's output channel on its own thread and forward each chunk
     // to the renderer. The channel disconnects (loop ends) when the PTY closes.
+    //
+    // Each chunk is first fed through the OSC parser: recognized completion
+    // sequences are turned into a desktop notification (labeled with this
+    // panel's origin), and the remaining bytes — everything the terminal should
+    // actually see — are emitted as `pty_output`. Because the parser only
+    // extracts events and passes other bytes through untouched, normal terminal
+    // output is byte-identical whether or not a notification sequence appears.
     let emit_app = app.clone();
+    let origin = PanelOrigin {
+        workspace: None,
+        panel: label,
+    };
     std::thread::spawn(move || {
+        let mut parser = OscParser::new();
+        let service =
+            NotificationService::new(Box::new(LibnotifyNotifier), Some("umux".to_string()));
         while let Ok(bytes) = rx.recv() {
-            let _ = emit_app.emit("pty_output", PtyOutputPayload { id, data: bytes });
+            let passthrough = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            if !passthrough.is_empty() {
+                let _ = emit_app.emit("pty_output", PtyOutputPayload { id, data: passthrough });
+            }
         }
     });
 
@@ -81,6 +102,39 @@ fn pty_close(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<(), String>
     Ok(())
 }
 
+/// Real `Notifier` backed by libnotify via the `notify-send` CLI. Thin adapter
+/// on the OS boundary — not unit-tested; its behavior is verified manually by
+/// Adam on Ubuntu/Wayland.
+///
+/// We shell out to `notify-send` (the libnotify command-line client) rather
+/// than the `notify-rust` D-Bus API because GNOME silently drops banners from
+/// `notify-rust` when the sending process has no associated `.desktop` file
+/// (the case during `tauri dev`), while `notify-send` is always shown. A failed
+/// spawn (no libnotify-bin installed) is logged but otherwise swallowed so a
+/// missing notifier can never break the terminal stream.
+struct LibnotifyNotifier;
+
+impl Notifier for LibnotifyNotifier {
+    fn show(&self, summary: &str, body: &str) {
+        let result = std::process::Command::new("notify-send")
+            .arg("--app-name=umux")
+            .arg(summary)
+            .arg(body)
+            .output();
+        match &result {
+            Ok(out) if out.status.success() => {
+                log::info!("[notify] dispatched: summary={summary:?} body={body:?}")
+            }
+            Ok(out) => log::error!(
+                "[notify] notify-send exited {}: stderr={}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => log::error!("[notify] failed to spawn notify-send: {e}"),
+        }
+    }
+}
+
 /// Where the workspace config file lives: `$XDG_CONFIG_HOME/umux/workspaces.json`
 /// or `~/.config/umux/workspaces.json` when XDG is unset.
 fn config_path() -> PathBuf {
@@ -99,6 +153,28 @@ fn load_workspaces(state: State<'_, WorkspaceStore>) -> WorkspaceData {
 #[tauri::command]
 fn save_workspaces(state: State<'_, WorkspaceStore>, data: WorkspaceData) -> Result<(), String> {
     state.save(&data).map_err(|e| e.to_string())
+}
+
+/// Run one chunk of PTY output through the OSC parser and dispatch any
+/// completion events it surfaces. Returns the bytes the terminal should still
+/// see (everything that wasn't a recognized notification sequence) — those are
+/// byte-identical to the input for non-OSC bytes, satisfying "normal terminal
+/// output is unaffected by the parser being active".
+///
+/// The parser is held by the caller (one per PTY) so sequences split across
+/// chunk boundaries are recognized across calls. This is the testable core of
+/// the PTY-output wiring; `pty_open` plugs a real `Notifier` into it.
+fn process_pty_chunk(
+    parser: &mut OscParser,
+    service: &NotificationService,
+    origin: &PanelOrigin,
+    bytes: &[u8],
+) -> Vec<u8> {
+    let result = parser.push(bytes);
+    for event in &result.events {
+        service.notify(event, origin);
+    }
+    result.passthrough
 }
 
 /// Decide which shell binary to launch for a panel.
@@ -160,5 +236,106 @@ mod tests {
     fn resolve_shell_none_uses_shell_env() {
         let expected = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         assert_eq!(resolve_shell(None), expected);
+    }
+
+    // --- Phase 13 wiring (OSC -> notification) ---
+
+    // A recording Notifier shared between the test and the service it's boxed
+    // into (NotificationService requires Notifier: Send, hence Arc<Mutex<..>>).
+    #[derive(Default, Clone)]
+    struct RecordingNotifier {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl notification_service::Notifier for RecordingNotifier {
+        fn show(&self, summary: &str, body: &str) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((summary.to_string(), body.to_string()));
+        }
+    }
+
+    fn wiring_service(
+    ) -> (NotificationService, RecordingNotifier) {
+        let rec = RecordingNotifier::default();
+        let svc = NotificationService::new(Box::new(rec.clone()), Some("umux".to_string()));
+        (svc, rec)
+    }
+
+    // T3 (AC4 — normal terminal output unaffected by the parser being active):
+    //   Input:  a chunk of plain (non-OSC) bytes.
+    //   Output: passthrough is byte-identical to the input, and no notification
+    //           fires — the parser leaves ordinary output alone.
+    #[test]
+    fn process_plain_chunk_passes_through_silently() {
+        let (svc, rec) = wiring_service();
+        let mut parser = OscParser::new();
+        let bytes = b"ls -la\r\nhello world";
+
+        let out = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), bytes);
+
+        assert_eq!(out, bytes.to_vec(), "plain bytes pass through unchanged");
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "no notification for ordinary output"
+        );
+    }
+
+    // T4 (AC1 + AC2 — a completion sequence triggers a notification, no AI-tool
+    //  config needed): an OSC 9 sequence (`ESC ] 9 ; <msg> BEL`) embedded in a
+    //  chunk fires exactly one notification carrying the message, and the OSC
+    //  bytes are stripped from what the terminal sees.
+    #[test]
+    fn process_chunk_with_osc9_fires_notification() {
+        let (svc, rec) = wiring_service();
+        let mut parser = OscParser::new();
+        // "before" ESC ] 9 ; build done BEL "after"
+        let bytes: Vec<u8> = [
+            b'b', b'e', b'f', 0x1b, b']', b'9', b';', b'b', b'u', b'i', b'l', b'd',
+            b' ', b'd', b'o', b'n', b'e', 0x07, b'a', b'f', b't',
+        ]
+        .to_vec();
+
+        let out = process_pty_chunk(
+            &mut parser,
+            &svc,
+            &PanelOrigin {
+                workspace: Some("main".to_string()),
+                panel: None,
+            },
+            &bytes,
+        );
+
+        // The terminal still sees the surrounding text, but NOT the OSC bytes.
+        assert_eq!(out, b"befaft".to_vec(), "OSC bytes stripped from passthrough");
+
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "exactly one notification");
+        assert!(calls[0].1.contains("build done"), "body carries the message");
+    }
+
+    // T5 (regression guard — parser state must persist across chunks in the
+    //  wiring): a completion sequence split across two process_pty_chunk calls
+    //  (terminator arrives in a later chunk) still surfaces exactly one event.
+    //  If the wiring rebuilt the parser per chunk, split sequences would be lost.
+    #[test]
+    fn process_split_sequence_fires_once_across_chunks() {
+        let (svc, rec) = wiring_service();
+        let mut parser = OscParser::new();
+        let first: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i'].to_vec();
+        let second: Vec<u8> = [0x07, b'x'].to_vec(); // BEL terminator + trailing byte
+
+        let out1 = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &first);
+        let out2 = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &second);
+
+        // Nothing is complete until the terminator arrives.
+        assert!(out1.is_empty(), "no passthrough from the unfinished sequence");
+        // The trailing non-OSC byte after the terminator still reaches the term.
+        assert_eq!(out2, b"x".to_vec());
+
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "split sequence fires exactly one notification");
+        assert!(calls[0].1.contains("hi"), "body carries the message: {}", calls[0].1);
     }
 }
