@@ -23,6 +23,8 @@
 //    libnotify delivery itself, the OscParser -> service wiring (lib.rs).
 
 use crate::osc_parser::NotificationEvent;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// The system boundary: whatever actually shows a desktop notification.
 /// Real impl (`LibnotifyNotifier`) lives in lib.rs; tests use a recording fake.
@@ -48,6 +50,10 @@ impl PanelOrigin {
 pub struct NotificationService {
     notifier: Box<dyn Notifier + Send>,
     app_label: String,
+    /// Shared mute flag. When true, notify() is a silent no-op. Held behind an
+    /// Arc so lib.rs can share ONE flag across every panel's service — a single
+    /// toggle mutes the whole app.
+    muted: Arc<AtomicBool>,
 }
 
 impl NotificationService {
@@ -55,12 +61,46 @@ impl NotificationService {
         Self {
             notifier,
             app_label: app_label.unwrap_or_else(|| "umux".to_string()),
+            muted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Like `new`, but the service observes an externally owned mute flag
+    /// instead of a private one. lib.rs creates ONE flag, shares it across
+    /// every panel's service (so a single toggle mutes the whole app), and the
+    /// `set_notifications_muted` command flips that same flag.
+    pub fn with_mute(
+        notifier: Box<dyn Notifier + Send>,
+        app_label: Option<String>,
+        muted: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            notifier,
+            app_label: app_label.unwrap_or_else(|| "umux".to_string()),
+            muted,
+        }
+    }
+
+    /// Temporarily silence (true) or re-enable (false) notifications. The next
+    /// notify() call observes the new state.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::SeqCst);
+    }
+
+    /// Whether notifications are currently silenced.
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::SeqCst)
     }
 
     /// Compose and fire one notification for `event`, labeling it with `origin`
     /// when available.
     pub fn notify(&self, event: &NotificationEvent, origin: &PanelOrigin) {
+        // Muted: drop the event silently. The notifier is never reached, so no
+        // desktop notification fires — but terminal output is unaffected (the
+        // OSC bytes were already stripped by the parser before we get here).
+        if self.muted.load(Ordering::SeqCst) {
+            return;
+        }
         // summary: prefer an explicit title (Kitty/urxvt carry one); otherwise
         // fall back to the app label.
         let summary = if event.title.is_empty() {
@@ -161,5 +201,85 @@ mod tests {
         assert_eq!(body, "done", "body is just the message: {body}");
         assert_eq!(summary, "umux", "summary falls back to app label");
         assert!(!body.contains('('), "no empty origin suffix: {body}");
+    }
+
+    // --- Phase 14: notification mute (#15) ---------------------------------
+    //
+    // Assumptions encoded by these tests:
+    //  - A NotificationService carries a mutable mute flag (defaults to unmuted).
+    //  - set_muted(true) makes notify() a no-op: the Notifier's show() is NEVER
+    //    called while muted, so no desktop notification fires (AC2).
+    //  - set_muted(false) restores delivery; the same service can be toggled off
+    //    and back on (AC1).
+    //  - NOT tested here: the cross-thread shared flag wiring (lib.rs injects one
+    //    Arc<AtomicBool> into every panel's service so a single toggle mutes the
+    //    whole app) — that's lib.rs wiring, verified manually.
+
+    // T1 (tracer — AC2: while muted, no notifications fire):
+    //   Input:  a muted service, then an event that would normally notify.
+    //   Output: zero show() calls — the notifier is never reached.
+    #[test]
+    fn muted_service_suppresses_notification() {
+        let (svc, rec) = service();
+        svc.set_muted(true);
+        let event = NotificationEvent {
+            protocol: OscProtocol::Nine,
+            title: String::new(),
+            body: "build done".to_string(),
+        };
+
+        svc.notify(&event, &PanelOrigin::default());
+
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "muted service must not fire any notification"
+        );
+    }
+
+    // T2 (AC1 — mute is off by default, so notifications still fire):
+    //   Input:  a freshly constructed service.
+    //   Output: is_muted() is false, and a notify() delivers exactly one show().
+    #[test]
+    fn fresh_service_is_unmuted_and_notifies() {
+        let (svc, rec) = service();
+        assert!(!svc.is_muted(), "mute is off by default");
+        let event = NotificationEvent {
+            protocol: OscProtocol::Nine,
+            title: String::new(),
+            body: "done".to_string(),
+        };
+
+        svc.notify(&event, &PanelOrigin::default());
+
+        assert_eq!(
+            rec.calls.lock().unwrap().len(),
+            1,
+            "unmuted service delivers the notification"
+        );
+    }
+
+    // T3 (AC1 — toggle off and back on): mute, then unmute, then notify.
+    //   Input:  set_muted(true) -> set_muted(false) -> notify.
+    //   Output: is_muted() is false again, and exactly one show() fires — the
+    //           mute is reversible, not a one-way trap.
+    #[test]
+    fn unmuting_restores_notification_delivery() {
+        let (svc, rec) = service();
+        svc.set_muted(true);
+        svc.set_muted(false);
+        assert!(!svc.is_muted(), "mute cleared after set_muted(false)");
+        let event = NotificationEvent {
+            protocol: OscProtocol::Nine,
+            title: String::new(),
+            body: "done".to_string(),
+        };
+
+        svc.notify(&event, &PanelOrigin::default());
+
+        assert_eq!(
+            rec.calls.lock().unwrap().len(),
+            1,
+            "notification fires again after unmuting"
+        );
     }
 }

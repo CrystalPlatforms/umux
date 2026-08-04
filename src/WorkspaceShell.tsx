@@ -35,6 +35,7 @@ import {
 } from './workspaces'
 import { createLayout, type Orientation } from './PaneLayout'
 import { matchShortcut } from './shortcuts'
+import { NotificationMuteButton } from './NotificationMuteButton'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -255,6 +256,9 @@ export function WorkspaceShell() {
   const [menu, setMenu] = useState<MenuState>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draggedId, setDraggedId] = useState<string | null>(null)
+  // Notification mute (Phase 14 / #15). Session-only — not persisted: the flag
+  // lives in the backend, seeded as audible on app start.
+  const [muted, setMuted] = useState(false)
 
   useEffect(() => {
     void invoke<{ workspaces: Workspace[] }>('load_workspaces').then((data) => {
@@ -280,6 +284,18 @@ export function WorkspaceShell() {
       })
     })
   }, [])
+
+  // Seed the mute indicator from the backend flag (source of truth).
+  useEffect(() => {
+    void invoke<boolean>('notifications_muted').then(setMuted)
+  }, [])
+
+  // Toggle the app-wide mute: flip the backend flag, then mirror its returned
+  // state locally so the indicator stays in sync with the panels' threads.
+  const toggleMute = () => {
+    const next = !muted
+    void invoke<boolean>('set_notifications_muted', { muted: next }).then(setMuted)
+  }
 
   // Close the context menu on any click outside it.
   useEffect(() => {
@@ -455,6 +471,7 @@ export function WorkspaceShell() {
               <span>umux</span>
             </div>
             <div className="header-actions">
+              <NotificationMuteButton muted={muted} onToggle={toggleMute} />
               <button
                 className="icon-btn"
                 aria-label="New workspace"

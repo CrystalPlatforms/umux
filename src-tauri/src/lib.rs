@@ -4,7 +4,8 @@ pub mod pty_service;
 pub mod workspace_store;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -13,6 +14,11 @@ use notification_service::{NotificationService, Notifier, PanelOrigin};
 use osc_parser::OscParser;
 use pty_service::{PtyHandle, PtyService};
 use workspace_store::{WorkspaceData, WorkspaceStore};
+
+/// The app-wide notification mute flag. One instance is created in `run()` and
+/// shared (via Arc) with every panel's NotificationService, so a single toggle
+/// silences notifications across the whole app. `false` = audible (default).
+type MuteFlag = Arc<AtomicBool>;
 
 /// One chunk of PTY output, ferried to the renderer over the `pty_output` event.
 /// `data` is raw bytes serialized as a JSON array of numbers; the frontend
@@ -27,6 +33,7 @@ struct PtyOutputPayload {
 fn pty_open(
     app: AppHandle,
     state: State<'_, Mutex<PtyService>>,
+    mute: State<'_, MuteFlag>,
     shell: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -68,10 +75,17 @@ fn pty_open(
         workspace: None,
         panel: label,
     };
+    // Clone the app-wide mute flag into this panel's service so the
+    // `set_notifications_muted` command (which flips the shared flag) is observed
+    // live by every panel's notification thread.
+    let mute_flag = Arc::clone(&mute);
     std::thread::spawn(move || {
         let mut parser = OscParser::new();
-        let service =
-            NotificationService::new(Box::new(LibnotifyNotifier), Some("umux".to_string()));
+        let service = NotificationService::with_mute(
+            Box::new(LibnotifyNotifier),
+            Some("umux".to_string()),
+            mute_flag,
+        );
         while let Ok(bytes) = rx.recv() {
             let passthrough = process_pty_chunk(&mut parser, &service, &origin, &bytes);
             if !passthrough.is_empty() {
@@ -155,6 +169,22 @@ fn save_workspaces(state: State<'_, WorkspaceStore>, data: WorkspaceData) -> Res
     state.save(&data).map_err(|e| e.to_string())
 }
 
+/// Toggle the app-wide notification mute. Returns the new state so the frontend
+/// can update its indicator from the source of truth (the flag is shared with
+/// every panel's notification thread, so this is the only way to flip it).
+#[tauri::command]
+fn set_notifications_muted(muted: bool, state: State<'_, MuteFlag>) -> bool {
+    state.store(muted, Ordering::SeqCst);
+    muted
+}
+
+/// Read the current mute state. The frontend calls this on mount to seed its
+/// indicator (the flag lives in the backend; the UI must not assume a default).
+#[tauri::command]
+fn notifications_muted(state: State<'_, MuteFlag>) -> bool {
+    state.load(Ordering::SeqCst)
+}
+
 /// Run one chunk of PTY output through the OSC parser and dispatch any
 /// completion events it surfaces. Returns the bytes the terminal should still
 /// see (everything that wasn't a recognized notification sequence) — those are
@@ -192,6 +222,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(PtyService::new()))
         .manage(WorkspaceStore::new(config_path()))
+        .manage(Arc::new(AtomicBool::new(false)) as MuteFlag)
         .invoke_handler(tauri::generate_handler![
             pty_open,
             pty_write,
@@ -199,6 +230,8 @@ pub fn run() {
             pty_close,
             load_workspaces,
             save_workspaces,
+            set_notifications_muted,
+            notifications_muted,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -337,5 +370,46 @@ mod tests {
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "split sequence fires exactly one notification");
         assert!(calls[0].1.contains("hi"), "body carries the message: {}", calls[0].1);
+    }
+
+    // --- Phase 14: notification mute wiring (#15) --------------------------
+
+    // T6 (AC2 — a muted flag suppresses the notification on the live stream):
+    //   The real app shares ONE Arc<AtomicBool> across every panel's service so
+    //   a single toggle silences the whole app. This test mirrors that wiring:
+    //   it builds the service from a shared flag, flips that flag (as the Tauri
+    //   `set_notifications_muted` command would), then runs an OSC 9 chunk.
+    //   Input:  a shared mute flag set to true, then a chunk with an OSC 9 seq.
+    //   Output: zero show() calls — no desktop notification — AND the OSC bytes
+    //           are still stripped from passthrough (the parser runs regardless;
+    //           only delivery is muted, not parsing).
+    #[test]
+    fn muted_shared_flag_suppresses_notification_from_chunk() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let rec = RecordingNotifier::default();
+        let flag = Arc::new(AtomicBool::new(false));
+        let svc = NotificationService::with_mute(
+            Box::new(rec.clone()),
+            Some("umux".to_string()),
+            flag.clone(),
+        );
+        let mut parser = OscParser::new();
+
+        // Flip the shared flag — the command path does exactly this.
+        flag.store(true, Ordering::SeqCst);
+
+        let bytes: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i', 0x07].to_vec();
+        let out = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
+
+        assert!(
+            out.is_empty(),
+            "OSC bytes still stripped from passthrough even when muted"
+        );
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "muted flag suppresses the notification on the live stream"
+        );
     }
 }
