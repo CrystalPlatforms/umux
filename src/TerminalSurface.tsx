@@ -18,6 +18,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import '@xterm/xterm/css/xterm.css'
+import { clipboardAction } from './clipboardShortcut'
 
 export function TerminalSurface({
   label,
@@ -44,6 +45,21 @@ export function TerminalSurface({
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
+
+    // Ctrl+Shift+C copies the current selection to the clipboard instead of
+    // reaching the shell; everything else (including plain Ctrl+C, which must
+    // stay SIGINT) passes through to the PTY (Phase 19 / HITL). Returning
+    // false swallows the key from xterm so it is not forwarded via onData.
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true
+      if (clipboardAction(event) === 'copy') {
+        const selection = term.getSelection()
+        if (selection) void navigator.clipboard.writeText(selection)
+        return false
+      }
+      return true
+    })
+
     fit.fit()
 
     let panelId: number | null = null

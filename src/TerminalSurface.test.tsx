@@ -65,6 +65,12 @@ vi.mock('@xterm/xterm', () => ({
     onData = onDataMock
     onResize = onResizeMock
     dispose = disposeMock
+    // The renderer installs a key handler for the Ctrl+Shift+C copy shortcut
+    // (Phase 19). A noop keeps the mount path from throwing in jsdom.
+    attachCustomKeyEventHandler() {}
+    getSelection() {
+      return ''
+    }
   },
 }))
 
