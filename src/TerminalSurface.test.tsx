@@ -127,7 +127,12 @@ describe('TerminalSurface', () => {
       outputHandler!({ payload: { id: PANEL_ID, data: [104, 105] } }) // "hi"
     })
 
-    expect(writeMock).toHaveBeenCalledWith(new Uint8Array([104, 105]))
+    // Output is coalesced into one write per animation frame (Phase 20 / #21),
+    // so the bytes arrive on the next frame rather than synchronously — still
+    // byte-identical, just deferred for responsiveness under heavy output.
+    await waitFor(() =>
+      expect(writeMock).toHaveBeenCalledWith(new Uint8Array([104, 105])),
+    )
   })
 
   it('ignores PTY output for other panel ids', async () => {
@@ -215,7 +220,10 @@ describe('TerminalSurface', () => {
       outputHandler!({ payload: { id: PANEL_ID, data: [104, 105] } }) // "hi"
     })
 
-    expect(writeMock).toHaveBeenCalledWith(new Uint8Array([104, 105]))
+    // Coalesced into a per-frame write (Phase 20 / #21).
+    await waitFor(() =>
+      expect(writeMock).toHaveBeenCalledWith(new Uint8Array([104, 105])),
+    )
   })
 
   it('closes via ssh_close on unmount for a remote panel', async () => {
