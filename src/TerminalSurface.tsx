@@ -19,6 +19,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import '@xterm/xterm/css/xterm.css'
 import { clipboardAction } from './clipboardShortcut'
+import { WriteBatcher } from './WriteBatcher'
 
 export function TerminalSurface({
   label,
@@ -41,7 +42,14 @@ export function TerminalSurface({
     const container = containerRef.current
     if (container == null) return
 
-    const term = new Terminal({ fontFamily: 'monospace', fontSize: 14 })
+    const term = new Terminal({
+      fontFamily: 'monospace',
+      fontSize: 14,
+      // Bounded scrollback (Phase 20 / #21, AC2): cap retained lines so a long
+      // heavy-output session can't grow memory without limit. xterm's default
+      // is 1000; we set it explicitly so the cap is intentional, not accidental.
+      scrollback: 1000,
+    })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
@@ -79,9 +87,39 @@ export function TerminalSurface({
     const resizeCmd = isRemote ? 'ssh_resize' : 'pty_resize'
     const closeCmd = isRemote ? 'ssh_close' : 'pty_close'
 
+    // Coalesce output chunks (Phase 20 / #21, AC1 + AC2). Under heavy PTY
+    // output the backend fires one `pty_output` event per 4 KB read — hundreds
+    // to thousands per second — and writing each straight to xterm forces a
+    // parse + re-render every time, janking the UI. The batcher groups the
+    // chunks that land inside the same animation frame into ONE term.write, so
+    // the render count drops from N-per-frame to at most 1-per-frame; and it
+    // flushes the moment 64 KB accumulates, so the in-flight buffer can't grow
+    // without bound. Bytes are concatenated in order and never altered, so
+    // terminal output stays byte-identical (the pure core is unit-tested in
+    // WriteBatcher.test.ts).
+    const batcher = new WriteBatcher({
+      maxBytes: 64 * 1024,
+      maxAgeMs: 16,
+      now: () => performance.now(),
+    })
+    const writeToTerm = (bytes: Uint8Array) => {
+      const immediate = batcher.push(bytes)
+      if (immediate != null) term.write(immediate)
+    }
+    // One flush per animation frame drains anything buffered by maxAge. rAF is
+    // paused when the tab/window is hidden, so a backgrounded panel stops
+    // rendering — exactly what we want.
+    let rafId = 0
+    const tickFrame = () => {
+      const due = batcher.tick()
+      if (due != null) term.write(due)
+      rafId = requestAnimationFrame(tickFrame)
+    }
+    rafId = requestAnimationFrame(tickFrame)
+
     const writeIfOurs = (payload: { id: number; data: number[] }) => {
       if (payload.id === panelId) {
-        term.write(new Uint8Array(payload.data))
+        writeToTerm(new Uint8Array(payload.data))
       }
     }
 
@@ -159,6 +197,11 @@ export function TerminalSurface({
 
     return () => {
       disposed = true
+      cancelAnimationFrame(rafId)
+      // Flush any output still buffered from the last frame so closing a panel
+      // never silently drops bytes.
+      const remaining = batcher.flush()
+      if (remaining.byteLength > 0) term.write(remaining)
       window.removeEventListener('resize', onWindowResize)
       resizeObserver.disconnect()
       void unlistenP.then((fn) => fn())
