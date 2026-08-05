@@ -70,6 +70,62 @@ describe('WorkspaceShell', () => {
     expect(screen.getByRole('button', { name: /new workspace/i })).toBeInTheDocument()
   })
 
+  // Phase 17 / Issue #18 — onboarding empty state. A fresh install (no
+  // workspaces) shows a friendly welcome in the main area that guides the
+  // user to create their first workspace.
+  it('shows the onboarding empty state in the main area when there are no workspaces', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    expect(
+      screen.getByRole('heading', { name: /welcome to umux/i }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /create workspace/i }),
+    ).toBeInTheDocument()
+  })
+
+  // Phase 17 / Issue #18 — the empty-state CTA must guide the user to act:
+  // clicking it opens the same create-name form as the sidebar "+".
+  it('clicking the empty-state CTA reveals the workspace-name form', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    // No name input before the CTA is clicked.
+    expect(screen.queryByLabelText(/new workspace name/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /create workspace/i }))
+
+    expect(screen.getByLabelText(/new workspace name/i)).toBeInTheDocument()
+  })
+
+  // Phase 17 / Issue #18 — once the first workspace exists, the empty state
+  // disappears and the workspace's panel takes over the main area.
+  it('hides the empty state once a workspace is created', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    // Start: empty state is up.
+    expect(
+      screen.getByRole('heading', { name: /welcome to umux/i }),
+    ).toBeInTheDocument()
+
+    // Create the first workspace via the empty-state CTA.
+    fireEvent.click(screen.getByRole('button', { name: /create workspace/i }))
+    fireEvent.change(screen.getByLabelText(/new workspace name/i), {
+      target: { value: 'my-project' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+
+    // Empty state is gone; the new workspace's panel is shown instead.
+    expect(
+      screen.queryByRole('heading', { name: /welcome to umux/i }),
+    ).not.toBeInTheDocument()
+    expect(
+      await screen.findByTestId('terminal-surface'),
+    ).toBeInTheDocument()
+  })
+
   it('creates a workspace via the + action, shows it in the list, and persists', async () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))

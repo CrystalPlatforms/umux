@@ -17,6 +17,7 @@ import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { TerminalSurface } from './TerminalSurface'
+import { EmptyState } from './EmptyState'
 import {
   emptyState,
   createWorkspace,
@@ -590,6 +591,9 @@ export function WorkspaceShell() {
       )}
 
       <main className="main">
+        {state.workspaces.length === 0 && !creating ? (
+          <EmptyState onCreate={startCreate} />
+        ) : null}
         {state.workspaces
           .filter((ws) => state.openIds.includes(ws.id))
           .map((ws) => {
