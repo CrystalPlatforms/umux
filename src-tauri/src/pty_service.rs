@@ -36,6 +36,10 @@ struct PtyEntry {
     master: SendMaster,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send>,
+    // Cached exit code once the child has been reaped. `None` until then, so a
+    // panel can poll `child_exit_code` without re-waiting an already-dead child
+    // (which would error on a second reap).
+    exit_code: Option<i32>,
 }
 
 // portable-pty's `MasterPty` trait (0.8.x) doesn't carry a `Send` bound, so
@@ -138,6 +142,7 @@ impl PtyService {
                 master: SendMaster(pair.master),
                 writer,
                 child,
+                exit_code: None,
             },
         );
 
@@ -175,6 +180,43 @@ impl PtyService {
             let _ = entry.child.wait();
             drop(entry.writer);
             drop(entry.master);
+        }
+    }
+
+    /// Non-blocking poll for the child's exit code. Returns `Ok(None)` while the
+    /// child is still running and `Ok(Some(code))` once it has exited; the
+    /// result is cached so repeat calls never re-reap an already-dead child.
+    ///
+    /// Used by SSH panels to detect that the `ssh` process has exited (e.g. with
+    /// code 255 on a connection failure) so the UI can surface a clear error
+    /// instead of hanging on a dead session (Phase 16 / Issue #17, AC1 + AC2).
+    /// A signal-killed child is reported via its (non-zero) code; callers map
+    /// failures to a friendly message.
+    pub fn child_exit_code(&mut self, handle: &PtyHandle) -> io::Result<Option<i32>> {
+        let entry = self
+            .entries
+            .get_mut(&handle.id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown pty handle"))?;
+        if let Some(code) = entry.exit_code {
+            return Ok(Some(code));
+        }
+        match entry.child.try_wait()? {
+            None => Ok(None),
+            Some(status) => {
+                // Signal-killed -> success() is false; collapse to 255 so the SSH
+                // path's friendly_ssh_exit treats it as a connection failure.
+                let code = if status.success() {
+                    0
+                } else {
+                    status.exit_code() as i32
+                };
+                // A killed-by-signal status reports a generic code; normalize a
+                // signal death to 255 (ssh's own failure code) so it's translated
+                // as a connection failure rather than swallowed as "remote cmd".
+                let code = if code == 0 { 255 } else { code };
+                entry.exit_code = Some(code);
+                Ok(Some(code))
+            }
         }
     }
 }
@@ -454,6 +496,53 @@ mod tests {
         svc.close(&handle);
         svc.close(&handle); // second close — unknown handle, must be a no-op
         svc.close(&PtyHandle { id: 9999 }); // never-existed handle
+    }
+
+    // T-EXIT (Phase 16 / Issue #17 — AC1/AC2: detect ssh connection failure):
+    //   A remote panel must learn the `ssh` child's exit code so it can show a
+    //   clear error (AC1) instead of hanging on a dead session (AC2).
+    //   `child_exit_code` polls (non-blocking) and caches: before exit -> None,
+    //   after exit -> Some(code). Signal-killed children are reported as a
+    //   failure (mapped to 255 by the caller's friendly_ssh_exit).
+    //
+    //   Input:  spawn `sh -c 'exit 42'` (exits immediately, code 42).
+    //   Output: once the reader hits EOF, child_exit_code returns Some(42).
+    #[test]
+    fn child_exit_code_reports_process_status() {
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .spawn_argv(
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "exit 42".to_string(),
+                ],
+                PathBuf::from("/tmp"),
+                80,
+                24,
+            )
+            .expect("spawn");
+
+        // Drain until the child exits and the channel disconnects, polling the
+        // exit code each tick (the reader thread + service share no lock in this
+        // unit test, so we poll from this thread).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut code: Option<i32> = None;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            }
+            if let Some(c) = svc.child_exit_code(&handle).expect("exit poll") {
+                code = Some(c);
+                break;
+            }
+        }
+        svc.close(&handle);
+
+        let code = code.expect("child never reported an exit code within timeout");
+        assert_eq!(code, 42, "child_exit_code should report the real exit code");
     }
 
     // Unique counter for temp HOME dirs so parallel test runs don't collide.

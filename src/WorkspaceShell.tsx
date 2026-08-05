@@ -148,12 +148,17 @@ type PanelAreaProps = {
   ratio: number
   activePanelId: string | null
   workspaceName: string
+  // When set, the FIRST surface opens as a remote SSH panel instead of a local
+  // shell (Phase 16 / Issue #17). Comes from the workspace's first configured
+  // panel's `sshTarget`; the second panel of a split is created at runtime with
+  // no config, so it stays local.
+  sshTarget?: string
   onResize: (ratio: number, container: { width: number; height: number }) => void
   onClose: (panelId: string) => void
   onFocusPanel: (panelId: string) => void
 }
 
-function PanelArea({ id, panelIds, orientation, ratio, activePanelId, workspaceName, onResize, onClose, onFocusPanel }: PanelAreaProps) {
+function PanelArea({ id, panelIds, orientation, ratio, activePanelId, workspaceName, sshTarget, onResize, onClose, onFocusPanel }: PanelAreaProps) {
   const surfacesRef = useRef<HTMLDivElement | null>(null)
   const horizontal = orientation === 'horizontal'
   const isSplit = panelIds.length > 1
@@ -202,7 +207,7 @@ function PanelArea({ id, panelIds, orientation, ratio, activePanelId, workspaceN
         style={{ flex: firstFlex }}
         onClick={() => onFocusPanel(panelIds[0])}
       >
-        <TerminalSurface label={firstLabel} />
+        <TerminalSurface label={firstLabel} sshTarget={sshTarget} />
         {isSplit && <PanelCloseButton onClose={() => onClose(panelIds[0])} which="first" />}
       </div>
       {isSplit && (
@@ -606,6 +611,7 @@ export function WorkspaceShell() {
                   ratio={layout.kind === 'split' ? layout.ratio : 0.5}
                   activePanelId={activePanelOf(state, ws.id)}
                   workspaceName={ws.name}
+                  sshTarget={ws.panels?.[0]?.sshTarget}
                   onResize={(ratio, container) =>
                     setState(resizePanel(state, ws.id, ratio, container))
                   }

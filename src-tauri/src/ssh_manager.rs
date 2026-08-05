@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 /// Connection target for a remote panel. `port: None` means "default (22)".
+#[derive(Debug, PartialEq)]
 pub struct SshTarget {
     pub host: String,
     pub user: String,
@@ -41,6 +42,24 @@ pub struct SshTarget {
 #[derive(Clone, Copy)]
 pub struct SshHandle {
     pty: PtyHandle,
+}
+
+impl SshHandle {
+    /// The numeric id used to route `ssh_output` events and `ssh_write/resize/
+    /// close` calls to this session. Mirrors `PtyHandle::id` so the frontend
+    /// treats a remote panel id exactly like a local panel id.
+    pub fn id(&self) -> u32 {
+        self.pty.id
+    }
+
+    /// Reconstruct a handle from a bare id (the value the frontend sends back in
+    /// `ssh_write/resize/close`). The id space is owned by the SshManager's
+    /// internal PtyService, which is the only thing that ever mints real ids.
+    pub(crate) fn from_pty_id(id: u32) -> Self {
+        Self {
+            pty: PtyHandle { id },
+        }
+    }
 }
 
 /// Opens PTY-backed shells over SSH by spawning the system `ssh` binary on a
@@ -86,6 +105,15 @@ impl SshManager {
     pub fn close(&mut self, handle: &SshHandle) {
         self.pty.close(&handle.pty);
     }
+
+    /// Non-blocking poll for the `ssh` child's exit code (delegates to the
+    /// underlying PtyService). Returns Ok(None) while ssh is still running,
+    /// Ok(Some(code)) once it has exited. The ssh_open reader thread uses this
+    /// after the output stream ends to detect a connection failure (255) and
+    /// surface it as a `ssh_exit` event rather than leaving the panel hanging.
+    pub fn child_exit_code(&mut self, handle: &SshHandle) -> io::Result<Option<i32>> {
+        self.pty.child_exit_code(&handle.pty)
+    }
 }
 
 impl SshTarget {
@@ -101,6 +129,64 @@ impl SshTarget {
             return Err("SSH user is empty".to_string());
         }
         Ok(())
+    }
+}
+
+/// Parse a workspace-config `ssh_target` string ("user@host[:port]") into a
+/// structured `SshTarget`, or return a clear, user-readable error. Pure — no
+/// I/O, no env reads — so the parser is trivially unit-testable and the rest of
+/// the SSH path receives a structured target.
+///
+/// The user part is required; resolving a default user ($USER) is deferred to
+/// the Tauri command boundary so this function stays deterministic.
+pub fn parse_ssh_target(s: &str) -> Result<SshTarget, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("SSH target is empty".to_string());
+    }
+    let (user, rest) = trimmed
+        .split_once('@')
+        .ok_or_else(|| "SSH target must be in the form user@host[:port]".to_string())?;
+    if user.is_empty() {
+        return Err("SSH user is empty".to_string());
+    }
+    // Split host and optional ":port". A bare host with no colon -> port None.
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => {
+            let port = p
+                .parse::<u16>()
+                .map_err(|_| format!("invalid SSH port: {p}"))?;
+            (h, Some(port))
+        }
+        None => (rest, None),
+    };
+    if host.is_empty() {
+        return Err("SSH host is empty".to_string());
+    }
+    Ok(SshTarget {
+        host: host.to_string(),
+        user: user.to_string(),
+        port,
+    })
+}
+
+/// Map an `ssh` process exit code to a clear, user-readable failure message, or
+/// `None` when the exit is NOT a connection failure. Pure — no I/O.
+///
+/// OpenSSH exits 255 when *it* fails (host unreachable, port closed, host key
+/// rejected, auth/key rejected, DNS failure); any other non-zero code is the
+/// remote command's own exit status, meaning the connection succeeded. Only 255
+/// is translated to a connection-failure banner so a non-zero remote command
+/// doesn't pop a misleading "connection failed" message.
+pub fn friendly_ssh_exit(code: i32, host: &str) -> Option<String> {
+    if code == 255 {
+        Some(format!(
+            "Could not connect to {host}. Check that the host is reachable, the port is \
+             correct, and your key is loaded in ssh-agent (e.g. connection refused, host \
+             key rejected, or permission denied)."
+        ))
+    } else {
+        None
     }
 }
 
@@ -250,6 +336,130 @@ mod tests {
             ),
             Ok(_) => panic!("open should reject an empty host instead of spawning ssh"),
         }
+    }
+
+    // --- Phase 16: parse_ssh_target (Issue #17) -------------------------------
+    //
+    // The workspace config stores a remote panel's connection details as a single
+    // free-form string (`ssh_target`). `parse_ssh_target` is the pure boundary
+    // that turns that string into a `SshTarget` (or a clear Err), so the rest of
+    // the SSH path — validate, build_ssh_args, open — receives a structured target.
+    //
+    // Assumptions encoded here:
+    //  - Format: "user@host[:port]". The user part is REQUIRED — ssh accepts a
+    //    bare host (defaulting to $USER), but this deep module stays
+    //    deterministic and testable, so resolving $USER is deferred to the Tauri
+    //    command boundary, not hidden in this pure parser. A missing user is an
+    //    explicit, readable Err.
+    //  - Port is optional; ":<port>" sets it. No port = None (default 22).
+    //  - Empty/whitespace input is an Err (mirrors SshTarget::validate).
+
+    // T6 (basic user@host, no port):
+    //   Input:  "adam@example.com"
+    //   Output: Ok(SshTarget { user:"adam", host:"example.com", port:None })
+    #[test]
+    fn parse_target_basic_user_at_host() {
+        let t = parse_ssh_target("adam@example.com").expect("basic target parses");
+
+        assert_eq!(t.user, "adam");
+        assert_eq!(t.host, "example.com");
+        assert_eq!(t.port, None);
+    }
+
+    // T7 (custom port via :port):
+    //   Input:  "adam@example.com:2222"
+    //   Output: port = Some(2222), host without the port suffix.
+    #[test]
+    fn parse_target_custom_port() {
+        let t = parse_ssh_target("adam@example.com:2222").expect("port target parses");
+
+        assert_eq!(t.user, "adam");
+        assert_eq!(t.host, "example.com");
+        assert_eq!(t.port, Some(2222));
+    }
+
+    // T8 (missing user -> readable Err, AC1):
+    //   Input:  "example.com" (no user@). A bare host would default to $USER in
+    //            real ssh, but this pure parser requires an explicit user so the
+    //            error is deterministic and the message tells the user the fix.
+    #[test]
+    fn parse_target_missing_user_is_err() {
+        let err = parse_ssh_target("example.com").unwrap_err();
+        assert!(
+            err.contains("user@host"),
+            "error should point at the expected form: {err}"
+        );
+    }
+
+    // T9 (empty / whitespace -> Err):
+    //   Mirrors SshTarget::validate: an empty target string is rejected rather
+    //   than handed to ssh.
+    #[test]
+    fn parse_target_empty_is_err() {
+        assert!(parse_ssh_target("").is_err());
+        assert!(parse_ssh_target("   ").is_err());
+    }
+
+    // T10 (non-numeric port -> readable Err):
+    //   Input:  "adam@example.com:notaport"
+    //   Output: Err mentioning the bad port — so the user knows WHICH field is
+    //           wrong, not just "failed".
+    #[test]
+    fn parse_target_bad_port_is_err() {
+        let err = parse_ssh_target("adam@example.com:notaport").unwrap_err();
+        assert!(err.contains("port"), "error should mention port: {err}");
+    }
+
+    // --- Phase 16: friendly_ssh_exit (Issue #17, AC1) -------------------------
+    //
+    // SSH fails asynchronously: the `ssh` binary prints its own message to the
+    // PTY (which the user already sees in-panel) and exits with a code.
+    // `friendly_ssh_exit` maps that exit code to a clear, actionable message —
+    // or None when the exit is NOT a connection failure (so the UI doesn't scare
+    // the user with a "connection failed" banner when their remote command
+    // simply returned a non-zero status).
+    //
+    // OpenSSH semantics encoded here:
+    //  - 255 = ssh itself failed to connect/auth (the canonical "error" code).
+    //    Covers: host unreachable, port closed, host key rejected, auth/key
+    //    rejected, name resolution failed. We can't distinguish these from the
+    //    code alone, so the message lists the likely causes + the fix.
+    //  - 1..=254 = the REMOTE command's exit status. The connection succeeded;
+    //    the program the user ran on the far side just returned non-zero. This
+    //    is NOT a connection failure -> None.
+    //  - 0 = clean exit -> None.
+
+    // T11 (exit 255 -> connection failure message naming the host):
+    //   Input:  code=255, host="example.com"
+    //   Output: Some(msg) that names the host and points at the likely causes
+    //           (reachability, port, keys/agent). This is the core AC1 path.
+    #[test]
+    fn friendly_exit_255_is_connection_failure() {
+        let msg = friendly_ssh_exit(255, "example.com")
+            .expect("exit 255 should produce a failure message");
+
+        assert!(
+            msg.contains("example.com"),
+            "message should name the host: {msg}"
+        );
+        // Hints that cover the common 255 causes so the user can self-diagnose.
+        assert!(
+            msg.contains("connect") || msg.contains("reach"),
+            "message should hint at connectivity: {msg}"
+        );
+    }
+
+    // T12 (exit 0 and remote-command exits are NOT connection failures):
+    //   Input:  code=0 (clean), code=1 (remote command returned 1),
+    //           code=127 (remote command not found).
+    //   Output: None for all — the connection itself was fine. A non-zero remote
+    //           command must not trigger a "connection failed" banner; only ssh's
+    //           own failure code (255) does.
+    #[test]
+    fn friendly_exit_non_ssh_failures_are_none() {
+        assert_eq!(friendly_ssh_exit(0, "example.com"), None);
+        assert_eq!(friendly_ssh_exit(1, "example.com"), None);
+        assert_eq!(friendly_ssh_exit(127, "example.com"), None);
     }
 
     // --- Integration tests for AC1–4 (Issue #16) ------------------------------
