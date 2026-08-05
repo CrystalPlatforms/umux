@@ -40,9 +40,13 @@ vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => winMock,
 }))
 
-// Boundary: the heavy terminal surface. Mocked to a tiny labelled div.
+// Boundary: the heavy terminal surface. Mocked to a tiny div that echoes the
+// `sshTarget` prop into a data attribute so a configured remote panel can be
+// detected without mounting xterm.
 vi.mock('./TerminalSurface', () => ({
-  TerminalSurface: () => <div data-testid="terminal-surface" />,
+  TerminalSurface: (props: { sshTarget?: string }) => (
+    <div data-testid="terminal-surface" data-ssh-target={props.sshTarget ?? ''} />
+  ),
 }))
 
 import { WorkspaceShell } from './WorkspaceShell'
@@ -523,6 +527,57 @@ describe('WorkspaceShell', () => {
       // After cycling, beta is active: its panel shows, alpha's hides.
       expect(screen.getByTestId('panel-ws-2').className).not.toContain('is-hidden')
       expect(screen.getByTestId('panel-ws-1').className).toContain('is-hidden')
+    })
+  })
+
+  // Phase 16 / Issue #17 — SSH panel wiring.
+  //
+  // A workspace whose first configured panel carries an `sshTarget` must open
+  // that panel as a REMOTE surface: WorkspaceShell passes panels[0].sshTarget
+  // through to TerminalSurface. This is the one-line wire that lets a configured
+  // remote panel actually be exercised in the running app (the SshConnectDialog
+  // for entering targets from the UI is a later phase). Runtime panel ids are
+  // unrelated to config panel ids (each workspace seeds one fresh panel), so we
+  // map config[0] -> the first runtime surface.
+  describe('SSH panel wiring', () => {
+    it('passes the first configured panel sshTarget to its terminal surface', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              {
+                id: 'ws-1',
+                name: 'alpha',
+                panels: [{ id: 'p-1', sshTarget: 'adam@example.com' }],
+              },
+            ],
+          })
+        return Promise.resolve(undefined)
+      })
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      const remote = container.querySelector<HTMLElement>(
+        '[data-ssh-target="adam@example.com"]',
+      )
+      expect(remote).not.toBeNull()
+    })
+
+    it('leaves a panel with no sshTarget as a local (empty) surface', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              { id: 'ws-1', name: 'alpha', panels: [{ id: 'p-1' }] },
+            ],
+          })
+        return Promise.resolve(undefined)
+      })
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      const surface = container.querySelector<HTMLElement>('[data-ssh-target]')
+      expect(surface?.dataset.sshTarget).toBe('')
     })
   })
 })

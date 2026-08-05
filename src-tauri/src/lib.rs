@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use notification_service::{NotificationService, Notifier, PanelOrigin};
 use osc_parser::OscParser;
 use pty_service::{PtyHandle, PtyService};
+use ssh_manager::{parse_ssh_target, SshHandle, SshManager};
 use workspace_store::{WorkspaceData, WorkspaceStore};
 
 /// The app-wide notification mute flag. One instance is created in `run()` and
@@ -28,6 +29,17 @@ type MuteFlag = Arc<AtomicBool>;
 struct PtyOutputPayload {
     id: u32,
     data: Vec<u8>,
+}
+
+/// Notifies the renderer that an SSH session ended. `error` is a clear,
+/// user-readable connection-failure message when ssh exited with a failure code
+/// (255), or `None` for a clean / remote-command exit — so the frontend can show
+/// a diagnostic for a dead connection instead of leaving a blank, hung panel
+/// (Phase 16 / Issue #17, AC1 + AC2).
+#[derive(Serialize, Clone)]
+struct SshExitPayload {
+    id: u32,
+    error: Option<String>,
 }
 
 #[tauri::command]
@@ -117,6 +129,101 @@ fn pty_close(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<(), String>
     Ok(())
 }
 
+// --- SSH panels (Phase 16 / Issue #17) ----------------------------------------
+//
+// Remote panels live in a separate `SshManager` (which owns its own PtyService),
+// so they use a parallel command family — `ssh_open/write/resize/close` — and a
+// separate `ssh_output` event. This is deliberate: the SshManager's PtyService
+// mints its own ids from 0, so sharing the local `pty_output` channel would
+// collide (local id 0 vs remote id 0). A parallel family keeps the two id
+// spaces disjoint while giving remote panels the SAME shape (open → id; output
+// event filtered by id; write/resize/close by id) so the frontend can treat
+// them uniformly (AC3 parity).
+//
+// Synchronous errors (bad target string, empty host/user) come back as a
+// rejected invoke whose string is already the friendly message produced by
+// `parse_ssh_target` / `SshTarget::validate` (AC1). Async connection failures
+// (ssh exits 255) are surfaced later via the `ssh_exit` event (Plaster 5).
+
+#[tauri::command]
+fn ssh_open(
+    app: AppHandle,
+    state: State<'_, Mutex<SshManager>>,
+    mute: State<'_, MuteFlag>,
+    target: String,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    label: Option<String>,
+) -> Result<u32, String> {
+    let parsed = parse_ssh_target(&target).map_err(|e| e.to_string())?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let cols = cols.unwrap_or(80);
+    let rows = rows.unwrap_or(24);
+
+    let (handle, rx) = {
+        let mut mgr = state.lock().map_err(|e| e.to_string())?;
+        mgr.open(&parsed, cwd, cols, rows).map_err(|e| e.to_string())?
+    };
+    let id = handle.id();
+
+    // Same output-stream wiring as a local panel: feed each chunk through the
+    // OSC parser (completion sequences → notification) and emit the surviving
+    // bytes as `ssh_output`. Because remote and local panels share this exact
+    // treatment, a long-running task finishing over SSH fires the same desktop
+    // notification as a local one (AC3 parity for the notification path too).
+    let emit_app = app.clone();
+    let origin = PanelOrigin {
+        workspace: None,
+        panel: label,
+    };
+    let mute_flag = Arc::clone(&mute);
+    let host = parsed.host.clone();
+    std::thread::spawn(move || {
+        let mut parser = OscParser::new();
+        let service = NotificationService::with_mute(
+            Box::new(LibnotifyNotifier),
+            Some("umux".to_string()),
+            mute_flag,
+        );
+        while let Ok(bytes) = rx.recv() {
+            let passthrough = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            if !passthrough.is_empty() {
+                let _ = emit_app.emit("ssh_output", PtyOutputPayload { id, data: passthrough });
+            }
+        }
+
+        // The output stream ended (ssh exited). Poll its exit code and, if it's
+        // a connection failure (255 / signal), emit a `ssh_exit` event carrying
+        // a clear message so the frontend can show a diagnostic instead of a
+        // dead, blank panel. A clean or remote-command exit yields error=None.
+        let error = poll_ssh_exit(&emit_app, &handle, &host);
+        let _ = emit_app.emit("ssh_exit", SshExitPayload { id, error });
+    });
+
+    Ok(id)
+}
+
+#[tauri::command]
+fn ssh_write(state: State<'_, Mutex<SshManager>>, id: u32, data: String) -> Result<(), String> {
+    let mut mgr = state.lock().map_err(|e| e.to_string())?;
+    mgr.write(&SshHandle::from_pty_id(id), data.as_bytes())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn ssh_resize(state: State<'_, Mutex<SshManager>>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    let mut mgr = state.lock().map_err(|e| e.to_string())?;
+    mgr.resize(&SshHandle::from_pty_id(id), cols, rows)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn ssh_close(state: State<'_, Mutex<SshManager>>, id: u32) -> Result<(), String> {
+    let mut mgr = state.lock().map_err(|e| e.to_string())?;
+    mgr.close(&SshHandle::from_pty_id(id));
+    Ok(())
+}
+
 /// Real `Notifier` backed by libnotify via the `notify-send` CLI. Thin adapter
 /// on the OS boundary — not unit-tested; its behavior is verified manually by
 /// Adam on Ubuntu/Wayland.
@@ -186,6 +293,31 @@ fn notifications_muted(state: State<'_, MuteFlag>) -> bool {
     state.load(Ordering::SeqCst)
 }
 
+/// Poll the ssh child's exit code (briefly, after its output stream ended) and
+/// translate a connection-failure exit into a clear, user-readable message.
+/// Returns `None` for a clean exit or a remote-command exit (the connection
+/// itself was fine). Used by the `ssh_open` reader thread to emit `ssh_exit`.
+///
+/// This is the testable core of the async-error path; it composes the pure
+/// `friendly_ssh_exit` translator with one bounded poll of the live handle.
+fn poll_ssh_exit(app: &AppHandle, handle: &ssh_manager::SshHandle, host: &str) -> Option<String> {
+    let state = app.state::<Mutex<SshManager>>();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let code = loop {
+        match state.lock().ok()?.child_exit_code(handle) {
+            Ok(Some(c)) => break c,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    };
+    ssh_manager::friendly_ssh_exit(code, host)
+}
+
 /// Run one chunk of PTY output through the OSC parser and dispatch any
 /// completion events it surfaces. Returns the bytes the terminal should still
 /// see (everything that wasn't a recognized notification sequence) — those are
@@ -222,6 +354,7 @@ pub fn resolve_shell(shell: Option<&str>) -> String {
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(PtyService::new()))
+        .manage(Mutex::new(SshManager::new()))
         .manage(WorkspaceStore::new(config_path()))
         .manage(Arc::new(AtomicBool::new(false)) as MuteFlag)
         .invoke_handler(tauri::generate_handler![
@@ -229,6 +362,10 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_close,
+            ssh_open,
+            ssh_write,
+            ssh_resize,
+            ssh_close,
             load_workspaces,
             save_workspaces,
             set_notifications_muted,

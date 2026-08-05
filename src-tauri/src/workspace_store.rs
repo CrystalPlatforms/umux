@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Panel {
     pub id: String,
     // None = launch in the default cwd as a local panel (PRD story 37 / 38).
@@ -26,6 +27,7 @@ pub struct Panel {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Workspace {
     pub id: String,
     pub name: String,
@@ -229,5 +231,44 @@ mod tests {
         let back = store.load();
 
         assert_eq!(back, data);
+    }
+
+    // T-WIRE (Phase 16 / Issue #17 — Rust↔frontend wire format):
+    //   The TS frontend reads camelCase keys (`sshTarget`, `workingDirectory`).
+    //   Rust must serialize the SAME casing on the invoke boundary, or the
+    //   panel's sshTarget never reaches the renderer and a configured remote
+    //   panel silently opens as local. Lock the contract: the JSON emitted for a
+    //   panel uses camelCase, and that camelCase JSON parses back correctly.
+    #[test]
+    fn serialize_uses_camel_case_matching_frontend() {
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![Panel {
+                    id: "p-1".into(),
+                    working_directory: Some("/home/adam/proj".into()),
+                    ssh_target: Some("adam@host".into()),
+                }],
+            }],
+        };
+
+        let text = serialize_config(&data);
+
+        assert!(
+            text.contains("\"sshTarget\""),
+            "expected camelCase sshTarget in wire JSON, got: {text}"
+        );
+        assert!(
+            text.contains("\"workingDirectory\""),
+            "expected camelCase workingDirectory in wire JSON, got: {text}"
+        );
+        assert!(
+            !text.contains("\"ssh_target\""),
+            "snake_case ssh_target leaked into wire JSON: {text}"
+        );
+
+        // And the camelCase form must round-trip back into the same data.
+        assert_eq!(parse_config(&text), data);
     }
 }
