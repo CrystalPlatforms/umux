@@ -49,7 +49,42 @@ pub struct WorkspaceData {
 /// A missing or structurally invalid file yields defaults rather than an
 /// error: a bad write must never block startup (PRD story 38).
 pub fn parse_config(text: &str) -> WorkspaceData {
-    serde_json::from_str(text).unwrap_or_default()
+    parse_config_with_status(text).0
+}
+
+/// Outcome of attempting to load the config (Phase 18 / Issue #19, AC3).
+/// `Ok` = parsed normally; `Corrupted` = the text was unparseable so defaults
+/// were substituted (the user must be informed, not silently downgraded).
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum ConfigStatus {
+    Ok,
+    Corrupted,
+    Missing,
+}
+
+/// Parse a workspace config from its JSON text form, also reporting whether a
+/// fallback to defaults occurred. A corrupted file yields defaults AND
+/// `ConfigStatus::Corrupted` so the caller can warn the user (PRD story 38 +
+/// AC3: the fallback must not be silent).
+pub fn parse_config_with_status(text: &str) -> (WorkspaceData, ConfigStatus) {
+    match serde_json::from_str(text) {
+        Ok(data) => (data, ConfigStatus::Ok),
+        Err(_) => (WorkspaceData::default(), ConfigStatus::Corrupted),
+    }
+}
+
+/// User-facing warning text for a fallback, or `None` when no warning is
+/// warranted (Phase 18 / Issue #19, AC3). Only a `Corrupted` config downgrades
+/// the user's data without their action, so only that case speaks up; `Missing`
+/// is a normal first run and `Ok` is success.
+pub fn fallback_warning(status: ConfigStatus) -> Option<&'static str> {
+    match status {
+        ConfigStatus::Corrupted => Some(
+            "umux could not read its config file (it was corrupt or unreadable) \
+             and fell back to default workspaces.",
+        ),
+        ConfigStatus::Ok | ConfigStatus::Missing => None,
+    }
 }
 
 /// Serialize workspace data to its JSON text form.
@@ -71,9 +106,22 @@ impl WorkspaceStore {
 
     /// Load the config, or defaults if the file is missing or unreadable.
     pub fn load(&self) -> WorkspaceData {
+        self.load_with_status().0
+    }
+
+    /// Load the config and report whether a fallback occurred (Phase 18 / #19).
+    /// `Missing` = no file (normal first run, silent); `Corrupted` = the file
+    /// existed but could not be parsed (caller should warn the user, AC3);
+    /// `Ok` = parsed normally.
+    pub fn load_with_status(&self) -> (WorkspaceData, ConfigStatus) {
         match std::fs::read_to_string(&self.path) {
-            Ok(text) => parse_config(&text),
-            Err(_) => WorkspaceData::default(),
+            Ok(text) => parse_config_with_status(&text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (WorkspaceData::default(), ConfigStatus::Missing)
+            }
+            // Unreadable for any other reason (permissions, I/O) is treated as a
+            // fallback too: the user should know their config could not be read.
+            Err(_) => (WorkspaceData::default(), ConfigStatus::Corrupted),
         }
     }
 
@@ -231,6 +279,85 @@ mod tests {
         let back = store.load();
 
         assert_eq!(back, data);
+    }
+
+    // --- Phase 18: Robustness (Issue #19) -------------------------------------
+
+    // T-A1 (AC2/AC3 — a valid config parses with status Ok, no fallback):
+    //   Input:  well-formed JSON with one workspace.
+    //   Output: parse_config_with_status returns that workspace AND status Ok,
+    //           so the caller knows no fallback occurred (no user warning needed).
+    #[test]
+    fn parse_with_status_valid_config_is_ok() {
+        let text = r#"{"workspaces":[{"id":"ws-1","name":"alpha"}]}"#;
+
+        let (data, status) = parse_config_with_status(text);
+
+        assert_eq!(data.workspaces.len(), 1);
+        assert_eq!(data.workspaces[0].name, "alpha");
+        assert_eq!(status, ConfigStatus::Ok);
+    }
+
+    // T-A2 (AC3 — a corrupted config is flagged so the user can be warned):
+    //   Input:  garbage that is not valid JSON for WorkspaceData.
+    //   Output: default (empty) WorkspaceData AND status Corrupted — the caller
+    //           surfaces a warning, the fallback is not silent.
+    #[test]
+    fn parse_with_status_corrupted_reports_corrupted() {
+        let (data, status) = parse_config_with_status("this is { not valid config");
+
+        assert_eq!(data, WorkspaceData::default());
+        assert_eq!(status, ConfigStatus::Corrupted);
+    }
+
+    // T-A3 (AC2 — a missing config file is a normal first run, NOT a warning):
+    //   Input:  a WorkspaceStore whose path does not exist.
+    //   Output: default WorkspaceData AND status Missing — distinct from
+    //           Corrupted so the caller stays silent on first run (no warning).
+    #[test]
+    fn load_with_status_missing_file_reports_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path().join("missing.json"));
+
+        let (data, status) = store.load_with_status();
+
+        assert_eq!(data, WorkspaceData::default());
+        assert_eq!(status, ConfigStatus::Missing);
+    }
+
+    // T-A4 (AC3 — a corrupted file on disk is flagged through the fs layer):
+    //   Input:  a config file containing garbage bytes.
+    //   Output: default WorkspaceData AND status Corrupted — the fs layer
+    //           propagates the fallback reason so startup can warn the user.
+    #[test]
+    fn load_with_status_corrupted_file_reports_corrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "this is { not valid config").unwrap();
+        let store = WorkspaceStore::new(path);
+
+        let (data, status) = store.load_with_status();
+
+        assert_eq!(data, WorkspaceData::default());
+        assert_eq!(status, ConfigStatus::Corrupted);
+    }
+
+    // T-A5 (AC3 — only a Corrupted fallback produces a user-facing warning):
+    //   Input:  each ConfigStatus variant.
+    //   Output: a clear message only for Corrupted; None for Ok and Missing
+    //           (first run is normal, success is success — neither warns).
+    //   This is the pure decision the Tauri event/log wiring calls into.
+    #[test]
+    fn fallback_warning_only_for_corrupted() {
+        assert_eq!(fallback_warning(ConfigStatus::Ok), None);
+        assert_eq!(fallback_warning(ConfigStatus::Missing), None);
+        let msg = fallback_warning(ConfigStatus::Corrupted);
+        assert!(msg.is_some(), "Corrupted must yield a warning");
+        assert!(
+            msg.unwrap().to_lowercase().contains("corrupt"),
+            "warning should mention corruption: {:?}",
+            msg
+        );
     }
 
     // T-WIRE (Phase 16 / Issue #17 — Rust↔frontend wire format):

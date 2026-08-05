@@ -30,6 +30,22 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }))
 
+// Boundary: Tauri events. We capture the `config_fallback` handler so a test
+// can fire it and assert the UI surfaces a non-silent warning (Phase 18 / #19,
+// AC3). Other events are not used by WorkspaceShell today.
+let configFallbackHandler:
+  | ((e: { payload: { message: string } }) => void)
+  | null = null
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (
+    name: string,
+    handler: (e: { payload: { message: string } }) => void,
+  ) => {
+    if (name === 'config_fallback') configFallbackHandler = handler
+    return Promise.resolve(() => {})
+  },
+}))
+
 // Boundary: native window controls.
 const winMock = {
   minimize: vi.fn(),
@@ -54,6 +70,7 @@ import { WorkspaceShell } from './WorkspaceShell'
 describe('WorkspaceShell', () => {
   beforeEach(() => {
     invokeMock.mockReset()
+    configFallbackHandler = null
     winMock.minimize.mockClear()
     winMock.toggleMaximize.mockClear()
     winMock.close.mockClear()
@@ -634,6 +651,26 @@ describe('WorkspaceShell', () => {
 
       const surface = container.querySelector<HTMLElement>('[data-ssh-target]')
       expect(surface?.dataset.sshTarget).toBe('')
+    })
+
+    // Phase 18 / Issue #19 — AC3: a config fallback must NOT be silent. When
+    // the backend emits `config_fallback` (corrupt/unreadable config), the
+    // shell surfaces a visible, human-readable warning so Adam knows his
+    // workspaces were reset to defaults.
+    it('shows a visible warning when the config_fallback event fires', async () => {
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+      // No warning before the event.
+      expect(configFallbackHandler).not.toBeNull()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+      act(() => {
+        configFallbackHandler!({ payload: { message: 'config was corrupt' } })
+      })
+
+      const alert = await screen.findByRole('alert')
+      expect(alert.textContent).toContain('config was corrupt')
     })
   })
 })

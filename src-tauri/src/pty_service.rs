@@ -602,4 +602,62 @@ mod tests {
             marker
         );
     }
+
+    // T-ISO (Phase 18 / Issue #19, AC1 — a crashing shell does not affect
+    //   other workspaces/panels):
+    //   Input:  two PTYs in one PtyService. Panel A is `sh -c 'exit 1'` (dies
+    //           immediately); panel B is a normal interactive shell.
+    //   Output: after A has crashed and its output stream ended, B still
+    //           responds to input — its `echo` output still arrives. Proves the
+    //           service isolates a per-panel failure: one entry's death must not
+    //           tear down the service, the shared reader thread, or any sibling.
+    //   Boundary: a real `exit` is the crash trigger (no signal gymnastics); the
+    //   sibling is probed AFTER A's channel disconnects, so the test only passes
+    //   if B genuinely survived A's death.
+    #[test]
+    fn crashing_shell_does_not_affect_sibling_panel() {
+        let mut svc = PtyService::new();
+
+        // Panel A: a shell that exits immediately (the "crash").
+        let (handle_a, rx_a) = svc
+            .spawn_argv(
+                vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()],
+                PathBuf::from("/tmp"),
+                80,
+                24,
+            )
+            .expect("spawn A");
+
+        // Panel B: a normal interactive shell that should keep working.
+        let (handle_b, rx_b) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open B");
+        // Drain B's initial prompt before probing.
+        let _ = wait_for_output(&rx_b, b"$", Duration::from_secs(3));
+
+        // Wait until A has fully exited: its output stream must disconnect.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut a_dead = false;
+        while Instant::now() < deadline {
+            match rx_a.recv_timeout(Duration::from_millis(100)) {
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    a_dead = true;
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            }
+        }
+        assert!(a_dead, "panel A's output stream never ended after `exit 1`");
+
+        // Now probe B — it must STILL respond, proving isolation from A's death.
+        svc.write(&handle_b, b"echo still_alive\n").expect("write B");
+        assert!(
+            wait_for_output(&rx_b, b"still_alive", Duration::from_secs(5)),
+            "sibling panel B did not respond after panel A crashed — isolation broken"
+        );
+
+        svc.close(&handle_a);
+        svc.close(&handle_b);
+    }
 }
