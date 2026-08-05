@@ -15,7 +15,7 @@ use notification_service::{NotificationService, Notifier, PanelOrigin};
 use osc_parser::OscParser;
 use pty_service::{PtyHandle, PtyService};
 use ssh_manager::{parse_ssh_target, SshHandle, SshManager};
-use workspace_store::{WorkspaceData, WorkspaceStore};
+use workspace_store::{fallback_warning, WorkspaceData, WorkspaceStore};
 
 /// The app-wide notification mute flag. One instance is created in `run()` and
 /// shared (via Arc) with every panel's NotificationService, so a single toggle
@@ -267,9 +267,29 @@ fn config_path() -> PathBuf {
     base.join("umux").join("workspaces.json")
 }
 
+/// Payload for the `config_fallback` event (Phase 18 / Issue #19, AC3).
+/// Emitted when the config file was corrupt/unreadable and umux fell back to
+/// default workspaces, so the renderer can show the user a clear message
+/// instead of silently downgrading their setup.
+#[derive(Serialize, Clone)]
+struct ConfigFallbackPayload {
+    message: &'static str,
+}
+
 #[tauri::command]
-fn load_workspaces(state: State<'_, WorkspaceStore>) -> WorkspaceData {
-    state.load()
+fn load_workspaces(
+    app: AppHandle,
+    state: State<'_, WorkspaceStore>,
+) -> WorkspaceData {
+    let (data, status) = state.load_with_status();
+    // AC3: a corrupted config must not be a silent downgrade. Surface a clear
+    // message both in the backend log and as an event the frontend can render.
+    // Missing is a normal first run -> silent; Ok is success.
+    if let Some(message) = fallback_warning(status) {
+        log::warn!("[config] fallback: {message}");
+        let _ = app.emit("config_fallback", ConfigFallbackPayload { message });
+    }
+    data
 }
 
 #[tauri::command]

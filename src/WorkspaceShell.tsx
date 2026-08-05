@@ -15,6 +15,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { TerminalSurface } from './TerminalSurface'
 import { EmptyState } from './EmptyState'
@@ -265,6 +266,10 @@ export function WorkspaceShell() {
   // Notification mute (Phase 14 / #15). Session-only — not persisted: the flag
   // lives in the backend, seeded as audible on app start.
   const [muted, setMuted] = useState(false)
+  // Config fallback warning (Phase 18 / #19, AC3). Set when the backend emits
+  // `config_fallback` (corrupt/unreadable config -> defaults), so the downgrade
+  // is surfaced instead of silent. Dismissible; cleared on dismiss.
+  const [fallbackMessage, setFallbackMessage] = useState<string | null>(null)
 
   useEffect(() => {
     void invoke<{ workspaces: Workspace[] }>('load_workspaces').then((data) => {
@@ -294,6 +299,18 @@ export function WorkspaceShell() {
   // Seed the mute indicator from the backend flag (source of truth).
   useEffect(() => {
     void invoke<boolean>('notifications_muted').then(setMuted)
+  }, [])
+
+  // Surface a config fallback as a visible warning (AC3). The backend emits
+  // `config_fallback` from `load_workspaces` only when the config was corrupt
+  // or unreadable; a normal first run (missing file) stays silent.
+  useEffect(() => {
+    const unlistenP = listen<{ message: string }>('config_fallback', (event) => {
+      setFallbackMessage(event.payload.message)
+    })
+    return () => {
+      void unlistenP.then((fn) => fn())
+    }
   }, [])
 
   // Toggle the app-wide mute: flip the backend flag, then mirror its returned
@@ -591,6 +608,19 @@ export function WorkspaceShell() {
       )}
 
       <main className="main">
+        {fallbackMessage && (
+          <div className="fallback-banner" role="alert">
+            <span>{fallbackMessage}</span>
+            <button
+              className="fallback-dismiss"
+              aria-label="Dismiss warning"
+              title="Dismiss"
+              onClick={() => setFallbackMessage(null)}
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        )}
         {state.workspaces.length === 0 && !creating ? (
           <EmptyState onCreate={startCreate} />
         ) : null}
