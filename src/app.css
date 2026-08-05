@@ -305,6 +305,34 @@ body {
   display: none;
 }
 
+/* Friendly onboarding shown in the main area when there are no workspaces
+   yet (Phase 17 / #18). Centered hero — a clear welcome + a single path
+   forward (the CTA). Disappears as soon as the first workspace exists. */
+
+.empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  color: #c9c9c9;
+}
+
+.empty-state h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+.empty-state p {
+  margin: 0 0 8px;
+  color: #8a8a8a;
+}
+
 /* One or two terminal surfaces. Single fills the area; a split distributes
    them along the orientation axis, sized by the drag ratio (Phase 10). */
 
