@@ -21,17 +21,18 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 
 ---
 
-## Prerequisites
+## Installation
 
-umux builds on Ubuntu. Besides [Node.js](https://nodejs.org/) (18+) and [Rust](https://www.rust-lang.org/) (stable, 1.77.2+), the Tauri v2 backend needs several system libraries.
+umux is built and run on **Ubuntu (Wayland)**. There is no `.deb` published yet, so you build it from source. This is a one-time setup — follow the steps in order.
 
-On a fresh Ubuntu install, run:
+> Every command below is run in a terminal. If a step fails, read the error message; the most common problems (missing `pkg-config`, wrong WebKit version) are flagged in the notes.
+
+### Step 1 — System libraries
+
+The Tauri v2 backend compiles against native WebKit/GTK libraries, so first install the build dependencies. Update the package index, then install everything in one go:
 
 ```bash
-# Rust toolchain (if you don't already have it)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# System libraries required by the Tauri v2 (webkit2gtk-4.1) backend
+sudo apt update
 sudo apt install -y \
   pkg-config \
   libwebkit2gtk-4.1-dev \
@@ -39,58 +40,133 @@ sudo apt install -y \
   libssl-dev \
   libayatana-appindicator3-dev \
   librsvg2-dev \
-  libxdo-dev
+  libxdo-dev \
+  libnotify-bin
 ```
 
-> Note: Tauri v2 uses **webkit2gtk-4.1** (not 4.0, which was Tauri v1).
+What each one is for:
 
-Desktop notifications use `notify-send` (part of `libnotify-bin`), which is preinstalled on most Ubuntu desktops:
+- **`pkg-config`** — lets Rust locate the native libraries below. This is the single most common missing piece on a fresh clone; without it the build fails with `The pkg-config command could not be found`.
+- **`libwebkit2gtk-4.1-dev`** — the web engine Tauri renders into. ⚠️ Tauri v2 needs **`4.1`**, *not* `4.0` (that was Tauri v1). Installing the wrong one produces cryptic linker errors.
+- **`build-essential`** — C/C++ compiler (`gcc`, `g++`, `make`) needed to compile native crates.
+- **`libssl-dev`** — OpenSSL headers for TLS support.
+- **`libayatana-appindicator3-dev`** — system-tray support.
+- **`librsvg2-dev`** — SVG rendering (app icons).
+- **`libxdo-dev`** — input simulation for keyboard shortcuts.
+- **`libnotify-bin`** — provides `notify-send`, used for desktop completion notifications. (Usually preinstalled, but listed for completeness.)
+
+### Step 2 — Rust toolchain
+
+umux needs a stable Rust toolchain (1.77.2 or newer). Check whether you already have it:
 
 ```bash
-sudo apt install -y libnotify-bin
+rustc --version
 ```
 
----
+If that prints a version ≥ 1.77.2, skip to Step 3. If it says `command not found`, install Rust via [rustup](https://rustup.rs) (the official installer):
 
-## Build & run
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-Install the JavaScript dependencies once:
+Follow the prompts (the defaults are fine), then load Rust into your current shell:
+
+```bash
+source "$HOME/.cargo/env"
+```
+
+Verify it works:
+
+```bash
+rustc --version     # should now print a version number
+cargo --version     # Rust's build tool
+```
+
+### Step 3 — Node.js
+
+The frontend needs [Node.js](https://nodejs.org/) 18 or newer. Ubuntu's default `node` is often older, so check first:
+
+```bash
+node --version
+npm --version
+```
+
+If Node is missing or older than 18, install it via [NodeSource](https://github.com/nodesource/distributions) (recommended over the Ubuntu package, which tends to be outdated):
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+Re-run `node --version` to confirm you're on 18+.
+
+### Step 4 — Get the source
+
+Clone the repository (or `fork` it first if you plan to contribute):
+
+```bash
+git clone https://github.com/MrCrystal2/umux.git
+cd umux
+```
+
+### Step 5 — Install JavaScript dependencies
+
+Pull in the frontend libraries once:
 
 ```bash
 npm install
 ```
 
-### Development
+This creates `node_modules/`. You only need to re-run it after updating dependencies (`package.json` changes).
 
-Launch the desktop window with hot-reloading (starts the Vite dev server and the Rust backend together):
+### Step 6 — Build and run
+
+To launch the desktop window with hot-reloading (this compiles the Rust backend and starts the Vite dev server together — the first build can take several minutes):
 
 ```bash
 npm run tauri dev
 ```
 
-To iterate on the frontend alone without the desktop shell:
+The umux window should appear. You're set up.
 
-```bash
-npm run dev      # Vite dev server on http://localhost:5173
-```
-
-To iterate on the Rust backend in isolation:
-
-```bash
-cd src-tauri
-cargo check      # fast type-check
-cargo test       # backend unit tests
-```
-
-### Production / release build
-
-Build an installable Ubuntu package (`.deb` / `.AppImage`):
+For a **production / release build** (an installable Ubuntu package):
 
 ```bash
 npm run tauri build
 ```
 
-The output artifacts land in `src-tauri/target/release/bundle/`. Install the `.deb` with `sudo apt install ./<file>.deb`, or run the AppImage directly.
+Artifacts land in `src-tauri/target/release/bundle/`. Install the `.deb` with:
+
+```bash
+sudo apt install ./src-tauri/target/release/bundle/deb/*.deb
+```
+
+Then launch umux from your application menu, or run `umux` in a terminal.
+
+### Troubleshooting
+
+- **`The pkg-config command could not be found`** — you skipped Step 1. Run the `apt install` line again.
+- **Linker errors mentioning `webkit2gtk`** — you installed the `4.0` version instead of `4.1`. Remove it and install `libwebkit2gtk-4.1-dev` (Step 1).
+- **`error: failed to run custom build command for ... openssl`** — install `libssl-dev` and `pkg-config` (Step 1).
+- **`npm: command not found`** — Node.js isn't installed or your shell didn't pick it up. Re-run Step 3 and open a new terminal.
+- **Blank/white window on startup** — make sure you're on a Wayland session (log out, click the gear on the login screen, choose "Ubuntu on Wayland"). X11 is not supported in the MVP.
+
+---
+
+## Build & run (quick reference)
+
+Already set up? These are the everyday commands:
+
+```bash
+npm install             # one-time, after cloning or pulling dependency updates
+
+npm run tauri dev       # development: desktop window with hot-reload
+npm run dev             # frontend only (Vite dev server, http://localhost:5173)
+
+cd src-tauri
+cargo check             # fast Rust type-check (no binary produced)
+cargo test              # backend unit tests
+```
 
 ### Tests
 
