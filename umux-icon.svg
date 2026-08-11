@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Tło -->
+  <rect width="1024" height="1024" rx="224" ry="224" fill="#0B0B0F"/>
+
+  <!-- Biała przerywana ramka z zaokrąglonymi segmentami -->
+  <rect x="188" y="188" width="648" height="648" rx="96" ry="96"
+        fill="none" stroke="#FFFFFF" stroke-width="30"
+        stroke-linecap="round" stroke-dasharray="58 46"/>
+
+  <!-- Falista linia cyan (asymetrycznie, górny obszar) -->
+  <path d="M 250 392
+           C 320 332, 400 332, 470 392
+           S 600 452, 670 392
+           S 800 332, 774 372"
+        fill="none" stroke="#22D3EE" stroke-width="44"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

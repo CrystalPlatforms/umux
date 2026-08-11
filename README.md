@@ -23,11 +23,71 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 
 ## Installation
 
-umux is built and run on **Ubuntu (Wayland)**. There is no `.deb` published yet, so you build it from source. This is a one-time setup — follow the steps in order.
+umux runs on **Ubuntu (Wayland)**. There are two ways to install it:
 
-> Every command below is run in a terminal. If a step fails, read the error message; the most common problems (missing `pkg-config`, wrong WebKit version) are flagged in the notes.
+- **Option A — Download a prebuilt package** (recommended for most users). Grab a ready `.deb` or `.AppImage` from GitHub Releases — no compiler or toolchain needed.
+- **Option B — Build from source**. Clone the repo and compile it yourself. Useful if you want the latest unreleased code or want to contribute.
 
-### Step 1 — System libraries
+### Option A — Download a prebuilt package (recommended)
+
+Prebuilt packages are published on the GitHub **Releases** page:
+
+👉 **<https://github.com/CrystalPlatforms/umux/releases>**
+
+Each release provides two Linux package formats. Pick one:
+
+#### A.1 — Install via `.deb` (integrates with the system)
+
+The `.deb` is the native Ubuntu package. It installs umux into your application menu, adds the `umux` command, and registers the desktop icon.
+
+1. Download the `umux_<version>_amd64.deb` file from the release.
+2. Install it (and its dependency, WebKit):
+
+   ```bash
+   sudo apt update
+   sudo apt install -y ./umux_*_amd64.deb
+   ```
+
+   > Installing via `apt` (instead of `dpkg`) lets the system pull in the required `libwebkit2gtk-4.1` dependency automatically. If you used `dpkg -i` and hit dependency errors, run `sudo apt --fix-broken install`.
+
+3. Launch **umux** from your application menu, or run `umux` in a terminal.
+
+To **update** later, just download the new `.deb` and repeat step 2.
+
+To **uninstall**:
+
+```bash
+sudo apt remove umux
+```
+
+#### A.2 — Run via `.AppImage` (portable, no install)
+
+The `.AppImage` is a single portable file — no installation, no root permissions. It runs on most modern Linux distributions.
+
+1. Download the `umux_<version>_amd64.AppImage` file from the release.
+2. Make it executable:
+
+   ```bash
+   chmod +x umux_*_amd64.AppImage
+   ```
+
+3. Run it:
+
+   ```bash
+   ./umux_*_amd64.AppImage
+   ```
+
+   > **First run:** if nothing happens or you see a dialog about "AppImage" support, install AppImageLauncher or run it from a terminal to see the error. On Ubuntu you may also need `libwebkit2gtk-4.1-0` installed (`sudo apt install libwebkit2gtk-4.1-0`).
+
+To **update**, just download the new `.AppImage` and replace the old file. To **uninstall**, simply delete the file.
+
+---
+
+### Option B — Build from source
+
+This is a one-time setup — follow the steps in order. Every command below is run in a terminal. If a step fails, read the error message; the most common problems (missing `pkg-config`, wrong WebKit version) are flagged in the notes.
+
+#### Step 1 — System libraries
 
 The Tauri v2 backend compiles against native WebKit/GTK libraries, so first install the build dependencies. Update the package index, then install everything in one go:
 
@@ -55,7 +115,7 @@ What each one is for:
 - **`libxdo-dev`** — input simulation for keyboard shortcuts.
 - **`libnotify-bin`** — provides `notify-send`, used for desktop completion notifications. (Usually preinstalled, but listed for completeness.)
 
-### Step 2 — Rust toolchain
+#### Step 2 — Rust toolchain
 
 umux needs a stable Rust toolchain (1.77.2 or newer). Check whether you already have it:
 
@@ -82,7 +142,7 @@ rustc --version     # should now print a version number
 cargo --version     # Rust's build tool
 ```
 
-### Step 3 — Node.js
+#### Step 3 — Node.js
 
 The frontend needs [Node.js](https://nodejs.org/) 18 or newer. Ubuntu's default `node` is often older, so check first:
 
@@ -100,16 +160,16 @@ sudo apt install -y nodejs
 
 Re-run `node --version` to confirm you're on 18+.
 
-### Step 4 — Get the source
+#### Step 4 — Get the source
 
 Clone the repository (or `fork` it first if you plan to contribute):
 
 ```bash
-git clone https://github.com/MrCrystal2/umux.git
+git clone https://github.com/CrystalPlatforms/umux.git
 cd umux
 ```
 
-### Step 5 — Install JavaScript dependencies
+#### Step 5 — Install JavaScript dependencies
 
 Pull in the frontend libraries once:
 
@@ -119,7 +179,7 @@ npm install
 
 This creates `node_modules/`. You only need to re-run it after updating dependencies (`package.json` changes).
 
-### Step 6 — Build and run
+#### Step 6 — Build and run
 
 To launch the desktop window with hot-reloading (this compiles the Rust backend and starts the Vite dev server together — the first build can take several minutes):
 
@@ -143,7 +203,7 @@ sudo apt install ./src-tauri/target/release/bundle/deb/*.deb
 
 Then launch umux from your application menu, or run `umux` in a terminal.
 
-### Troubleshooting
+#### Troubleshooting (build from source)
 
 - **`The pkg-config command could not be found`** — you skipped Step 1. Run the `apt install` line again.
 - **Linker errors mentioning `webkit2gtk`** — you installed the `4.0` version instead of `4.1`. Remove it and install `libwebkit2gtk-4.1-dev` (Step 1).

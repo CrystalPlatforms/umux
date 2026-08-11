@@ -1,0 +1,47 @@
+name: release
+
+# Ten workflow uruchamia się automatycznie, gdy na GitHubie
+# opublikujesz nowy "Release" (z tagiem, np. v0.1.0).
+# Buduje wtedy aplikację na Ubuntu i dołącza pliki instalacyjne
+# (.deb oraz .AppImage) do tego release'a, żeby każdy mógł je pobrać.
+on:
+  release:
+    types: [published]
+  workflow_dispatch: # pozwala też uruchomić ręcznie z zakładki Actions
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Pobierz kod repozytorium
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Zainstaluj zależności systemowe (Tauri / WebKit)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Zainstaluj zależności frontendu (npm ci)
+        run: npm ci
+
+      - name: Zbuduj aplikację i dołącz pliki do release'a
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.release.tag_name }}
+          releaseName: ${{ github.event.release.name }}
+          releaseDraft: false
+          prerelease: false
+          # budujemy tylko pakiet Linux (deb + AppImage)
+          args: --target x86_64-unknown-linux-gnu
