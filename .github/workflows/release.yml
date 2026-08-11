@@ -9,6 +9,11 @@ on:
     types: [published]
   workflow_dispatch: # pozwala też uruchomić ręcznie z zakładki Actions
 
+# Domyślny token GitHub Actions nie ma prawa modyfikować release'ów.
+# Ta linijka nadaje mu uprawnienie zapisu, żeby móc wrzucić pliki (.deb/.AppImage).
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     runs-on: ubuntu-22.04
