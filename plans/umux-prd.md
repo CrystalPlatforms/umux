@@ -2,21 +2,21 @@
 
 **Project:** umux
 **Type:** Open-source desktop application
-**Platform:** Ubuntu (Wayland)
+**Platform:** Linux (Ubuntu/Wayland) + Windows + macOS
 **Stack:** Tauri v2 (Rust backend) + React + TypeScript (frontend)
-**Status:** Planning
+**Status:** v0.1 shipped (Linux only); v0.2 and v1.0 planned — see Roadmap
 
 ---
 
 ## Problem Statement
 
-Power users and developers on Ubuntu accumulate many terminal windows across several projects over the course of a workday. Each project may need multiple shells — a build process, log tails, a local server, an AI coding assistant — and these windows quickly become scattered across virtual desktops or buried in a long window list. There is no lightweight, project-oriented way to group terminals into persistent, switchable collections, so users lose context, waste time hunting for the right window, and end up with a cluttered, hard-to-navigate terminal setup.
+Power users and developers accumulate many terminal windows across several projects over the course of a workday. Each project may need multiple shells — a build process, log tails, a local server, an AI coding assistant — and these windows quickly become scattered across virtual desktops or buried in a long window list. There is no lightweight, project-oriented way to group terminals into persistent, switchable collections, so users lose context, waste time hunting for the right window, and end up with a cluttered, hard-to-navigate terminal setup.
 
-Existing tools each solve only part of the problem. Terminal multiplexers (tmux, screen) provide splitting but live entirely inside a single terminal window, do not offer a native desktop experience, and are intimidating for beginners. Tiling terminals (Tilix, Terminator) offer pane splitting but lack the concept of named, persistent project workspaces that survive restarts. None of them watch the terminal stream to notify the user when a long-running AI CLI task (such as Claude Code or Aider generating code) has finished, so the user must either keep watching the window or periodically check back.
+Existing tools each solve only part of the problem. Terminal multiplexers (tmux, screen) provide splitting but live entirely inside a single terminal window, do not offer a native desktop experience, and are intimidating for beginners. Newer agent-era multiplexers (e.g. herdr) add real power on top of the tmux model — agent status, persistent session servers, plugins — but keep the terminal-native, keybinding-first learning curve. Tiling terminals (Tilix, Terminator) offer pane splitting but lack the concept of named, persistent project workspaces that survive restarts. None of them watch the terminal stream to notify the user when a long-running AI CLI task (such as Claude Code or Aider generating code) has finished, so the user must either keep watching the window or periodically check back.
 
 ## Solution
 
-umux is an open-source terminal workspace manager for Ubuntu (Wayland). It is a single native desktop application that contains its own built-in terminal (Approach A). Users organize their terminals into named **workspaces**, where each workspace typically corresponds to a project. Within a workspace, the terminal area can be split into **up to two panels** that can be resized by dragging the divider. The application also inspects the terminal byte stream for completion signals emitted by AI CLI tools — which emit standard OSC 9;9 / OSC 99 / OSC 777 escape sequences — and fires a native desktop notification when such a task finishes, so the user can step away while an AI generates code.
+umux is an open-source terminal workspace manager for **Linux, Windows, and macOS**. It is a single native desktop application that contains its own built-in terminal (Approach A). Users organize their terminals into named **workspaces**, where each workspace typically corresponds to a project. Within a workspace, the terminal area can be split into **any number of resizable panels** (drag the dividers). The application also inspects the terminal byte stream for completion signals emitted by AI CLI tools — which emit standard OSC 9;9 / OSC 99 / OSC 777 escape sequences — and fires a native desktop notification when such a task finishes, so the user can step away while an AI generates code.
 
 The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser, and the desktop notification bridge. The React + TypeScript frontend renders the terminal surface and the workspace/pane user interface.
 
@@ -44,11 +44,11 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 
 ### Pane Layout
 15. As a developer, I want to split a single panel into two, so that I can watch a log next to the command I am running.
-16. As a developer, I want splitting to be limited to two panels per workspace, so that the layout stays simple and predictable.
+16. As a developer, I want to split into as many panels as I need (no hard limit), so that complex projects get the layout they need while simple setups stay simple.
 17. As a developer, I want to split either horizontally or vertically, so that I can arrange panels to fit my task.
 18. As a developer, I want to drag the divider between two panels to resize them, so that I can give more room to the panel I am focused on.
 19. As a developer, I want the divider to snap to a sensible minimum size on each side, so that a panel never collapses to zero.
-20. As a developer, I want to close one of two panels and have the remaining panel fill the space, so that the layout stays clean after closing.
+20. As a developer, I want to close a panel and have the neighboring panels fill the space, so that the layout stays clean after closing.
 
 ### SSH
 21. As a developer, I want to open a panel connected to a remote machine over SSH, so that I can work on a server from inside the same workspace.
@@ -76,6 +76,25 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 37. As a developer, I want panel layouts and working directories to be saved, so that reopening a workspace restores a sensible starting state.
 38. As a developer, I want a corrupted config file to fall back to defaults instead of crashing the app, so that a bad write never blocks startup.
 
+### Agent Status (AI CLI awareness) — v0.2.0
+39. As a developer, I want each panel to show a live status indicator (working / waiting for me / idle), derived from the OSC activity stream, so that I can see at a glance which agent needs attention.
+40. As a developer, I want the status indicator to be accurate (no false "done" states), so that I never walk away from an agent that is still working.
+41. As a developer, I want to turn the status indicators off in Settings, so that the UI stays minimal if I do not want them.
+
+### Settings & Feature Toggles — v0.2.0
+42. As a user, I want a Settings screen with on/off switches for optional features (agent status, notifications, analytics), so that umux adapts to how I work.
+43. As a user, I want my settings to persist across restarts, so that I do not reconfigure umux every launch.
+
+### Session Restore — v0.2.0
+44. As a developer, I want umux to restore my workspaces, panels, layout, working directories, and shells when I reopen the app, so that a restart costs me seconds, not minutes. (Running processes are not resumed — see Roadmap v2.0 for a background server.)
+45. As a developer, I want restored shells to open in the correct working directory, so that context is preserved.
+
+### Safe Closing — v0.2.0
+46. As a developer, I want closing a panel that has a running process to always ask for confirmation, and closing an idle panel to never ask, so that the behavior is predictable and I never lose agent work by accident.
+
+### Privacy-friendly Analytics — v0.2.0
+47. As the maintainer, I want anonymized usage events via Aptabase (free tier, official Tauri SDK, users can opt out), so that real usage is measured instead of guessed from downloads.
+
 ---
 
 ## Implementation Decisions
@@ -90,6 +109,7 @@ umux is a single desktop application with its own embedded terminal surface, rat
 1. **PtyService** *(deep module)* — Owns the lifecycle of pseudoterminals.
    - Interface: `open(request) → handle`; `write(handle, bytes)`; `resize(handle, cols, rows)`; `close(handle)`; plus a per-handle output stream of bytes.
    - Encapsulates fork/exec (via a portable-pty-style crate or `nix`), file-descriptor management, signal handling, and clean teardown.
+   - Cross-platform via `portable-pty` (ConPTY on Windows). Default shell per OS: `$SHELL` or `/bin/bash` on Linux/macOS, PowerShell on Windows.
    - Deep because the interface is small but it hides a large, OS-specific body of work.
 
 2. **OscParser** *(deep module)* — A pure, stateful byte-stream parser.
@@ -97,13 +117,14 @@ umux is a single desktop application with its own embedded terminal surface, rat
    - Recognizes OSC 9;9, OSC 99, and OSC 777 completion sequences, extracts their payloads as notification events, and forwards all non-matching bytes untouched so the terminal output is never altered.
    - Deep because the surface is tiny but it implements a state machine, handles partial sequences that span chunk boundaries, and supports three protocols. It is trivially unit-testable with fixed byte fixtures and has no I/O dependencies.
 
-3. **NotificationService** — Consumes parsed OSC notification events and delivers them to the desktop via libnotify (`notify-rust`). Debounced and idempotent.
+3. **NotificationService** — Consumes parsed OSC notification events and delivers them to the desktop via `notify-rust` (D-Bus/libnotify on Linux, native notification centers on Windows and macOS). Debounced and idempotent. Behavior on Linux is considered stable — do not change it; only platform portability is verified.
 
 4. **SshManager** *(deep module)* — Opens PTY-backed shells over SSH.
    - Interface: `connect(spec) → session`, reusing PtyService's output-stream abstraction so the frontend treats local and remote panels identically.
    - Encapsulates the SSH transport, agent/key authentication, and channel-to-PTY bridging.
+   - Supported on Linux and macOS for v1.0.0; Windows SSH is deferred (agent/keystore differences).
 
-5. **WorkspaceStore** — Persists workspace definitions (names, order, panel layout, working directories, SSH targets) to a config file under `~/.config/umux`. Read on startup, written on change.
+5. **WorkspaceStore** — Persists workspace definitions (names, order, panel layout, working directories, SSH targets) and application settings to a per-OS config directory: `~/.config/umux` (or `$XDG_CONFIG_HOME/umux`) on Linux, `%APPDATA%\umux` on Windows, `~/Library/Application Support/umux` on macOS. Read on startup, written on change.
 
 6. **CommandBridge** — The Tauri command surface (`invoke` handlers) that exposes the above services to the frontend and ferries PTY output to the terminal renderer over a Tauri event channel.
 
@@ -111,11 +132,15 @@ umux is a single desktop application with its own embedded terminal surface, rat
 
 7. **TerminalSurface** — Wraps `xterm.js`; attaches to a PTY handle's output stream and sends keystrokes back through the CommandBridge. One instance per panel.
 
-8. **PaneLayout** *(deep module)* — Owns the split state and geometry of up to two panels within a workspace. Computes ratios, handles drag-resize, and enforces the two-panel maximum and minimum sizes. Pure layout logic, testable without a live terminal.
+8. **PaneLayout** *(deep module)* — Owns the split state and geometry of **any number of panels** within a workspace (v0.2.0 lifts the original two-panel cap). Computes geometry for a tree of splits, handles drag-resize of dividers, and enforces per-panel minimum sizes. Pure layout logic, testable without a live terminal.
 
 9. **WorkspaceShell** — The workspace switcher UI: list of workspaces, create/rename/delete/close actions.
 
 10. **SshConnectDialog** — UI for entering or selecting an SSH target and opening a remote panel.
+
+11. **SettingsScreen** — Settings UI with feature toggles (agent status, notifications, analytics), persisted through WorkspaceStore.
+
+12. **AgentStatusIndicator** — Per-panel status indicator (working / waiting / idle) driven by OSC-derived events.
 
 ### Key data flows
 - **Keystrokes:** xterm.js → CommandBridge → `PtyService.write` → PTY.
@@ -123,8 +148,10 @@ umux is a single desktop application with its own embedded terminal surface, rat
 - **Persistence:** WorkspaceStore writes on workspace/panel/layout changes.
 
 ### Technology-specific constraints
-- Target display server is **Wayland**. X11 support is explicitly out of scope for the MVP.
+- Supported platforms: **Linux (developed and tested on Ubuntu/Wayland), Windows 10+, and macOS 11+** (universal binary: Apple Silicon + Intel). X11 sessions on Linux are not tested and not officially supported.
 - Completion detection relies on AI CLI tools emitting OSC 9;9 / OSC 99 / OSC 777 sequences (Claude Code emits these automatically). No process polling or output pattern matching is required.
+- Builds are **unsigned** (no paid certificates, zero-cost policy). First-run warnings (macOS Gatekeeper, Windows SmartScreen) are documented in the README rather than paid away.
+- CI (GitHub Actions, on release publish) builds all three platforms: `.deb` + `.AppImage` (Linux), NSIS `-setup.exe` (Windows), universal `.dmg` (macOS).
 
 ---
 
@@ -136,7 +163,7 @@ Each user story above maps to one or more acceptance checks. Most are verified b
 ### Component "done" criteria
 - **OscParser:** Unit tests cover each supported OSC protocol, including sequences split across byte-chunk boundaries and unrelated escape sequences passing through unmodified.
 - **PtyService:** A panel opens an interactive shell, accepts input, produces output, resizes cleanly, and leaves no orphan process after close.
-- **PaneLayout:** Unit tests cover split creation, the two-panel maximum, drag-resize clamping at minimum sizes, and panel-close filling behavior.
+- **PaneLayout:** Unit tests cover split creation, arbitrary N-panel layouts, drag-resize clamping at minimum sizes, and panel-close filling behavior.
 - **SshManager:** A panel connects to a remote host using the local SSH agent, supports input/output/resize, and surfaces a clear error on failure.
 - **NotificationService:** A desktop notification appears when a simulated completion sequence is injected, and mute works.
 - **WorkspaceStore:** Workspaces survive an application restart, and a corrupted config falls back to defaults without crashing.
@@ -146,25 +173,34 @@ Each user story above maps to one or more acceptance checks. Most are verified b
 - Closing a panel never leaks shell processes.
 - Normal terminal output is byte-identical whether or not the OSC parser is active.
 
-### Acceptance threshold
-The MVP is accepted when Adam can, on his own Ubuntu (Wayland) machine: create workspaces, split into two resizable panels, run shells and an SSH session, receive a desktop notification when Claude Code finishes generating, and reopen the app with his workspaces intact.
+### Acceptance thresholds (per release)
+- **v0.1 (shipped):** Adam can, on his own Ubuntu (Wayland) machine: create workspaces, split into two resizable panels, run shells and an SSH session, receive a desktop notification when Claude Code finishes generating, and reopen the app with his workspaces intact.
+- **v0.2.0:** Adam can, on Ubuntu: split into 3+ panels, see accurate agent status indicators, toggle features in Settings, and reopen the app with his full layout, working directories, and shells restored; closing a busy panel always asks, closing an idle one never does.
+- **v1.0.0:** Adam can install and use umux on his Windows machine and his Mac (per-OS shell and config directory working, notifications firing); CI attaches `.exe`, `.dmg`, and Linux artifacts to the release; the landing page on Cloudflare Pages is live.
 
 ---
+
+## Roadmap
+
+- **v0.2.0 — features (Linux first):** unlimited panels (PaneLayout rewritten for N panels), agent status per panel, Settings screen with feature toggles, session restore (layout/panels/working dirs/shells), consistent close confirmations, Aptabase analytics (opt-out).
+- **v1.0.0 — full cross-platform launch:** Windows (NSIS `.exe`) and macOS (universal `.dmg`) builds via GitHub Actions, per-OS shells and config directories, unsigned-first-run docs, landing page on Cloudflare Pages (`*.pages.dev`, zero cost), start of promotion (X/Twitter + dev.to, English; Adam produces the media himself, ≤1 h/week; YouTube deferred).
+- **v2.0 — later:** plugin system with a browsable marketplace, and an optional background server so sessions survive app close (full herdr-style persistence).
 
 ## Out of Scope
 
 - Browser integration of any kind.
 - Git integration (status, diffs, commits, etc.) inside the application.
-- Support for the X11 display server (Wayland only for the MVP).
-- More than two panels per workspace.
+- Support for the X11 display server (untested; Wayland is the reference Linux session).
 - Custom theming / advanced appearance customization beyond a sensible default.
 - Synchronization of workspaces across machines.
-- Mobile or non-Linux platforms.
+- Mobile platforms.
+- Paid code-signing certificates (builds stay unsigned; first-run warnings are documented).
+- Plugin system and background session server before v2.0 (see Roadmap).
 
 ---
 
 ## Further Notes
 
-- umux is open-source and hosted publicly on GitHub. There is no commercial revenue model and no hard deadline; success is validated by Adam testing locally.
+- umux is open-source and hosted publicly on GitHub. There is no commercial revenue model and no hard deadline; post-launch success is measured by GitHub stars, release downloads, and anonymized Aptabase usage, on top of Adam testing locally.
 - Adam is the product owner and does not write code; implementation is performed by Claude Code, with Adam reviewing output and testing locally. Explanations should therefore be step-by-step and beginner-friendly.
 - Planning artifacts live in `./plans/`. This PRD is followed by an implementation plan (`umux-plan.md`, produced via `/carve`) and then decomposed into GitHub issues (via `/dispatch`).

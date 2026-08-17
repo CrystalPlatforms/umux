@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What umux is
 
-umux is an open-source terminal workspace manager (a "cmux alternative") for **Ubuntu/Wayland**. It's a single Tauri v2 desktop app with its own embedded terminal surface — not a tool that manipulates external windows, because Wayland restricts foreign-window control. Users group terminals into named **workspaces** (typically one per project), each holding **up to two resizable panels**. The app inspects the terminal byte stream for AI-CLI completion signals (OSC 9;9 / OSC 99 / OSC 777 escape sequences, which Claude Code emits automatically) and fires a native desktop notification when a long-running task finishes.
+umux is an open-source terminal workspace manager (a "cmux alternative") for **Linux (Ubuntu/Wayland), Windows, and macOS**. It's a single Tauri v2 desktop app with its own embedded terminal surface — not a tool that manipulates external windows. Users group terminals into named **workspaces** (typically one per project), each holding **any number of resizable panels** (unlimited from v0.2.0; originally capped at two). The app inspects the terminal byte stream for AI-CLI completion signals (OSC 9;9 / OSC 99 / OSC 777 escape sequences, which Claude Code emits automatically) and fires a native desktop notification when a long-running task finishes.
 
-The authoritative spec is the PRD in `README.md` (duplicated at `plans/umux-prd.md` — only a trailing line differs; treat `README.md` as canonical). **Implementation status is early scaffold**: most of the architecture described below is greenfield target, not existing code. See "Repo layout notes" for what actually exists today.
+The formal spec is the PRD at `plans/umux-prd.md` (user stories, constraints, Roadmap); `README.md` is the user-facing guide (install, build). Keep both in sync when scope changes; discovery decisions from August 2026 live in `plans/umux-2.0-plan.md`. **Implementation status: v0.1 shipped** (Linux; all core modules exist — see "Repo layout notes"). Cross-platform builds, unlimited panels, agent status, Settings, and session restore are planned per the PRD Roadmap (v0.2.0/v1.0.0).
 
 ## Commands
 
@@ -27,7 +27,7 @@ Frontend tests use **Vitest + jsdom + @testing-library/react**. Vitest config li
 
 Two-process Tauri model. The **Rust backend** (`src-tauri/`) owns everything OS- and I/O-bound; the **React + TS frontend** (`src/`) renders the terminal and workspace UI. They communicate via Tauri `invoke` commands (frontend→backend) and Tauri event channels (backend→frontend, primarily the PTY output stream).
 
-Planned backend modules in `src-tauri/src/` — **`lib.rs` is still the bare `create-tauri-app` scaffold** (only a logging plugin in `run()`), so none of these are built yet:
+Backend modules in `src-tauri/src/` (all implemented as of v0.1):
 - **PtyService** *(deep)* — pseudoterminal lifecycle: `open`/`write`/`resize`/`close` plus a per-handle output stream. Owns fork/exec, fd management, signal handling, clean teardown.
 - **OscParser** *(deep, pure)* — stateful byte-stream parser: `push(bytes) → (passthrough_bytes, emitted_events)`. Recognizes OSC 9;9/99/777 completion sequences, forwards all other bytes unmodified, and handles sequences split across chunk boundaries. No I/O — trivially unit-testable with fixed byte fixtures.
 - **NotificationService** — consumes parsed OSC events → libnotify (`notify-rust`). Debounced, idempotent.
@@ -35,9 +35,9 @@ Planned backend modules in `src-tauri/src/` — **`lib.rs` is still the bare `cr
 - **WorkspaceStore** — persists workspace definitions (names, order, panel layout, working dirs, SSH targets) to `~/.config/umux`. Read on startup, written on change; a corrupted config falls back to defaults rather than crashing.
 - **CommandBridge** — the Tauri `invoke` surface + event channel that exposes the above to the frontend and ferries PTY output to the renderer.
 
-Planned frontend components in `src/` — only `EmptyState` exists today:
+Frontend components in `src/` (implemented as of v0.1):
 - **TerminalSurface** — wraps `xterm.js` per panel; attaches to a PTY handle's output stream and sends keystrokes back through CommandBridge.
-- **PaneLayout** *(deep, pure)* — split state + geometry for ≤2 panels: ratios, drag-resize clamping at minimum sizes, two-panel maximum. Testable without a live terminal.
+- **PaneLayout** *(deep, pure)* — split state + geometry. v0.1 covers ≤2 panels; **v0.2.0 rewrites it for unlimited panels** (tree of splits, per-panel minimum sizes). Testable without a live terminal.
 - **WorkspaceShell** — workspace switcher (list + create/rename/delete/close).
 - **SshConnectDialog** — SSH target entry/selection.
 
@@ -50,17 +50,19 @@ The modules marked *(deep)* are intended to have small interfaces hiding large, 
 
 ## Hard constraints (from the PRD — do not drift without a decision)
 
-- **Wayland only** for the MVP; X11 is explicitly out of scope.
-- **Two panels max** per workspace; PaneLayout must enforce this and a sensible per-side minimum.
+- **Platforms:** Linux (Ubuntu/Wayland is the reference), Windows 10+, macOS 11+ (universal binary). X11 sessions untested. Windows/macOS builds land at v1.0.0.
+- **Panels:** unlimited per workspace (decided Aug 2026 — supersedes the original two-panel cap). PaneLayout enforces a sensible per-panel minimum.
 - Completion detection relies **solely on OSC escape sequences** — no process polling or output pattern matching.
 - **Normal terminal output must be byte-identical** whether or not the OSC parser is active (OscParser only passes bytes through and extracts events; it never mutates terminal output).
-- Out of scope: browser integration, git integration, >2 panels, custom theming, cross-machine sync, mobile/non-Linux platforms.
+- **Notifications are stable on Linux** — don't change their behavior; only verify portability to Windows/macOS.
+- **Zero-cost policy:** builds stay unsigned (no paid certificates); Gatekeeper/SmartScreen first-run workarounds are documented in the README.
+- Out of scope: browser integration, git integration, custom theming, cross-machine sync, mobile. Plugins + a background session server are deferred to v2.0 (see PRD Roadmap).
 
 ## Repo layout notes
 
 - Frontend sources: `src/` — entry `main.tsx` → `App.tsx` (currently renders `<EmptyState />`).
 - Backend sources: `src-tauri/src/` — `main.rs` calls `app_lib::run()` in `lib.rs`. The Cargo package is named `app` (lib `app_lib`).
-- Planning artifacts: `plans/` (only `umux-prd.md` today). The PRD anticipates an implementation plan (`umux-plan.md`, via `/carve`) and GitHub issues (via `/dispatch`) that may not exist yet — `plans/` is expected to outpace the code, so **check what is actually implemented before assuming any planned component exists.**
+- Planning artifacts: `plans/` (`umux-prd.md` = formal PRD with Roadmap, `umux-plan.md` = implementation plan from `/carve`, `umux-2.0-plan.md` = discovery decisions, Aug 2026). The PRD drives `/carve` and `/dispatch` — **check what is actually implemented before assuming any planned component exists.**
 - `dist/`, `vite.config.js`, and `*.tsbuildinfo` are generated artifacts and gitignored — don't hand-edit them.
 
 ## Working on this repo
