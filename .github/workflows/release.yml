@@ -2,8 +2,9 @@ name: release
 
 # Ten workflow uruchamia się automatycznie, gdy na GitHubie
 # opublikujesz nowy "Release" (z tagiem, np. v0.1.0).
-# Buduje wtedy aplikację na Ubuntu i dołącza pliki instalacyjne
-# (.deb oraz .AppImage) do tego release'a, żeby każdy mógł je pobrać.
+# Buduje wtedy aplikację na Ubuntu i macOS i dołącza pliki instalacyjne
+# (.deb, .AppImage oraz uniwersalny .dmg) do tego release'a,
+# żeby każdy mógł je pobrać.
 on:
   release:
     types: [published]
@@ -50,3 +51,36 @@ jobs:
           prerelease: false
           # budujemy tylko pakiet Linux (deb + AppImage)
           args: --target x86_64-unknown-linux-gnu
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Pobierz kod repozytorium
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Build uniwersalny łączy dwie architektury w jeden plik .dmg:
+      # aarch64 (Apple Silicon M1+) + x86_64 (starsze Intele).
+      # Na macOS nie instalujemy zależności systemowych — WebKit
+      # (wkwebView) jest częścią systemu.
+      - name: Dodaj cele Rust (build uniwersalny)
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Zainstaluj zależności frontendu (npm ci)
+        run: npm ci
+
+      - name: Zbuduj aplikację i dołącz pliki do release'a (macOS)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.release.tag_name }}
+          releaseName: ${{ github.event.release.name }}
+          releaseDraft: false
+          prerelease: false
+          # .app + .dmg uniwersalny (Apple Silicon i Intel w jednym)
+          args: --target universal-apple-darwin
