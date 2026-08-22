@@ -111,6 +111,13 @@ impl PtyService {
             cmd.arg(arg);
         }
         cmd.cwd(cwd);
+        // A GUI-launched app (Finder/Dock on macOS, a desktop launcher on
+        // Linux) inherits no TERM, which degrades the shell's line editor
+        // (backspace misbinds) and breaks TERM-reading tools like `clear`.
+        // The renderer is xterm.js, so fill in an xterm terminal type —
+        // inheriting the parent's TERM when we have one (`tauri dev`).
+        let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+        cmd.env("TERM", term);
         let child = pair.slave.spawn_command(cmd).map_err(pt_err)?;
 
         let reader = pair.master.try_clone_reader().map_err(pt_err)?;
@@ -302,8 +309,14 @@ mod tests {
     }
 
     fn process_exists(pid: i32) -> bool {
-        // /proc/<pid> exists iff the process is alive on Linux.
-        std::fs::metadata(format!("/proc/{}", pid)).is_ok()
+        // `kill -0 <pid>` probes for existence without sending a real signal;
+        // exit 0 = alive. Works on both Linux and macOS (which has no /proc).
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     fn wait_until_gone(pid: i32, timeout: Duration) -> bool {
@@ -332,6 +345,30 @@ mod tests {
         );
 
         svc.close(&handle);
+    }
+
+    // GUI-launched apps inherit no TERM (verified on macOS Finder launches),
+    // and a TERM-less shell misbinds keys (backspace) and breaks `clear`.
+    // Scrub TERM from the test process, spawn `env`, and expect the fallback
+    // value in its output. Restores TERM afterwards, mirroring the HOME
+    // save/restore in writes_shell_to_config_home below.
+    #[test]
+    fn spawn_argv_fills_missing_term() {
+        let mut svc = PtyService::new();
+        let saved_term = std::env::var("TERM").ok();
+        std::env::remove_var("TERM");
+
+        let (_handle, rx) = svc
+            .spawn_argv(vec!["/usr/bin/env".to_string()], PathBuf::from("/"), 80, 24)
+            .expect("open pty");
+
+        let saw_term = wait_for_output(&rx, b"TERM=xterm-256color", Duration::from_secs(5));
+
+        match saved_term {
+            Some(t) => std::env::set_var("TERM", t),
+            None => std::env::remove_var("TERM"),
+        }
+        assert!(saw_term, "expected TERM=xterm-256color in `env` output");
     }
 
     #[test]
@@ -367,7 +404,7 @@ mod tests {
             .expect("open pty");
 
         // Drain initial prompt/echo noise before issuing the probe command.
-        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+        let _ = wait_for_output(&rx, b" ", Duration::from_secs(3));
 
         svc.resize(&handle, 120, 40).expect("resize");
         svc.write(&handle, b"stty size\n").expect("write");
@@ -389,7 +426,7 @@ mod tests {
             .expect("open pty");
 
         // Drain the initial prompt before probing, then ask the shell for its PID.
-        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+        let _ = wait_for_output(&rx, b" ", Duration::from_secs(3));
         svc.write(&handle, b"echo PID=$$\n").expect("write");
 
         let pid = wait_for_pid(&rx, Duration::from_secs(5))
@@ -422,7 +459,7 @@ mod tests {
         let (handle, rx) = svc
             .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
             .expect("open pty");
-        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+        let _ = wait_for_output(&rx, b" ", Duration::from_secs(3));
 
         let start = Instant::now();
         svc.close(&handle);
@@ -445,7 +482,7 @@ mod tests {
         let (handle, rx) = svc
             .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
             .expect("open pty");
-        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+        let _ = wait_for_output(&rx, b" ", Duration::from_secs(3));
 
         svc.close(&handle);
 
