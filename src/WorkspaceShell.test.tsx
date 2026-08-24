@@ -155,7 +155,12 @@ describe('WorkspaceShell', () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
         workspaces: [
-          { id: expect.any(String), name: 'my-project', panels: [] },
+          {
+            id: expect.any(String),
+            name: 'my-project',
+            panels: [],
+            layout: { kind: 'leaf', id: expect.any(String) },
+          },
         ],
       }),
     )
@@ -209,7 +214,15 @@ describe('WorkspaceShell', () => {
     expect(await screen.findByText('alpha-renamed')).toBeInTheDocument()
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [{ id: 'ws-1', name: 'alpha-renamed' }],
+        workspaces: [
+          {
+            id: 'ws-1',
+            name: 'alpha-renamed',
+            // bootState seeded a fresh single-leaf layout for the config that
+            // had none (v0.2 / #25) — it persists along with the rename.
+            layout: { kind: 'leaf', id: expect.any(String) },
+          },
+        ],
       }),
     )
   })
@@ -238,6 +251,40 @@ describe('WorkspaceShell', () => {
 
     expect(screen.getByRole('menuitem', { name: /new workspace/i })).toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: /minimize/i })).not.toBeInTheDocument()
+  })
+
+  // HITL fix (macOS): a two-finger trackpad click does not synthesize a DOM
+  // `contextmenu` event in WKWebView — the menu must also open on the right
+  // mousedown itself, and on Ctrl+click (the macOS right-click).
+  it('opens the workspace menu on a right-button mousedown (trackpad two-finger click)', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+    fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-1'), { button: 2 })
+
+    expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeInTheDocument()
+  })
+
+  it('opens the workspace menu on Ctrl+click (macOS right-click)', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+    fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-1'), {
+      button: 0,
+      ctrlKey: true,
+    })
+
+    expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeInTheDocument()
   })
 
   it('collapses the sidebar and expands it again from the corner toggle', async () => {
@@ -331,7 +378,13 @@ describe('WorkspaceShell', () => {
     expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [{ id: 'ws-2', name: 'beta' }],
+        workspaces: [
+          {
+            id: 'ws-2',
+            name: 'beta',
+            layout: { kind: 'leaf', id: expect.any(String) },
+          },
+        ],
       }),
     )
 
@@ -383,9 +436,21 @@ describe('WorkspaceShell', () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
         workspaces: [
-          { id: 'ws-2', name: 'beta' },
-          { id: 'ws-3', name: 'gamma' },
-          { id: 'ws-1', name: 'alpha' },
+          {
+            id: 'ws-2',
+            name: 'beta',
+            layout: { kind: 'leaf', id: expect.any(String) },
+          },
+          {
+            id: 'ws-3',
+            name: 'gamma',
+            layout: { kind: 'leaf', id: expect.any(String) },
+          },
+          {
+            id: 'ws-1',
+            name: 'alpha',
+            layout: { kind: 'leaf', id: expect.any(String) },
+          },
         ],
       }),
     )
@@ -449,8 +514,9 @@ describe('WorkspaceShell', () => {
       expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe('vertical')
     })
 
-    // AC story 16 — two-panel cap: the split actions are disabled once split.
-    it('disables both split actions once the workspace is already split', async () => {
+    // v0.2 / #25 — unlimited panels: the split actions stay available and a
+    // second split (of the now-active new panel) yields a third surface.
+    it('keeps the split actions enabled and splits again into three surfaces', async () => {
       seedOne()
       render(<WorkspaceShell />)
       await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
@@ -458,11 +524,17 @@ describe('WorkspaceShell', () => {
       // First split applies and closes the menu.
       openRowMenu()
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
 
-      // Reopen — both actions must now be disabled (cap reached).
+      // Reopen — the actions are still enabled (no cap), and a second, mixed
+      // split nests under the active panel: 3 surfaces, 2 dividers.
       openRowMenu()
-      expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeDisabled()
-      expect(screen.getByRole('menuitem', { name: /split vertical/i })).toBeDisabled()
+      const splitAgain = await screen.findByRole('menuitem', { name: /split vertical/i })
+      expect(splitAgain).toBeEnabled()
+      fireEvent.click(splitAgain)
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(3)
+      expect(screen.getAllByRole('separator', { name: /resize panels/i })).toHaveLength(2)
     })
 
     // AC story 18 — a draggable divider is rendered between the two panels.
@@ -487,10 +559,82 @@ describe('WorkspaceShell', () => {
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
       expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
 
-      fireEvent.click(screen.getByRole('button', { name: /close panel \(first\)/i }))
+      // Close buttons are labeled by their panel's short id; close one of the two.
+      const closeButtons = screen.getAllByRole('button', { name: /close panel/i })
+      fireEvent.click(closeButtons[0])
 
       expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(1)
       expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe(undefined)
+    })
+
+    // v0.2 / #25 AC3 — closing a MIDDLE panel of three leaves a clean layout:
+    // the sibling fills the freed space, no gap, one divider remains.
+    it('closes a middle panel of three without leaving a gap', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      // Two splits -> panels A | (B / C); the active panel after the first
+      // split is the new one, so the second split nests under it.
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      await screen.findAllByTestId('terminal-surface')
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split vertical/i }))
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(3)
+
+      // Close the middle panel (B) — the first close button of the nested pair.
+      const closeButtons = screen.getAllByRole('button', { name: /close panel/i })
+      fireEvent.click(closeButtons[1])
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
+      expect(screen.getAllByRole('separator', { name: /resize panels/i })).toHaveLength(1)
+      // The root stays a horizontal split (A | C).
+      expect(screen.getByTestId('panel-ws-1').dataset.splitOrientation).toBe('horizontal')
+    })
+
+    // v0.2 / #25 (HITL fix) — a survivor's terminal must NEVER remount when a
+    // sibling closes (or a split happens): the earlier recursive-tree render
+    // rebuilt the DOM on layout changes and wiped the shell's content. Panes
+    // are keyed by leaf id in one stable parent now, so the very same DOM
+    // node must stay connected across the layout change.
+    it('keeps the surviving surface mounted (same DOM node) when a sibling closes', async () => {
+      seedOne()
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
+
+      const [first, second] = Array.from(
+        container.querySelectorAll<HTMLElement>('[data-panel-id]'),
+      )
+      // Close the FIRST panel; the second must survive untouched.
+      fireEvent.click(screen.getAllByRole('button', { name: /close panel/i })[0])
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(1)
+      expect(document.contains(first)).toBe(false) // the closed one is gone
+      expect(document.contains(second)).toBe(true) // survivor: NOT remounted
+      expect(second.dataset.panelId).toBe(
+        container.querySelector<HTMLElement>('[data-panel-id]')?.dataset.panelId,
+      )
+    })
+
+    it('keeps the existing surface mounted (same DOM node) when a split happens', async () => {
+      seedOne()
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      const original = container.querySelector<HTMLElement>('[data-panel-id]')
+      expect(original).not.toBeNull()
+
+      openRowMenu()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(2)
+
+      // The original panel's DOM node survived the split — its shell too.
+      expect(document.contains(original!)).toBe(true)
     })
   })
 

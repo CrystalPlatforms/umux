@@ -32,10 +32,12 @@ import {
   closePanel,
   focusPanel,
   activePanelOf,
+  bootState,
+  panelIdsOf,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
-import { createLayout, type Orientation } from './PaneLayout'
+import { boxes, type LayoutNode, type Orientation, type Container } from './PaneLayout'
 import { matchShortcut } from './shortcuts'
 import { NotificationMuteButton } from './NotificationMuteButton'
 
@@ -106,6 +108,7 @@ function SidebarExpandIcon({ className }: IconProps) {
   )
 }
 
+
 function SplitHorizontalIcon({ className }: IconProps) {
   // A panel split into left | right by a vertical divider.
   return (
@@ -135,62 +138,87 @@ type MenuState = {
   workspaceId?: string
 } | null
 
-// PanelArea — one or two terminal surfaces under a single parent, so a panel
-// keeps its shell across layout changes (Phase 10 / #11). Each surface is keyed
-// by its stable panel id: splitting adds a keyed surface (the original keeps
-// its shell), closing one drops its key (the survivor stays mounted under this
-// same parent instead of remounting into a blank terminal).
+/// A mouse press that should open the context menu: the right button, or
+/// Ctrl+click (the macOS right-click). macOS trackpads additionally deliver a
+/// two-finger click as a right mousedown WITHOUT a DOM `contextmenu` event,
+/// so the menu must open here too, not only on `onContextMenu`.
+function isMenuPress(e: React.MouseEvent): boolean {
+  return e.button === 2 || (e.ctrlKey && e.button === 0)
+}
+
+// PanelSurfaces — renders a workspace's split tree as a FLAT list of
+// absolutely-positioned terminal panes plus divider bars (v0.2 Phase 1 / #25).
+// Every pane is keyed by its stable leaf id inside this one stable parent, so
+// tree-shape changes (split, close, resize) only reposition surfaces — a
+// terminal is never remounted, and its shell/content survives. This is the
+// fix for close-remounts: the earlier recursive flex tree re-created DOM
+// nodes whenever a split collapsed, killing every shell below it.
 //
-// With two panels a draggable divider is rendered between them; the split ratio
-// (in workspace state) sizes the surfaces. Pointer events drive the drag.
-type PanelAreaProps = {
-  id: string
-  panelIds: string[]
-  orientation: Orientation
-  ratio: number
-  activePanelId: string | null
+// Pane/divider geometry comes from PaneLayout.boxes (pure), measured from the
+// live container via ResizeObserver. Divider drags report the split node's id
+// plus the node's own extent, so the minimum-size clamp in setRatio is correct
+// at any nesting depth.
+const DIVIDER_PX = 6
+
+type PanelSurfacesProps = {
+  workspaceId: string
   workspaceName: string
-  // When set, the FIRST surface opens as a remote SSH panel instead of a local
-  // shell (Phase 16 / Issue #17). Comes from the workspace's first configured
-  // panel's `sshTarget`; the second panel of a split is created at runtime with
-  // no config, so it stays local.
+  layout: LayoutNode
+  activePanelId: string | null
+  // Identity of the tree's first leaf — the legacy SSH wiring (Phase 16 /
+  // #17) passes the workspace's first configured `sshTarget` to it.
+  firstLeafId: string
   sshTarget?: string
-  onResize: (ratio: number, container: { width: number; height: number }) => void
+  onResize: (splitId: string, ratio: number, container: Container) => void
+  onResizeEnd: () => void
   onClose: (panelId: string) => void
   onFocusPanel: (panelId: string) => void
 }
 
-function PanelArea({ id, panelIds, orientation, ratio, activePanelId, workspaceName, sshTarget, onResize, onClose, onFocusPanel }: PanelAreaProps) {
-  const surfacesRef = useRef<HTMLDivElement | null>(null)
-  const horizontal = orientation === 'horizontal'
-  const isSplit = panelIds.length > 1
+function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, sshTarget, onResize, onResizeEnd, onClose, onFocusPanel }: PanelSurfacesProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [size, setSize] = useState({ width: 0, height: 0 })
 
-  // flex-grow shares the row/column between the two surfaces in proportion to
-  // `ratio`; the fixed-width divider sits between them. A single panel just
-  // takes the whole area.
-  const firstFlex = isSplit ? `${ratio} 1 0%` : '1 1 100%'
-  const secondFlex = `${1 - ratio} 1 0%`
+  // Track the container's box so pane geometry follows window resizes.
+  useEffect(() => {
+    const el = containerRef.current
+    if (el == null || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect()
+      setSize({ width: r.width, height: r.height })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
-  // Human-readable panel labels for desktop notifications, so the user can tell
-  // which workspace/panel finished a long-running task.
-  const firstLabel = `${workspaceName} · ${horizontal ? 'left' : 'top'}`
-  const secondLabel = `${workspaceName} · ${horizontal ? 'right' : 'bottom'}`
+  const { panes, dividers } = boxes(layout, size, DIVIDER_PX)
 
-  const onPointerDown = (e: React.PointerEvent) => {
+  // Drag a divider: the pointer's position along the split's axis becomes the
+  // ratio over the DIVIDABLE length (axis minus this divider's own gap), so
+  // the bar lands under the cursor. Capture/release on window so the drag
+  // continues beyond the thin hit area.
+  const startDrag = (d: (typeof dividers)[number]) => (e: React.PointerEvent) => {
     e.preventDefault()
-    const container = surfacesRef.current
-    if (container == null) return
-    const rect = container.getBoundingClientRect()
+    const horizontal = d.orientation === 'horizontal'
+    const rect = d.splitRect
 
     const onMove = (ev: PointerEvent) => {
-      const next = horizontal
-        ? (ev.clientX - rect.left) / rect.width
-        : (ev.clientY - rect.top) / rect.height
-      onResize(next, { width: rect.width, height: rect.height })
+      const avail = horizontal ? rect.width - DIVIDER_PX : rect.height - DIVIDER_PX
+      if (avail <= 0) return
+      const pos = horizontal ? ev.clientX - rect.x : ev.clientY - rect.y
+      onResize(
+        d.id,
+        pos / avail,
+        // The clamp axis is the space the two panes actually share.
+        horizontal
+          ? { width: avail, height: rect.height }
+          : { width: rect.width, height: avail },
+      )
     }
     const onUp = () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      onResizeEnd()
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -198,51 +226,51 @@ function PanelArea({ id, panelIds, orientation, ratio, activePanelId, workspaceN
 
   return (
     <div
-      ref={surfacesRef}
-      className={`panel-surfaces ${isSplit ? `split-${orientation}` : ''}`}
-      data-testid={`panel-surfaces-${id}`}
+      ref={containerRef}
+      className="panel-surfaces"
+      data-testid={`panel-surfaces-${workspaceId}`}
     >
-      <div
-        key={panelIds[0]}
-        className={`surface ${activePanelId === panelIds[0] ? 'is-active' : ''}`}
-        data-panel-id={panelIds[0]}
-        style={{ flex: firstFlex }}
-        onClick={() => onFocusPanel(panelIds[0])}
-      >
-        <TerminalSurface label={firstLabel} sshTarget={sshTarget} />
-        {isSplit && <PanelCloseButton onClose={() => onClose(panelIds[0])} which="first" />}
-      </div>
-      {isSplit && (
-        <>
+      {panes.map((p) => {
+        // Stable, human-readable panel tag for notifications and the close
+        // button — position names (left/right) stop working with N panels.
+        const short = p.id.slice(0, 4)
+        return (
           <div
-            className={`divider divider-${orientation}`}
-            role="separator"
-            aria-label="Resize panels"
-            onPointerDown={onPointerDown}
-          />
-          <div
-            key={panelIds[1]}
-            className={`surface ${activePanelId === panelIds[1] ? 'is-active' : ''}`}
-            data-panel-id={panelIds[1]}
-            style={{ flex: secondFlex }}
-            onClick={() => onFocusPanel(panelIds[1])}
+            key={p.id}
+            className={`surface ${activePanelId === p.id ? 'is-active' : ''}`}
+            data-panel-id={p.id}
+            style={{ left: p.rect.x, top: p.rect.y, width: p.rect.width, height: p.rect.height }}
+            onClick={() => onFocusPanel(p.id)}
           >
-            <TerminalSurface label={secondLabel} />
-            <PanelCloseButton onClose={() => onClose(panelIds[1])} which="second" />
+            <TerminalSurface
+              label={`${workspaceName} · ${short}`}
+              sshTarget={p.id === firstLeafId ? sshTarget : undefined}
+            />
+            <PanelCloseButton onClose={() => onClose(p.id)} short={short} />
           </div>
-        </>
-      )}
+        )
+      })}
+      {dividers.map((d) => (
+        <div
+          key={d.id}
+          className={`divider divider-${d.orientation}`}
+          style={{ left: d.rect.x, top: d.rect.y, width: d.rect.width, height: d.rect.height }}
+          role="separator"
+          aria-label="Resize panels"
+          onPointerDown={startDrag(d)}
+        />
+      ))}
     </div>
   )
 }
 
-type PanelCloseButtonProps = { onClose: () => void; which: 'first' | 'second' }
+type PanelCloseButtonProps = { onClose: () => void; short: string }
 
-function PanelCloseButton({ onClose, which }: PanelCloseButtonProps) {
+function PanelCloseButton({ onClose, short }: PanelCloseButtonProps) {
   return (
     <button
       className="panel-close"
-      aria-label={`Close panel (${which})`}
+      aria-label={`Close panel ${short}`}
       title="Close panel"
       onClick={(e) => {
         e.stopPropagation()
@@ -261,6 +289,10 @@ export function WorkspaceShell() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const [menu, setMenu] = useState<MenuState>(null)
+  // When the current menu was opened (ms epoch). The same gesture can emit a
+  // click/contextmenu right AFTER the mousedown that opened the menu (Linux/
+  // Windows right-click, macOS Ctrl+click) — those must not close it again.
+  const menuOpenedAtRef = useRef(0)
   const [collapsed, setCollapsed] = useState(false)
   const [draggedId, setDraggedId] = useState<string | null>(null)
   // Notification mute (Phase 14 / #15). Session-only — not persisted: the flag
@@ -273,26 +305,11 @@ export function WorkspaceShell() {
 
   useEffect(() => {
     void invoke<{ workspaces: Workspace[] }>('load_workspaces').then((data) => {
-      const workspaces = data.workspaces ?? []
-      // Each open workspace starts with one fresh panel (one live shell), and
-      // that seed panel is focused from the start (Phase 11 / #12). Both are
-      // runtime-only and re-seeded on every reload (persistence is story 37).
-      const panelIds = Object.fromEntries(
-        workspaces.map((w) => [w.id, [crypto.randomUUID()]]),
-      )
-      setState({
-        workspaces,
-        activeId: workspaces[0]?.id ?? null,
-        // On startup every defined workspace is open (has a live panel).
-        openIds: workspaces.map((w) => w.id),
-        // Panel layout is runtime-only (Phase 9): each workspace starts single.
-        // Re-seeded on every reload (persistence is story 37).
-        layouts: Object.fromEntries(workspaces.map((w) => [w.id, createLayout()])),
-        panelIds,
-        activePanelId: Object.fromEntries(
-          workspaces.map((w) => [w.id, (panelIds[w.id] ?? [])[0]]),
-        ),
-      })
+      // bootState keeps each workspace's persisted layout tree (v0.2 / #25 —
+      // the split layout round-trips through restart) and seeds a fresh single
+      // leaf for pre-v0.2 configs that have none. Every defined workspace
+      // starts open with its first panel focused.
+      setState(bootState(data.workspaces ?? []))
     })
   }, [])
 
@@ -320,10 +337,15 @@ export function WorkspaceShell() {
     void invoke<boolean>('set_notifications_muted', { muted: next }).then(setMuted)
   }
 
-  // Close the context menu on any click outside it.
+  // Close the context menu on any click outside it — unless it just opened
+  // (see menuOpenedAtRef): the opening gesture's own trailing click/contextmenu
+  // events would otherwise close the menu in the same instant.
   useEffect(() => {
     if (menu == null) return
-    const close = () => setMenu(null)
+    const close = () => {
+      if (Date.now() - menuOpenedAtRef.current < 300) return
+      setMenu(null)
+    }
     window.addEventListener('click', close)
     window.addEventListener('contextmenu', close)
     return () => {
@@ -334,7 +356,11 @@ export function WorkspaceShell() {
 
   const persist = (next: WorkspaceState) => {
     setState(next)
-    void invoke('save_workspaces', { workspaces: next.workspaces })
+    // A rejected save must at least reach the console — a silent one once hid
+    // an argument-name mismatch for an entire release (nothing persisted).
+    invoke('save_workspaces', { workspaces: next.workspaces }).catch((e) =>
+      console.error('save_workspaces failed:', e),
+    )
   }
 
   // --- Keyboard shortcuts (Phase 11 / #12, story 33) -----------------------
@@ -375,15 +401,15 @@ export function WorkspaceShell() {
         setState(cycleWorkspace(-1))
         break
       case 'split-horizontal':
-        if (activeId != null) setState(splitPanel(state, activeId, 'horizontal'))
+        if (activeId != null) persist(splitPanel(state, activeId, 'horizontal'))
         break
       case 'split-vertical':
-        if (activeId != null) setState(splitPanel(state, activeId, 'vertical'))
+        if (activeId != null) persist(splitPanel(state, activeId, 'vertical'))
         break
       case 'close-panel': {
         if (activeId == null) break
         const panel = activePanelOf(state, activeId)
-        if (panel != null) setState(closePanel(state, activeId, panel))
+        if (panel != null) persist(closePanel(state, activeId, panel))
         break
       }
     }
@@ -435,6 +461,7 @@ export function WorkspaceShell() {
   const openMenu = (e: React.MouseEvent, header: boolean, workspaceId?: string) => {
     e.preventDefault()
     e.stopPropagation()
+    menuOpenedAtRef.current = Date.now()
     setMenu({ x: e.clientX, y: e.clientY, header, workspaceId })
   }
 
@@ -457,23 +484,34 @@ export function WorkspaceShell() {
   const toggleMaximize = () => { void getCurrentWindow().toggleMaximize() }
   const close = () => { void getCurrentWindow().close() }
 
-  // Split a workspace's area (Phase 9 / #10). Runtime-only state — not
-  // persisted (story 37), so no save_workspaces here. splitPanel is a no-op
-  // past two panels; the menu items are also disabled to signal the cap.
+  // Split a workspace's ACTIVE panel (v0.2 / #25 — unlimited panels, no cap;
+  // the split targets whichever panel is focused). The layout tree is
+  // persisted with the workspace, so the split survives a restart.
   const splitWorkspace = (id: string, orientation: Orientation) => {
-    setState(splitPanel(state, id, orientation))
+    persist(splitPanel(state, id, orientation))
   }
 
-  // Drag the divider of a split workspace (Phase 10 / #11, story 18). The
-  // ratio is the pointer's position along the split axis, clamped to the
-  // minimum panel size by resizePanel (story 19). Pointer events drive the
-  // whole drag — capture on pointerdown, track on pointermove, release on
-  // pointerup — so the divider can be dragged beyond its own thin hit area.
-  //
-  // The drag handler lives in <SplitPanels> (one per workspace) so its
-  // container ref is scoped to a single .panel-surfaces element.
+  // Close one panel of a workspace (story 20): siblings fill the freed space.
+  // Persisted like the split so the layout round-trips.
   const closeWorkspacePanel = (id: string, panelId: string) => {
-    setState(closePanel(state, id, panelId))
+    persist(closePanel(state, id, panelId))
+  }
+
+  // Dragging a divider (story 18) updates state live (cheap, in-memory) while
+  // the final ratio is persisted once, on pointer-up — one config write per
+  // drag, not one per pointer-move. stateRef always holds the latest state.
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const resizeWorkspacePanel = (
+    id: string,
+    splitId: string,
+    ratio: number,
+    container: Container,
+  ) => {
+    setState(resizePanel(state, id, splitId, ratio, container))
+  }
+  const commitResize = () => {
+    persist(stateRef.current)
   }
 
   return (
@@ -488,8 +526,20 @@ export function WorkspaceShell() {
           <SidebarExpandIcon />
         </button>
       ) : (
-        <aside className="sidebar" onContextMenu={(e) => openMenu(e, false)}>
-          <div className="sidebar-header" onContextMenu={(e) => openMenu(e, true)}>
+        <aside
+          className="sidebar"
+          onContextMenu={(e) => openMenu(e, false)}
+          onMouseDown={(e) => {
+            if (isMenuPress(e)) openMenu(e, false)
+          }}
+        >
+          <div
+            className="sidebar-header"
+            onContextMenu={(e) => openMenu(e, true)}
+            onMouseDown={(e) => {
+              if (isMenuPress(e)) openMenu(e, true)
+            }}
+          >
             <div className="wordmark">
               <span>umux</span>
             </div>
@@ -557,6 +607,9 @@ export function WorkspaceShell() {
               }}
               onClick={() => setState(openWorkspace(state, ws.id))}
               onContextMenu={(e) => openMenu(e, false, ws.id)}
+              onMouseDown={(e) => {
+                if (isMenuPress(e)) openMenu(e, false, ws.id)
+              }}
             >
               {editingId === ws.id ? (
                 <input
@@ -627,33 +680,34 @@ export function WorkspaceShell() {
         {state.workspaces
           .filter((ws) => state.openIds.includes(ws.id))
           .map((ws) => {
-            const layout = state.layouts[ws.id] ?? createLayout()
+            const layout = ws.layout
             const isActive = ws.id === state.activeId
-            const splitOrientation = layout.kind === 'split' ? layout.orientation : 'horizontal'
-            const panelIds = state.panelIds[ws.id] ?? [crypto.randomUUID()]
+            const panelIds = panelIdsOf(state, ws.id)
             return (
               <div
                 key={ws.id}
                 data-testid={`panel-${ws.id}`}
                 className={`panel ${isActive ? '' : 'is-hidden'}`}
-                data-split-orientation={layout.kind === 'split' ? layout.orientation : undefined}
+                data-split-orientation={layout?.kind === 'split' ? layout.orientation : undefined}
               >
-                <PanelArea
-                  id={ws.id}
-                  panelIds={panelIds}
-                  orientation={splitOrientation}
-                  ratio={layout.kind === 'split' ? layout.ratio : 0.5}
-                  activePanelId={activePanelOf(state, ws.id)}
-                  workspaceName={ws.name}
-                  sshTarget={ws.panels?.[0]?.sshTarget}
-                  onResize={(ratio, container) =>
-                    setState(resizePanel(state, ws.id, ratio, container))
-                  }
-                  onClose={(panelId) => closeWorkspacePanel(ws.id, panelId)}
-                  onFocusPanel={(panelId) =>
-                    setState(focusPanel(state, ws.id, panelId))
-                  }
-                />
+                {layout != null && (
+                  <PanelSurfaces
+                    workspaceId={ws.id}
+                    workspaceName={ws.name}
+                    layout={layout}
+                    activePanelId={activePanelOf(state, ws.id)}
+                    firstLeafId={panelIds[0] ?? ''}
+                    sshTarget={ws.panels?.[0]?.sshTarget}
+                    onResize={(splitId, ratio, container) =>
+                      resizeWorkspacePanel(ws.id, splitId, ratio, container)
+                    }
+                    onResizeEnd={commitResize}
+                    onClose={(panelId) => closeWorkspacePanel(ws.id, panelId)}
+                    onFocusPanel={(panelId) =>
+                      setState(focusPanel(state, ws.id, panelId))
+                    }
+                  />
+                )}
               </div>
             )
           })}
@@ -664,21 +718,24 @@ export function WorkspaceShell() {
           className="context-menu"
           style={{ left: menu.x, top: menu.y }}
           role="menu"
+          // Any click inside the menu (item or padding) closes it — the
+          // window-level close listener alone is not enough now that it is
+          // time-guarded against the opening gesture.
+          onClick={() => setMenu(null)}
         >
           <button className="menu-item" role="menuitem" onClick={startCreate}>
             <PlusIcon />
             New workspace
           </button>
           {menu.workspaceId && (() => {
-            const isSplit =
-              state.layouts[menu.workspaceId!]?.kind === 'split'
+            // v0.2 / #25: unlimited panels — the split actions are always
+            // available (they split the workspace's active panel).
             return (
               <>
                 <div className="menu-separator" />
                 <button
                   className="menu-item"
                   role="menuitem"
-                  disabled={isSplit}
                   onClick={() => splitFromMenu('horizontal')}
                 >
                   <SplitHorizontalIcon />
@@ -687,7 +744,6 @@ export function WorkspaceShell() {
                 <button
                   className="menu-item"
                   role="menuitem"
-                  disabled={isSplit}
                   onClick={() => splitFromMenu('vertical')}
                 >
                   <SplitVerticalIcon />

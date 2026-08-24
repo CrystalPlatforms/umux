@@ -33,17 +33,30 @@ import {
   closePanel,
   focusPanel,
   activePanelOf,
+  bootState,
+  panelIdsOf,
 } from './workspaces'
+import { leafIds, type LayoutNode } from './PaneLayout'
+
+// v0.2 Phase 1 / #25 — the layout moved INTO the Workspace (a persisted split
+// tree; leaf ids ARE panel ids). WorkspaceState no longer carries runtime
+// layouts/panelIds records: panel identity derives from workspaces[].layout.
+
+/// Deterministic id generator over a fixed sequence (tests stay pure).
+function seq(...ids: string[]): () => string {
+  let i = 0
+  return () => ids[i++]
+}
 
 describe('workspace state', () => {
   describe('createWorkspace', () => {
     it('adds the workspace and makes it the active one', () => {
       const state = emptyState
 
-      const next = createWorkspace(state, 'my-project', () => 'ws-1')
+      const next = createWorkspace(state, 'my-project', seq('ws-1', 'p-1'))
 
       expect(next.workspaces).toEqual([
-        { id: 'ws-1', name: 'my-project', panels: [] },
+        { id: 'ws-1', name: 'my-project', panels: [], layout: { kind: 'leaf', id: 'p-1' } },
       ])
       expect(next.activeId).toBe('ws-1')
     })
@@ -63,55 +76,80 @@ describe('workspace state', () => {
       expect(next.workspaces[0].panels).toEqual([])
     })
 
-    // Phase 9 / #10 — a fresh workspace starts with a single-panel layout so
-    // the shell area is filled immediately. Runtime-only (NOT persisted, like
-    // openIds): a reload re-seeds single (persistence is story 37).
-    it('seeds a single-panel layout for the new workspace', () => {
-      const next = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+    // v0.2 / #25 — a fresh workspace starts with a single-leaf layout tree
+    // PERSISTED in the workspace itself (genId: ws id, then panel id).
+    it('seeds a single-leaf layout tree inside the new workspace', () => {
+      const ids = ['ws-1', 'p-1']
+      let i = 0
+      const next = createWorkspace(emptyState, 'my-project', () => ids[i++])
 
-      expect(next.layouts['ws-1']).toEqual({ kind: 'single' })
+      expect(next.workspaces[0].layout).toEqual({ kind: 'leaf', id: 'p-1' })
+      expect(panelIdsOf(next, 'ws-1')).toEqual(['p-1'])
     })
   })
 
   describe('splitPanel', () => {
-    // T-AC story 15/17 — splitting a single workspace sets a split layout.
-    it('splits a workspace into a horizontal split layout', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+    // v0.2 / #25: splitPanel splits the ACTIVE panel's leaf; genId yields the
+    // split-node id then the new leaf id.
+    function single(): ReturnType<typeof createWorkspace> {
+      const ids = ['ws-1', 'p-1']
+      let i = 0
+      return createWorkspace(emptyState, 'my-project', () => ids[i++])
+    }
 
-      const next = splitPanel(state, 'ws-1', 'horizontal')
+    it('splits the active panel into a horizontal split tree', () => {
+      const gen = seq('s-1', 'p-2')
+      const next = splitPanel(single(), 'ws-1', 'horizontal', gen)
 
-      expect(next.layouts['ws-1']).toEqual({
+      expect(next.workspaces[0].layout).toEqual({
         kind: 'split',
+        id: 's-1',
         orientation: 'horizontal',
         ratio: 0.5,
-      })
+        first: { kind: 'leaf', id: 'p-1' },
+        second: { kind: 'leaf', id: 'p-2' },
+      } satisfies LayoutNode)
     })
 
-    it('splits a workspace into a vertical split layout', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+    it('splits into a vertical split tree', () => {
+      const gen = seq('s-1', 'p-2')
+      const next = splitPanel(single(), 'ws-1', 'vertical', gen)
 
-      const next = splitPanel(state, 'ws-1', 'vertical')
-
-      expect(next.layouts['ws-1']).toEqual({
+      expect(next.workspaces[0].layout).toEqual({
         kind: 'split',
+        id: 's-1',
         orientation: 'vertical',
         ratio: 0.5,
-      })
+        first: { kind: 'leaf', id: 'p-1' },
+        second: { kind: 'leaf', id: 'p-2' },
+      } satisfies LayoutNode)
     })
 
-    // T-AC story 16 — two-panel max: a second split is rejected (no-op).
-    it('is a no-op when the workspace is already split', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
-      const once = splitPanel(state, 'ws-1', 'horizontal')
+    // T-AC v0.2 — unlimited panels: a second split of the (now active) new
+    // panel nests instead of being rejected. The v0.1 two-panel cap is gone.
+    it('splits again with no panel cap (mixed directions)', () => {
+      const ids = ['s-1', 'p-2', 's-2', 'p-3']
+      let i = 0
+      const gen = () => ids[i++]
+      const once = splitPanel(single(), 'ws-1', 'horizontal', gen)
+      const twice = splitPanel(once, 'ws-1', 'vertical', gen)
 
-      const twice = splitPanel(once, 'ws-1', 'vertical')
-
-      expect(twice).toBe(once)
-      expect(twice.layouts['ws-1']).toEqual({
+      expect(leafIds(twice.workspaces[0].layout!)).toEqual(['p-1', 'p-2', 'p-3'])
+      expect(twice.workspaces[0].layout).toEqual({
         kind: 'split',
+        id: 's-1',
         orientation: 'horizontal',
         ratio: 0.5,
-      })
+        first: { kind: 'leaf', id: 'p-1' },
+        second: {
+          kind: 'split',
+          id: 's-2',
+          orientation: 'vertical',
+          ratio: 0.5,
+          first: { kind: 'leaf', id: 'p-2' },
+          second: { kind: 'leaf', id: 'p-3' },
+        },
+      } satisfies LayoutNode)
     })
 
     it('is a no-op for an unknown workspace id', () => {
@@ -122,94 +160,96 @@ describe('workspace state', () => {
   })
 
   describe('panel identity (split keeps shells, close keeps the survivor)', () => {
-    it('seeds one stable panel id when a workspace is created', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+    it('derives panel ids from the layout tree', () => {
+      const state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
 
-      expect(state.panelIds['ws-1']).toHaveLength(1)
+      expect(panelIdsOf(state, 'ws-1')).toEqual(['p-1'])
     })
 
     it('keeps the existing panel id and adds a new one on split', () => {
-      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
-      const firstPanel = state.panelIds['ws-1'][0]
-      // Force deterministic ids for the second panel: workspace id is ws-1, so
-      // the next genId call here produces the second panel id.
-      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
+      const state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
 
-      expect(state.panelIds['ws-1']).toEqual([firstPanel, 'panel-B'])
+      const next = splitPanel(state, 'ws-1', 'horizontal', seq('s-1', 'p-B'))
+
+      expect(panelIdsOf(next, 'ws-1')).toEqual(['p-1', 'p-B'])
     })
 
     it('keeps the surviving panel id when one panel is closed', () => {
-      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
-      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
-      const [survivor] = state.panelIds['ws-1']
+      let state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
+      state = splitPanel(state, 'ws-1', 'horizontal', seq('s-1', 'p-B'))
 
-      // Close the second panel -> only the survivor remains.
-      const next = closePanel(state, 'ws-1', 'panel-B')
+      const next = closePanel(state, 'ws-1', 'p-B')
 
-      expect(next.panelIds['ws-1']).toEqual([survivor])
-      expect(next.layouts['ws-1']).toEqual({ kind: 'single' })
+      expect(panelIdsOf(next, 'ws-1')).toEqual(['p-1'])
+      expect(next.workspaces[0].layout).toEqual({ kind: 'leaf', id: 'p-1' })
     })
 
     it('keeps the other panel when the first one is closed', () => {
-      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
-      const firstPanel = state.panelIds['ws-1'][0]
-      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
+      let state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
+      state = splitPanel(state, 'ws-1', 'horizontal', seq('s-1', 'p-B'))
 
-      const next = closePanel(state, 'ws-1', firstPanel)
+      const next = closePanel(state, 'ws-1', 'p-1')
 
-      expect(next.panelIds['ws-1']).toEqual(['panel-B'])
+      expect(panelIdsOf(next, 'ws-1')).toEqual(['p-B'])
     })
   })
 
   describe('resizePanel', () => {
-    it('updates the split ratio, clamped by the container and minimum', () => {
-      const state = splitPanel(
-        createWorkspace(emptyState, 'my-project', () => 'ws-1'),
+    // v0.2 / #25: the divider is addressed by its SPLIT id; the container is
+    // that split node's own measured extent.
+    function splitOnce(): ReturnType<typeof splitPanel> {
+      return splitPanel(
+        createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1')),
         'ws-1',
         'horizontal',
+        seq('s-1', 'p-2'),
       )
+    }
 
-      const next = resizePanel(state, 'ws-1', 0.25, { width: 100, height: 50 }, 10)
+    it('updates the targeted split ratio, clamped by the container and minimum', () => {
+      const next = resizePanel(splitOnce(), 'ws-1', 's-1', 0.25, { width: 100, height: 50 }, 10)
 
-      expect(next.layouts['ws-1']).toEqual({
+      expect(next.workspaces[0].layout).toEqual({
         kind: 'split',
+        id: 's-1',
         orientation: 'horizontal',
         ratio: 0.25,
-      })
+        first: { kind: 'leaf', id: 'p-1' },
+        second: { kind: 'leaf', id: 'p-2' },
+      } satisfies LayoutNode)
     })
 
-    it('is a no-op on a single (un-split) workspace', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+    it('is a no-op for an unknown split id (state object untouched)', () => {
+      const state = splitOnce()
 
-      // single layout has no divider — resize returns the same state object.
-      expect(resizePanel(state, 'ws-1', 0.3, { width: 100, height: 50 })).toBe(state)
+      expect(resizePanel(state, 'ws-1', 'nope', 0.3, { width: 100, height: 50 })).toBe(state)
     })
 
     it('is a no-op for an unknown workspace id', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      const state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
 
-      expect(resizePanel(state, 'nope', 0.3, { width: 100, height: 50 })).toBe(state)
+      expect(resizePanel(state, 'nope', 's-1', 0.3, { width: 100, height: 50 })).toBe(state)
     })
   })
 
   describe('closePanel', () => {
     it('collapses a split workspace back to a single panel', () => {
-      let state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
-      state = splitPanel(state, 'ws-1', 'horizontal', () => 'panel-B')
+      let state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
+      state = splitPanel(state, 'ws-1', 'horizontal', seq('s-1', 'p-B'))
 
-      const next = closePanel(state, 'ws-1', 'panel-B')
+      const next = closePanel(state, 'ws-1', 'p-B')
 
-      expect(next.layouts['ws-1']).toEqual({ kind: 'single' })
+      expect(next.workspaces[0].layout).toEqual({ kind: 'leaf', id: 'p-1' })
     })
 
     it('is a no-op when the workspace only has one panel', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      const state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
 
-      expect(closePanel(state, 'ws-1', state.panelIds['ws-1'][0])).toBe(state)
+      expect(closePanel(state, 'ws-1', 'p-1')).toBe(state)
     })
 
     it('is a no-op for an unknown workspace id', () => {
-      const state = createWorkspace(emptyState, 'my-project', () => 'ws-1')
+      const state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'p-1'))
 
       expect(closePanel(state, 'nope', 'whatever')).toBe(state)
     })
@@ -436,26 +476,28 @@ describe('workspace state', () => {
   // active panel is runtime-only (NOT persisted), like activeId.
   describe('active panel focus', () => {
     // A helper that builds a split workspace with two known panel ids, so the
-    // focus tests have stable panel ids to point at. genId yields ws-1 then
-    // p-1 for createWorkspace's workspace+seed-panel, then p-2 for the split.
+    // focus tests have stable panel ids to point at. genId yields ws-1, p-1
+    // for createWorkspace's workspace+seed-panel, then s-1, p-2 for the split.
     function splitState(): ReturnType<typeof splitPanel> {
-      const ids = ['ws-1', 'p-1', 'p-2']
-      let i = 0
-      const state = createWorkspace(
-        emptyState,
-        'my-project',
-        () => ids[i++],
-      )
-      return splitPanel(state, 'ws-1', 'horizontal', () => ids[i++])
+      const gen = seq('ws-1', 'p-1', 's-1', 'p-2')
+      const state = createWorkspace(emptyState, 'my-project', gen)
+      return splitPanel(state, 'ws-1', 'horizontal', gen)
     }
 
     it('defaults to the first panel when none has been focused', () => {
-      // A workspace with panels but no activePanelId entry — e.g. state built
-      // before focus was ever set. activePanelOf must fall back to panels[0].
+      // A workspace with a tree but no activePanelId entry — e.g. state built
+      // before focus was ever set. activePanelOf must fall back to leaf #1.
+      const tree: LayoutNode = {
+        kind: 'split',
+        id: 's-1',
+        orientation: 'horizontal',
+        ratio: 0.5,
+        first: { kind: 'leaf', id: 'p-1' },
+        second: { kind: 'leaf', id: 'p-2' },
+      }
       const state = {
         ...emptyState,
-        workspaces: [{ id: 'ws-1', name: 'x', panels: [] }],
-        panelIds: { 'ws-1': ['p-1', 'p-2'] },
+        workspaces: [{ id: 'ws-1', name: 'x', panels: [], layout: tree }],
         activePanelId: {},
       }
 
@@ -480,11 +522,10 @@ describe('workspace state', () => {
 
     it('splitting makes the new panel active (keystrokes follow the split)', () => {
       // Start single, focused on its only panel, then split.
-      const ids = ['ws-1', 'p-1', 'p-2']
-      let i = 0
-      const single = createWorkspace(emptyState, 'my-project', () => ids[i++])
+      const gen = seq('ws-1', 'p-1', 's-1', 'p-2')
+      const single = createWorkspace(emptyState, 'my-project', gen)
 
-      const next = splitPanel(single, 'ws-1', 'horizontal', () => ids[i++])
+      const next = splitPanel(single, 'ws-1', 'horizontal', gen)
 
       expect(activePanelOf(next, 'ws-1')).toBe('p-2')
     })
@@ -515,6 +556,66 @@ describe('workspace state', () => {
       const next = deleteWorkspace(state, 'ws-1')
 
       expect(next.activePanelId['ws-1']).toBeUndefined()
+    })
+  })
+
+  // v0.2 Phase 1 / #25 — seeding app state from the persisted config (AC4:
+  // the layout round-trips through restart). bootState keeps a workspace's
+  // layout tree when the config has one and grows a fresh single leaf when it
+  // does not (pre-v0.2 config).
+  describe('bootState', () => {
+    it('keeps the persisted layout tree untouched (round-trips restart)', () => {
+      const tree: LayoutNode = {
+        kind: 'split',
+        id: 's-1',
+        orientation: 'horizontal',
+        ratio: 0.7,
+        first: { kind: 'leaf', id: 'p-1' },
+        second: { kind: 'leaf', id: 'p-2' },
+      }
+
+      const state = bootState([{ id: 'ws-1', name: 'my-project', panels: [], layout: tree }], seq())
+
+      expect(state.workspaces[0].layout).toEqual(tree)
+      expect(panelIdsOf(state, 'ws-1')).toEqual(['p-1', 'p-2'])
+    })
+
+    it('seeds a fresh single leaf for a workspace without a layout (old config)', () => {
+      const state = bootState([{ id: 'ws-1', name: 'my-project', panels: [] }], seq('fresh-1'))
+
+      expect(state.workspaces[0].layout).toEqual({ kind: 'leaf', id: 'fresh-1' })
+    })
+
+    it('opens every workspace, activates the first, and focuses its first leaf', () => {
+      const tree: LayoutNode = {
+        kind: 'split',
+        id: 's-1',
+        orientation: 'vertical',
+        ratio: 0.5,
+        first: { kind: 'leaf', id: 'a' },
+        second: { kind: 'leaf', id: 'b' },
+      }
+      const other: LayoutNode = { kind: 'leaf', id: 'c' }
+
+      const state = bootState(
+        [
+          { id: 'ws-1', name: 'one', panels: [], layout: tree },
+          { id: 'ws-2', name: 'two', panels: [], layout: other },
+        ],
+        seq(),
+      )
+
+      expect(state.openIds).toEqual(['ws-1', 'ws-2'])
+      expect(state.activeId).toBe('ws-1')
+      expect(activePanelOf(state, 'ws-1')).toBe('a')
+      expect(activePanelOf(state, 'ws-2')).toBe('c')
+    })
+
+    it('handles an empty config with no active workspace', () => {
+      const state = bootState([], seq())
+
+      expect(state.activeId).toBeNull()
+      expect(state.openIds).toEqual([])
     })
   })
 })

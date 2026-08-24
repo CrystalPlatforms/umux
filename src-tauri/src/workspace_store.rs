@@ -36,6 +36,36 @@ pub struct Workspace {
     // so old files keep working (PRD story 38).
     #[serde(default)]
     pub panels: Vec<Panel>,
+    // Split tree (v0.2 Phase 1 / #25); leaf ids ARE panel ids. `Option` +
+    // `default` so pre-v0.2 configs (no layout) load as `None`. Kept
+    // byte-identical to the TS `LayoutNode` in PaneLayout.ts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutNode>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum Orientation {
+    Horizontal,
+    Vertical,
+}
+
+/// A workspace's panel layout as a binary split tree (v0.2 / #25). The
+/// `tag = "kind"` internally-tagged shape mirrors the TS discriminated union:
+///   {"kind":"leaf","id":"p1"}
+///   {"kind":"split","id":"s1","orientation":"horizontal","ratio":0.5,
+///    "first":{...},"second":{...}}
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LayoutNode {
+    Leaf { id: String },
+    Split {
+        id: String,
+        orientation: Orientation,
+        ratio: f64,
+        first: Box<LayoutNode>,
+        second: Box<LayoutNode>,
+    },
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
@@ -170,8 +200,8 @@ mod tests {
     fn serialize_config_round_trips() {
         let data = WorkspaceData {
             workspaces: vec![
-                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![] },
-                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![] },
+                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![], layout: None },
+                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![], layout: None },
             ],
         };
 
@@ -209,6 +239,7 @@ mod tests {
                     working_directory: Some("/home/adam/proj".into()),
                     ssh_target: Some("adam@host".into()),
                 }],
+                layout: None,
             }],
         };
 
@@ -245,6 +276,7 @@ mod tests {
                 id: "ws-1".into(),
                 name: "alpha".into(),
                 panels: vec![],
+                layout: None,
             }],
         };
 
@@ -272,6 +304,7 @@ mod tests {
                     working_directory: Some("/home/adam/proj".into()),
                     ssh_target: Some("adam@host".into()),
                 }],
+                layout: None,
             }],
         };
 
@@ -377,6 +410,7 @@ mod tests {
                     working_directory: Some("/home/adam/proj".into()),
                     ssh_target: Some("adam@host".into()),
                 }],
+                layout: None,
             }],
         };
 
@@ -397,5 +431,118 @@ mod tests {
 
         // And the camelCase form must round-trip back into the same data.
         assert_eq!(parse_config(&text), data);
+    }
+
+    // --- v0.2 Phase 1 / #25: layout tree persistence ---------------------------
+
+    /// The tree from the plan's HITL scenario: p1 | (p2 / p3) — a horizontal
+    /// root whose right child is split vertically.
+    fn nested_tree() -> LayoutNode {
+        LayoutNode::Split {
+            id: "s-1".into(),
+            orientation: Orientation::Horizontal,
+            ratio: 0.7,
+            first: Box::new(LayoutNode::Leaf { id: "p1".into() }),
+            second: Box::new(LayoutNode::Split {
+                id: "s-2".into(),
+                orientation: Orientation::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf { id: "p2".into() }),
+                second: Box::new(LayoutNode::Leaf { id: "p3".into() }),
+            }),
+        }
+    }
+
+    // T-L1 (AC4 — a nested mixed layout tree round-trips through the pure layer):
+    //   Input:  WorkspaceData with a 3-panel mixed tree (ratio 0.7 preserved).
+    //   Output: serialize_config -> parse_config yields identical data.
+    #[test]
+    fn serialize_round_trips_nested_layout_tree() {
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: Some(nested_tree()),
+            }],
+        };
+
+        let text = serialize_config(&data);
+        let back = parse_config(&text);
+
+        assert_eq!(back, data);
+    }
+
+    // T-L2 (backward compat — a pre-v0.2 config without `layout` loads as None):
+    //   Input:  JSON written by v0.1 umux (id/name/panels only).
+    //   Output: layout == None, NOT a parse error — old files keep working.
+    #[test]
+    fn parse_old_config_without_layout_loads_none() {
+        let text = r#"{"workspaces":[{"id":"ws-1","name":"alpha","panels":[]}]}"#;
+
+        let data = parse_config(text);
+
+        assert_eq!(data.workspaces.len(), 1);
+        assert_eq!(data.workspaces[0].layout, None);
+    }
+
+    // T-L3 (wire format — the tree serializes exactly like the TS LayoutNode):
+    //   Input:  a workspace with the nested tree.
+    //   Output: tagged "kind" discriminants, camelCase orientation, and no
+    //           snake_case leaks — the contract the TS PaneLayout expects on
+    //           the invoke boundary.
+    #[test]
+    fn serialize_layout_uses_camel_case_matching_frontend() {
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: Some(nested_tree()),
+            }],
+        };
+
+        let text = serialize_config(&data);
+
+        assert!(
+            text.contains(r#""kind":"split""#),
+            "expected tagged kind discriminant, got: {text}"
+        );
+        assert!(
+            text.contains(r#""kind":"leaf""#),
+            "expected tagged leaf discriminant, got: {text}"
+        );
+        assert!(
+            text.contains(r#""orientation":"horizontal""#),
+            "expected camelCase orientation value, got: {text}"
+        );
+        assert!(
+            !text.contains("\"working_directory\"") && !text.contains("\"ssh_target\""),
+            "snake_case leaked into wire JSON: {text}"
+        );
+
+        // And the emitted JSON parses back into the same tree.
+        assert_eq!(parse_config(&text), data);
+    }
+
+    // T-L4 (AC4 — the layout tree survives the filesystem, not just the pure
+    // layer): save a workspace with the nested tree, load it back.
+    #[test]
+    fn save_then_load_round_trips_layout_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path().join("config.json"));
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: Some(nested_tree()),
+            }],
+        };
+
+        store.save(&data).unwrap();
+        let back = store.load();
+
+        assert_eq!(back, data);
     }
 }

@@ -15,7 +15,7 @@ use notification_service::{NotificationService, Notifier, PanelOrigin};
 use osc_parser::OscParser;
 use pty_service::{PtyHandle, PtyService};
 use ssh_manager::{parse_ssh_target, SshHandle, SshManager};
-use workspace_store::{fallback_warning, WorkspaceData, WorkspaceStore};
+use workspace_store::{fallback_warning, Workspace, WorkspaceData, WorkspaceStore};
 
 /// The app-wide notification mute flag. One instance is created in `run()` and
 /// shared (via Arc) with every panel's NotificationService, so a single toggle
@@ -293,8 +293,17 @@ fn load_workspaces(
 }
 
 #[tauri::command]
-fn save_workspaces(state: State<'_, WorkspaceStore>, data: WorkspaceData) -> Result<(), String> {
-    state.save(&data).map_err(|e| e.to_string())
+fn save_workspaces(
+    state: State<'_, WorkspaceStore>,
+    workspaces: Vec<Workspace>,
+) -> Result<(), String> {
+    // The param is named `workspaces` to match the key the frontend has
+    // always sent (`invoke('save_workspaces', { workspaces: ... })`). An
+    // earlier `data: WorkspaceData` signature silently rejected every save:
+    // Tauri maps invoke args by name, so `workspaces` never reached `data`.
+    state
+        .save(&WorkspaceData { workspaces })
+        .map_err(|e| e.to_string())
 }
 
 /// Toggle the app-wide notification mute. Returns the new state so the frontend

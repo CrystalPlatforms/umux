@@ -351,20 +351,20 @@ body {
   color: var(--text-dim);
 }
 
-/* One or two terminal surfaces. Single fills the area; a split distributes
-   them along the orientation axis, sized by the drag ratio (Phase 10). */
+/* Terminal surfaces laid out by a split tree (v0.2 / #25): every pane and
+   divider is absolutely positioned from PaneLayout.boxes(), so panes are
+   keyed by id in one stable parent and never remount when the tree shape
+   changes (split / close / resize). */
 
 .panel-surfaces {
   position: absolute;
   inset: 0;
-  display: flex;
 }
 
-/* A surface is a flex child that hosts one terminal + its close button. Its
-   flex basis is set inline from the drag ratio; min-{width,height}:0 lets it
-   shrink below its content size so the divider can claim the space. */
+/* A pane is one terminal + its close button, placed and sized inline from
+   its computed rect. */
 .panel-surfaces .surface {
-  position: relative;
+  position: absolute;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -385,9 +385,8 @@ body {
 /* The draggable divider between two panels. A thin bar with a generous,
    easy-to-grab hit area; the cursor signals the drag direction. */
 .panel-surfaces .divider {
-  flex: 0 0 auto;
+  position: absolute;
   background: var(--border);
-  position: relative;
 }
 
 .panel-surfaces .divider::after {
@@ -415,10 +414,6 @@ body {
 .panel-surfaces .divider-vertical::after {
   top: -5px;
   bottom: -5px;
-}
-
-.panel-surfaces.split-vertical {
-  flex-direction: column;
 }
 
 /* Per-panel close button (Phase 10 / story 20). Sits at the top-right corner

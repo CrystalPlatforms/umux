@@ -4,37 +4,47 @@
 // in-memory workspace model. No I/O — persistence lives in the Rust
 // WorkspaceStore; this module is fed by it on startup and triggers a save on
 // every mutation. Trivially unit-testable.
+//
+// v0.2 Phase 1 / #25: the panel layout is a split TREE persisted INSIDE each
+// Workspace (`layout`). Leaf ids are panel ids — the runtime layouts/panelIds
+// records of v0.1 are gone; panel identity derives from the tree.
 
-import { createLayout, split, resize, closePanel as closePanelLayout, type PaneLayout, type Orientation, type Container } from './PaneLayout'
+import {
+  createTree,
+  splitLeaf,
+  closeLeaf,
+  setRatio,
+  leafIds,
+  type LayoutNode,
+  type Orientation,
+  type Container,
+} from './PaneLayout'
 
-// Forward-compat slot for Phase 9 (split into panels). `workingDirectory` and
-// `sshTarget` are optional: absent = local panel in the default cwd. Kept
-// byte-identical to the Rust `Panel` in workspace_store.rs.
+// Forward-compat slot from Phase 8: per-panel config (cwd / SSH target)
+// associated with the layout tree's leaf ids. Absent = local panel in the
+// default cwd. Kept byte-identical to the Rust `Panel` in workspace_store.rs.
 export type Panel = {
   id: string
   workingDirectory?: string
   sshTarget?: string
 }
 
-export type Workspace = { id: string; name: string; panels: Panel[] }
+export type Workspace = {
+  id: string
+  name: string
+  panels: Panel[]
+  // Split tree (v0.2 / #25); leaf ids ARE panel ids. Optional because
+  // pre-v0.2 configs have none — bootState seeds a fresh single leaf there.
+  layout?: LayoutNode
+}
 
 export type WorkspaceState = {
   workspaces: Workspace[]
   activeId: string | null
   // Runtime-only (NOT persisted, like activeId): which workspaces currently
   // have a live, mounted panel — i.e. an open shell. A workspace not in this
-  // list is "closed": its definition stays but its panel (and shell) is gone.
+  // list is "closed": its definition stays but its panels (and shells) are gone.
   openIds: string[]
-  // Runtime-only (NOT persisted): per-workspace panel layout (Phase 9 / #10).
-  // Absent entry defaults to single. Re-seeded single on reload (story 37 is
-  // the persistence phase).
-  layouts: Record<string, PaneLayout>
-  // Runtime-only (NOT persisted): the ordered, stable panel ids per workspace
-  // (1 or 2). These are the React keys for the terminal surfaces — they let a
-  // panel keep its shell across layout changes (split adds one; close drops
-  // one) instead of remounting into a blank terminal. Re-seeded to a single
-  // fresh panel on reload (story 37 is the persistence phase).
-  panelIds: Record<string, string[]>
   // Runtime-only (NOT persisted): the focused panel id per workspace (Phase 11
   // / #12, story 34). Absent entry means "no explicit focus" — the first
   // panel is treated as active (see activePanelOf). The renderer draws a ring
@@ -46,8 +56,6 @@ export const emptyState: WorkspaceState = {
   workspaces: [],
   activeId: null,
   openIds: [],
-  layouts: {},
-  panelIds: {},
   activePanelId: {},
 }
 
@@ -60,20 +68,40 @@ function removeKey<V>(map: Record<string, V>, key: string): Record<string, V> {
   return rest
 }
 
+/// Seed app state from the persisted config (v0.2 / #25, AC4). A workspace
+/// that already carries a layout tree keeps it untouched (restart round-trip);
+/// a pre-v0.2 workspace without one gets a fresh single leaf so it still opens
+/// one shell. Every loaded workspace starts open and the first is active.
+export function bootState(
+  loaded: Workspace[],
+  genId: () => string = defaultGenId,
+): WorkspaceState {
+  const workspaces = loaded.map((w) =>
+    w.layout == null ? { ...w, layout: createTree(genId()) } : w,
+  )
+  return {
+    workspaces,
+    activeId: workspaces[0]?.id ?? null,
+    openIds: workspaces.map((w) => w.id),
+    activePanelId: Object.fromEntries(
+      workspaces.map((w) => [w.id, leafIds(w.layout ?? createTree(''))[0]]),
+    ),
+  }
+}
+
 export function createWorkspace(
   state: WorkspaceState,
   name: string,
   genId: () => string = defaultGenId,
 ): WorkspaceState {
   const workspace: Workspace = { id: genId(), name, panels: [] }
-  const panelId = genId()
+  const layout = createTree(genId())
+  workspace.layout = layout
   return {
     workspaces: [...state.workspaces, workspace],
     activeId: workspace.id,
     openIds: [...state.openIds, workspace.id],
-    layouts: { ...state.layouts, [workspace.id]: createLayout() },
-    panelIds: { ...state.panelIds, [workspace.id]: [panelId] },
-    activePanelId: { ...state.activePanelId, [workspace.id]: panelId },
+    activePanelId: { ...state.activePanelId, [workspace.id]: leafIds(layout)[0] },
   }
 }
 
@@ -122,7 +150,7 @@ function pickReplacementActive(
   return before ?? null
 }
 
-/// Delete a workspace outright: drop its definition, close its panel, and hand
+/// Delete a workspace outright: drop its definition, close its panels, and hand
 /// activation to a surviving open sibling (or none). No-op for an unknown id.
 export function deleteWorkspace(
   state: WorkspaceState,
@@ -135,14 +163,12 @@ export function deleteWorkspace(
     workspaces: state.workspaces.filter((w) => w.id !== id),
     activeId: nextActive,
     openIds: state.openIds.filter((openId) => openId !== id),
-    layouts: removeKey(state.layouts, id),
-    panelIds: removeKey(state.panelIds, id),
     activePanelId: removeKey(state.activePanelId, id),
   }
 }
 
-/// Close a workspace without deleting its definition: the panel unmounts
-/// (shell torn down), but the workspace stays listed so it can be reopened.
+/// Close a workspace without deleting its definition: the panels unmount
+/// (shells torn down), but the workspace stays listed so it can be reopened.
 /// No-op for an unknown id or one that is already closed.
 export function closeWorkspace(
   state: WorkspaceState,
@@ -161,7 +187,7 @@ export function closeWorkspace(
 
 /// Activate a workspace and ensure its panel is open. Clicking a row uses this:
 /// for an already-open workspace it just switches activation; for a closed one
-/// it reopens it (respawning the shell on mount). No-op for an unknown id.
+/// it reopens it (respawning the shells on mount). No-op for an unknown id.
 export function openWorkspace(
   state: WorkspaceState,
   id: string,
@@ -190,107 +216,117 @@ export function moveWorkspace(
   return { ...state, workspaces: next }
 }
 
-/// Split the active area of workspace `id` in `orientation` (Phase 9 / #10,
-/// stories 15–17). The existing panel keeps its shell; a new panel id is
-/// appended. No-op (returns `state` unchanged) when the id is unknown or the
-/// workspace is already split — two panels is the maximum (story 16).
-/// Runtime-only: not persisted (story 37).
+/// The panel ids of workspace `id`, in tree order — the stable identity the
+/// renderer keys terminal surfaces by. Empty for an unknown workspace.
+export function panelIdsOf(state: WorkspaceState, id: string): string[] {
+  const ws = state.workspaces.find((w) => w.id === id)
+  return ws?.layout == null ? [] : leafIds(ws.layout)
+}
+
+/// Split the ACTIVE panel of workspace `id` in `orientation` (v0.2 / #25,
+/// stories 15–17 — unlimited panels, no cap). The existing panel keeps its
+/// shell (its leaf becomes the split's first child); `genId` yields the new
+/// split-node id, then the new leaf id. The new panel becomes focused so
+/// keystrokes follow the split. No-op for an unknown workspace id.
 export function splitPanel(
   state: WorkspaceState,
   id: string,
   orientation: Orientation,
   genId: () => string = defaultGenId,
 ): WorkspaceState {
-  if (!state.workspaces.some((w) => w.id === id)) return state
-  const current = state.layouts[id] ?? createLayout()
-  const next = split(current, orientation)
+  const ws = state.workspaces.find((w) => w.id === id)
+  if (ws == null) return state
+  const layout = ws.layout ?? createTree(genId())
+  const target = activePanelOf(state, id) ?? leafIds(layout)[0]
+  if (target == null) return state
+  const ids = { splitId: genId(), newLeafId: genId() }
+  const next = splitLeaf(layout, target, orientation, ids)
   if (next == null) return state
-  // The newly split-in panel becomes the focused one (Phase 11 / #12) so
-  // keystrokes follow the split.
-  const newPanelId = genId()
-  const existing = state.panelIds[id] ?? [genId()]
   return {
     ...state,
-    layouts: { ...state.layouts, [id]: next },
-    panelIds: { ...state.panelIds, [id]: [...existing, newPanelId] },
-    activePanelId: { ...state.activePanelId, [id]: newPanelId },
+    workspaces: state.workspaces.map((w) =>
+      w.id === id ? { ...w, layout: next } : w,
+    ),
+    activePanelId: { ...state.activePanelId, [id]: ids.newLeafId },
   }
 }
 
-/// Move the divider of workspace `id` to `ratio` (Phase 10 / #11, story 18),
-/// clamped so neither panel shrinks below `minSize` px along the split axis
-/// (story 19). No-op (returns `state` unchanged) when the id is unknown or the
-/// workspace is a single panel — there is no divider to move. Runtime-only:
-/// not persisted (story 37).
+/// Move the divider of workspace `id`'s split `splitId` to `ratio` (v0.2 / #25,
+/// story 18), clamped so neither side shrinks below `minSize` px along the
+/// split's axis (story 19). `container` is that split node's OWN extent (the
+/// renderer passes its measured rect), so the clamp is correct at any nesting
+/// depth. No-op for an unknown workspace or split id.
 export function resizePanel(
   state: WorkspaceState,
   id: string,
+  splitId: string,
   ratio: number,
   container: Container,
   minSize?: number,
 ): WorkspaceState {
-  if (!state.workspaces.some((w) => w.id === id)) return state
-  const current = state.layouts[id] ?? createLayout()
-  const next = resize(current, ratio, container, minSize)
-  if (next === current) return state
-  return { ...state, layouts: { ...state.layouts, [id]: next } }
+  const ws = state.workspaces.find((w) => w.id === id)
+  if (ws == null || ws.layout == null) return state
+  const next = setRatio(ws.layout, splitId, ratio, container, minSize)
+  if (next === ws.layout) return state
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) =>
+      w.id === id ? { ...w, layout: next } : w,
+    ),
+  }
 }
 
-/// Close one panel of workspace `id` — the panel whose id is `panelId`
-/// (Phase 10 / #11, story 20). The remaining panel keeps its shell and fills
-/// the workspace, so the layout collapses to single. No-op (returns `state`
-/// unchanged) when the workspace id is unknown or only one panel is mounted.
-/// Runtime-only: not persisted (story 37).
+/// Close one panel of workspace `id` — the panel whose leaf id is `panelId`
+/// (v0.2 / #25, story 20). Siblings fill the freed space (the tree collapses
+/// one-child splits). No-op when the workspace id is unknown, the panel does
+/// not exist, or only one panel is mounted (close the workspace instead).
 export function closePanel(
   state: WorkspaceState,
   id: string,
   panelId: string,
 ): WorkspaceState {
-  if (!state.workspaces.some((w) => w.id === id)) return state
-  const currentPanels = state.panelIds[id] ?? []
-  if (currentPanels.length <= 1) return state
-  const current = state.layouts[id] ?? createLayout()
-  const next = closePanelLayout(current)
-  if (next === current) return state
-  const survivors = currentPanels.filter((p) => p !== panelId)
-  // If the closed panel was the focused one, hand focus to the survivor so
-  // keystrokes always land somewhere (Phase 11 / #12, story 34).
+  const ws = state.workspaces.find((w) => w.id === id)
+  if (ws == null || ws.layout == null) return state
+  if (leafIds(ws.layout).length <= 1) return state
+  const next = closeLeaf(ws.layout, panelId)
+  if (next == null) return state
+  // If the closed panel was the focused one, hand focus to the first survivor
+  // so keystrokes always land somewhere (Phase 11 / #12, story 34).
   const activePanelId =
     activePanelOf(state, id) === panelId
-      ? { ...state.activePanelId, [id]: survivors[0] }
+      ? { ...state.activePanelId, [id]: leafIds(next)[0] }
       : state.activePanelId
   return {
     ...state,
-    layouts: { ...state.layouts, [id]: next },
-    panelIds: { ...state.panelIds, [id]: survivors },
+    workspaces: state.workspaces.map((w) =>
+      w.id === id ? { ...w, layout: next } : w,
+    ),
     activePanelId,
   }
 }
 
 /// Mark `panelId` as the focused panel of workspace `id` (Phase 11 / #12,
-/// story 34). Runtime-only — not persisted (story 37). No-op (returns `state`
-/// unchanged) when the workspace id is unknown or `panelId` is not one of its
-/// mounted panels.
+/// story 34). Runtime-only — not persisted. No-op (returns `state` unchanged)
+/// when the workspace id is unknown or `panelId` is not one of its panels.
 export function focusPanel(
   state: WorkspaceState,
   id: string,
   panelId: string,
 ): WorkspaceState {
   if (!state.workspaces.some((w) => w.id === id)) return state
-  const panels = state.panelIds[id] ?? []
-  if (!panels.includes(panelId)) return state
+  if (!panelIdsOf(state, id).includes(panelId)) return state
   return { ...state, activePanelId: { ...state.activePanelId, [id]: panelId } }
 }
 
 /// The currently focused panel of workspace `id` — the panel that should wear
-/// the focus ring. Falls back to the first mounted panel when none has been
-/// focused explicitly (so a single-panel workspace is always "focused"), and
-/// to null when the workspace is unknown or has no panels.
+/// the focus ring. Falls back to the first panel in tree order when none has
+/// been focused explicitly (so a single-panel workspace is always "focused"),
+/// and to null when the workspace is unknown or has no panels.
 export function activePanelOf(
   state: WorkspaceState,
   id: string,
 ): string | null {
-  const panels = state.panelIds[id] ?? []
+  const panels = panelIdsOf(state, id)
   if (panels.length === 0) return null
   return state.activePanelId[id] ?? panels[0]
 }
