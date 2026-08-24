@@ -22,6 +22,10 @@
   --on-accent: #0b1020;
 
   --danger: #ff6b6b;
+
+  /* Agent status dot (v0.2 Phase 2 / #26): working = pulsing amber,
+     needs-attention reuses --accent. */
+  --status-working: #e0a832;
   --danger-soft: rgba(255, 107, 107, 0.12);
   --danger-line: rgba(255, 107, 107, 0.45);
 
@@ -556,4 +560,87 @@ body {
 .fallback-dismiss svg {
   width: 14px;
   height: 14px;
+}
+
+/* ---- Agent status chip on the workspace row (v0.2 Phase 2 / #26) --------- */
+/* Dot + label ("Idle" / "Running" / "Needs Input") shown on OPEN workspace
+   rows, between the name and the icon buttons. Idle is quiet gray; Running
+   pulses amber; Needs Input goes accent-blue with a glow ring. */
+.agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+/* The stacked statuses on a workspace row: the main aggregate chip on top,
+   the remaining panels' statuses (mini) below it. */
+.workspace-statuses {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.agent-status--mini {
+  gap: 4px;
+  opacity: 0.75;
+}
+
+.agent-status--mini .agent-dot {
+  width: 5px;
+  height: 5px;
+}
+
+/* Inside a pane the chip floats at the top-right corner, just left of the
+   close button, on a scrim so it stays readable over terminal content. */
+.surface .agent-status {
+  position: absolute;
+  top: 4px;
+  right: 30px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.agent-status--working {
+  color: var(--text-dim);
+}
+
+.agent-status--working .agent-dot {
+  background: var(--status-working);
+  animation: agent-dot-pulse 1.6s ease-in-out infinite;
+}
+
+.agent-status--needs-attention {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.agent-status--needs-attention .agent-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+@keyframes agent-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }

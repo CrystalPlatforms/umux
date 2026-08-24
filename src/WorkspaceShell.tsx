@@ -13,7 +13,7 @@
 // UI glue verified by Adam on Ubuntu/Wayland; the testable core lives in
 // ./workspaces (pure state) and the Rust WorkspaceStore (persistence).
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -40,6 +40,8 @@ import {
 import { boxes, type LayoutNode, type Orientation, type Container } from './PaneLayout'
 import { matchShortcut } from './shortcuts'
 import { NotificationMuteButton } from './NotificationMuteButton'
+import { AgentStatusIndicator } from './AgentStatusIndicator'
+import { AgentStatusMachine, type AgentStatus } from './agentStatus'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -173,9 +175,19 @@ type PanelSurfacesProps = {
   onResizeEnd: () => void
   onClose: (panelId: string) => void
   onFocusPanel: (panelId: string) => void
+  // Per-panel status signals (v0.2 Phase 2 / #26): the shell owns one status
+  // machine per panel; surfaces report activity/completion. Rendering lives on
+  // the workspace row in the sidebar (Adam's call), not in the panel chrome.
+  onPanelActivity: (panelId: string, bytes: number) => void
+  onPanelCompletion: (panelId: string) => void
+  onPanelViewportResize: (panelId: string) => void
+  onPanelUserInput: (panelId: string) => void
+  // Per-panel statuses (HITL round 3: 3 splits = 3 chips). The workspace row
+  // keeps its aggregate; each pane additionally shows its own dot + label.
+  statuses: Record<string, AgentStatus>
 }
 
-function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, sshTarget, onResize, onResizeEnd, onClose, onFocusPanel }: PanelSurfacesProps) {
+function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, sshTarget, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, statuses }: PanelSurfacesProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
 
@@ -245,7 +257,12 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
             <TerminalSurface
               label={`${workspaceName} · ${short}`}
               sshTarget={p.id === firstLeafId ? sshTarget : undefined}
+              onActivity={(bytes) => onPanelActivity(p.id, bytes)}
+              onCompletion={() => onPanelCompletion(p.id)}
+              onViewportResize={() => onPanelViewportResize(p.id)}
+              onUserInput={() => onPanelUserInput(p.id)}
             />
+            <AgentStatusIndicator status={statuses[p.id] ?? 'idle'} />
             <PanelCloseButton onClose={() => onClose(p.id)} short={short} />
           </div>
         )
@@ -491,6 +508,17 @@ export function WorkspaceShell() {
     persist(splitPanel(state, id, orientation))
   }
 
+  // Focus a panel of a workspace — wired to BOTH pane clicks and keystrokes
+  // (HITL round 6: typing in a panel makes it the active one). Only re-renders
+  // when the active panel actually changes, so per-keystroke calls on an
+  // already-active panel are free.
+  const focusWorkspacePanel = (id: string, panelId: string) => {
+    applySignal(panelId, 'focus')
+    if (activePanelOf(state, id) !== panelId) {
+      setState(focusPanel(state, id, panelId))
+    }
+  }
+
   // Close one panel of a workspace (story 20): siblings fill the freed space.
   // Persisted like the split so the layout round-trips.
   const closeWorkspacePanel = (id: string, panelId: string) => {
@@ -502,6 +530,101 @@ export function WorkspaceShell() {
   // drag, not one per pointer-move. stateRef always holds the latest state.
   const stateRef = useRef(state)
   stateRef.current = state
+
+  // --- Per-panel agent status (v0.2 Phase 2 / #26) -------------------------
+  //
+  // One pure AgentStatusMachine per panel leaf, held OUTSIDE React state:
+  // output chunks fire onActivity many times per second and must not re-render
+  // per chunk — only actual status TRANSITIONS update `statuses`. The clock is
+  // injected (performance.now); the machine itself is unit-tested in
+  // agentStatus.test.ts. This block is glue, verified in the HITL pass.
+  const machinesRef = useRef<Map<string, AgentStatusMachine>>(new Map())
+  const [statuses, setStatuses] = useState<Record<string, AgentStatus>>({})
+  const applySignal = useCallback(
+    (
+      panelId: string,
+      signal: 'activity' | 'completion' | 'focus' | 'resize',
+      bytes?: number,
+    ) => {
+      const machines = machinesRef.current
+      let machine = machines.get(panelId)
+      if (machine == null) {
+        machine = new AgentStatusMachine()
+        machines.set(panelId, machine)
+      }
+      const before = machine.status
+      const now = performance.now()
+      if (signal === 'activity') machine.onActivity(now, bytes)
+      else if (signal === 'completion') machine.onCompletion(now)
+      else if (signal === 'resize') machine.onRedraw(now)
+      else machine.onFocus(now)
+      const after = machine.status
+      if (after !== before) {
+        setStatuses((prev) => ({ ...prev, [panelId]: after }))
+      }
+    },
+    [],
+  )
+  const notePanelActivity = useCallback(
+    (panelId: string, bytes: number) => applySignal(panelId, 'activity', bytes),
+    [applySignal],
+  )
+  const notePanelCompletion = useCallback(
+    (panelId: string) => applySignal(panelId, 'completion'),
+    [applySignal],
+  )
+  const notePanelViewportResize = useCallback(
+    (panelId: string) => applySignal(panelId, 'resize'),
+    [applySignal],
+  )
+
+  // Revealing a workspace makes its terminals repaint (geometry + focus
+  // reporting), and hiding one can too — neither is agent work. On every
+  // active-workspace switch, arm the machines' redraw-suppression window for
+  // every open workspace's panels so the switch never flickers a Running
+  // flash (HITL #1). Real streaming outlasts the 1s window and still shows.
+  useEffect(() => {
+    if (state.activeId == null) return
+    for (const ws of stateRef.current.workspaces) {
+      if (!stateRef.current.openIds.includes(ws.id)) continue
+      for (const pid of panelIdsOf(stateRef.current, ws.id)) {
+        applySignal(pid, 'resize')
+      }
+    }
+  }, [state.activeId, applySignal])
+
+  // Quiet-check tick (working -> idle once output goes silent) plus pruning of
+  // machines whose panel no longer exists in any open workspace (closing a
+  // panel or workspace must not leak its machine). One interval for every
+  // panel; 500ms is well under the machine's 2s quiet window.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const machines = machinesRef.current
+      const live = new Set<string>()
+      for (const ws of stateRef.current.workspaces) {
+        if (!stateRef.current.openIds.includes(ws.id)) continue
+        for (const pid of panelIdsOf(stateRef.current, ws.id)) live.add(pid)
+      }
+      let changed = false
+      const now = performance.now()
+      for (const [panelId, machine] of machines) {
+        if (!live.has(panelId)) {
+          machines.delete(panelId)
+          changed = true
+          continue
+        }
+        const before = machine.status
+        machine.onTick(now)
+        if (machine.status !== before) changed = true
+      }
+      if (changed) {
+        const snapshot: Record<string, AgentStatus> = {}
+        for (const [panelId, machine] of machines) snapshot[panelId] = machine.status
+        setStatuses(snapshot)
+      }
+    }, 500)
+    return () => window.clearInterval(timer)
+  }, [])
   const resizeWorkspacePanel = (
     id: string,
     splitId: string,
@@ -627,6 +750,31 @@ export function WorkspaceShell() {
               ) : (
                 <>
                   <span className="workspace-name">{ws.name}</span>
+                  {state.openIds.includes(ws.id) &&
+                    (() => {
+                      // One chip per panel, the ACTIVE panel's chip first with
+                      // the bigger dot (HITL round 5: the big dot marks the
+                      // terminal you're in — switching panel focus moves it),
+                      // the remaining panels' statuses as minis below.
+                      const pids = panelIdsOf(state, ws.id)
+                      if (pids.length === 0) return null
+                      const activePid = activePanelOf(state, ws.id) ?? pids[0]
+                      // Fixed chip order (panel tree order) — chips never move
+                      // when focus changes; ONLY the active panel's dot grows
+                      // (mini -> full), exactly where that panel's chip sits
+                      // (HITL round 7).
+                      return (
+                        <span className="workspace-statuses">
+                          {pids.map((pid) => (
+                            <AgentStatusIndicator
+                              key={pid}
+                              status={statuses[pid] ?? 'idle'}
+                              mini={pid !== activePid}
+                            />
+                          ))}
+                        </span>
+                      )
+                    })()}
                   <button
                     className="icon-btn"
                     aria-label={`Rename ${ws.name}`}
@@ -703,9 +851,12 @@ export function WorkspaceShell() {
                     }
                     onResizeEnd={commitResize}
                     onClose={(panelId) => closeWorkspacePanel(ws.id, panelId)}
-                    onFocusPanel={(panelId) =>
-                      setState(focusPanel(state, ws.id, panelId))
-                    }
+                    onFocusPanel={(panelId) => focusWorkspacePanel(ws.id, panelId)}
+                    onPanelActivity={notePanelActivity}
+                    onPanelCompletion={notePanelCompletion}
+                    onPanelViewportResize={notePanelViewportResize}
+                    onPanelUserInput={(panelId) => focusWorkspacePanel(ws.id, panelId)}
+                    statuses={statuses}
                   />
                 )}
               </div>

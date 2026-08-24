@@ -42,6 +42,17 @@ struct SshExitPayload {
     error: Option<String>,
 }
 
+/// Per-panel completion signal for the renderer (v0.2 Phase 2 / #26). Emitted
+/// when the OSC parser surfaces completion event(s) in a PTY/SSH output chunk,
+/// so the frontend's per-panel status machine can flip that panel to
+/// needs-attention. Carries only the panel id — the desktop notification (with
+/// its title/body) is fired separately and unchanged; the two channels are
+/// independent (muting notifications must NOT mute the status dot).
+#[derive(Serialize, Clone)]
+struct PanelSignalPayload {
+    id: u32,
+}
+
 #[tauri::command]
 fn pty_open(
     app: AppHandle,
@@ -95,12 +106,18 @@ fn pty_open(
     std::thread::spawn(move || {
         let mut parser = OscParser::new();
         let service = NotificationService::with_mute(
-            Box::new(LibnotifyNotifier),
+            Box::new(NativeNotifier),
             Some("umux".to_string()),
             mute_flag,
         );
         while let Ok(bytes) = rx.recv() {
-            let passthrough = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            let (passthrough, events) = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            if !events.is_empty() {
+                // Completion signal first, then the surviving output bytes: the
+                // frontend status machine's grace window expects a TUI's
+                // trailing redraw to land right AFTER its completion signal.
+                let _ = emit_app.emit("pty_completion", PanelSignalPayload { id });
+            }
             if !passthrough.is_empty() {
                 let _ = emit_app.emit("pty_output", PtyOutputPayload { id, data: passthrough });
             }
@@ -181,12 +198,17 @@ fn ssh_open(
     std::thread::spawn(move || {
         let mut parser = OscParser::new();
         let service = NotificationService::with_mute(
-            Box::new(LibnotifyNotifier),
+            Box::new(NativeNotifier),
             Some("umux".to_string()),
             mute_flag,
         );
         while let Ok(bytes) = rx.recv() {
-            let passthrough = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            let (passthrough, events) = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            if !events.is_empty() {
+                // Same per-panel completion signal as local panels (see the
+                // pty_open thread) — remote status parity (#26).
+                let _ = emit_app.emit("ssh_completion", PanelSignalPayload { id });
+            }
             if !passthrough.is_empty() {
                 let _ = emit_app.emit("ssh_output", PtyOutputPayload { id, data: passthrough });
             }
@@ -224,19 +246,27 @@ fn ssh_close(state: State<'_, Mutex<SshManager>>, id: u32) -> Result<(), String>
     Ok(())
 }
 
-/// Real `Notifier` backed by libnotify via the `notify-send` CLI. Thin adapter
-/// on the OS boundary — not unit-tested; its behavior is verified manually by
-/// Adam on Ubuntu/Wayland.
+/// Real `Notifier` — a thin adapter on the OS boundary. The spawn itself is
+/// not unit-tested; its behavior is verified manually by Adam (Linux) and now
+/// on macOS too. A failed spawn is logged but otherwise swallowed so a missing
+/// notifier can never break the terminal stream.
 ///
-/// We shell out to `notify-send` (the libnotify command-line client) rather
-/// than the `notify-rust` D-Bus API because GNOME silently drops banners from
-/// `notify-rust` when the sending process has no associated `.desktop` file
-/// (the case during `tauri dev`), while `notify-send` is always shown. A failed
-/// spawn (no libnotify-bin installed) is logged but otherwise swallowed so a
-/// missing notifier can never break the terminal stream.
-struct LibnotifyNotifier;
+/// Platform split (v0.2 Phase 2 / #26 HITL: "the notification never arrives"
+/// on macOS — there is no notify-send there):
+///  - Linux: unchanged v0.1 path — libnotify via the `notify-send` CLI. We
+///    shell out rather than use the `notify-rust` D-Bus API because GNOME
+///    silently drops banners from processes without a `.desktop` file (the
+///    case during `tauri dev`), while `notify-send` is always shown.
+///  - macOS: AppleScript `display notification` via the `osascript` CLI. This
+///    works both for the unbundled `tauri dev` binary and the unsigned .app
+///    bundle (UNUserNotificationCenter-based plugins can't post from an
+///    unbundled dev process, and osascript needs no permission dance), which
+///    keeps the zero-cost policy intact.
+#[cfg(not(target_os = "macos"))]
+struct NativeNotifier;
 
-impl Notifier for LibnotifyNotifier {
+#[cfg(not(target_os = "macos"))]
+impl Notifier for NativeNotifier {
     fn show(&self, summary: &str, body: &str) {
         let result = std::process::Command::new("notify-send")
             .arg("--app-name=umux")
@@ -255,6 +285,47 @@ impl Notifier for LibnotifyNotifier {
             Err(e) => log::error!("[notify] failed to spawn notify-send: {e}"),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+struct NativeNotifier;
+
+#[cfg(target_os = "macos")]
+impl Notifier for NativeNotifier {
+    fn show(&self, summary: &str, body: &str) {
+        let script = apple_notification_script(summary, body);
+        let result = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
+        match &result {
+            Ok(out) if out.status.success() => {
+                log::info!("[notify] dispatched: summary={summary:?} body={body:?}")
+            }
+            Ok(out) => log::error!(
+                "[notify] osascript exited {}: stderr={}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => log::error!("[notify] failed to spawn osascript: {e}"),
+        }
+    }
+}
+
+/// Build the AppleScript `display notification` statement for summary/body
+/// (macOS notifier). AppleScript string literals escape backslash and
+/// double-quote; the script travels as ONE argv element (no shell), so no
+/// other quoting is needed. Pure — unit-tested with hostile input.
+#[cfg(target_os = "macos")]
+fn apple_notification_script(summary: &str, body: &str) -> String {
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        esc(body),
+        esc(summary)
+    )
 }
 
 /// Where the workspace config file lives: `$XDG_CONFIG_HOME/umux/workspaces.json`
@@ -361,12 +432,15 @@ fn process_pty_chunk(
     service: &NotificationService,
     origin: &PanelOrigin,
     bytes: &[u8],
-) -> Vec<u8> {
-    let result = parser.push(bytes);
-    for event in &result.events {
+) -> (Vec<u8>, Vec<osc_parser::NotificationEvent>) {
+    let osc_parser::PushResult { passthrough, events } = parser.push(bytes);
+    for event in &events {
         service.notify(event, origin);
     }
-    result.passthrough
+    // The events travel back to the caller so the reader thread can ALSO emit
+    // the per-panel completion signal (`pty_completion` / `ssh_completion`).
+    // The notify above (desktop notification) is unchanged — v0.1 behavior.
+    (passthrough, events)
 }
 
 /// Decide which shell binary to launch for a panel.
@@ -473,13 +547,14 @@ mod tests {
         let mut parser = OscParser::new();
         let bytes = b"ls -la\r\nhello world";
 
-        let out = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), bytes);
+        let (out, events) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), bytes);
 
         assert_eq!(out, bytes.to_vec(), "plain bytes pass through unchanged");
         assert!(
             rec.calls.lock().unwrap().is_empty(),
             "no notification for ordinary output"
         );
+        assert!(events.is_empty(), "no completion signal for ordinary output");
     }
 
     // T4 (AC1 + AC2 — a completion sequence triggers a notification, no AI-tool
@@ -497,7 +572,7 @@ mod tests {
         ]
         .to_vec();
 
-        let out = process_pty_chunk(
+        let (out, events) = process_pty_chunk(
             &mut parser,
             &svc,
             &PanelOrigin {
@@ -513,6 +588,13 @@ mod tests {
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "exactly one notification");
         assert!(calls[0].1.contains("build done"), "body carries the message");
+
+        // v0.2 Phase 2 / #26: the same chunk also surfaces the parsed event so
+        // the reader thread can emit the per-panel completion signal. Both
+        // channels (desktop notification + status signal) fire from one chunk.
+        assert_eq!(events.len(), 1, "exactly one completion event surfaced");
+        assert_eq!(events[0].protocol, osc_parser::OscProtocol::Nine);
+        assert!(events[0].body.contains("build done"));
     }
 
     // T5 (regression guard — parser state must persist across chunks in the
@@ -526,17 +608,47 @@ mod tests {
         let first: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i'].to_vec();
         let second: Vec<u8> = [0x07, b'x'].to_vec(); // BEL terminator + trailing byte
 
-        let out1 = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &first);
-        let out2 = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &second);
+        let (out1, events1) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &first);
+        let (out2, events2) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &second);
 
         // Nothing is complete until the terminator arrives.
         assert!(out1.is_empty(), "no passthrough from the unfinished sequence");
+        assert!(events1.is_empty(), "no completion event before the terminator");
         // The trailing non-OSC byte after the terminator still reaches the term.
         assert_eq!(out2, b"x".to_vec());
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "split sequence fires exactly one notification");
         assert!(calls[0].1.contains("hi"), "body carries the message: {}", calls[0].1);
+        assert_eq!(events2.len(), 1, "split sequence surfaces exactly one completion event");
+    }
+
+    // --- macOS notifier script (v0.2 Phase 2 / #26) -------------------------
+
+    // T7 (plain text needs no escaping — the notification reaches AppleScript
+    // verbatim):
+    //   Input:  summary "umux", body "build done"
+    //   Output: display notification "build done" with title "umux"
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_script_plain_text_is_verbatim() {
+        assert_eq!(
+            apple_notification_script("umux", "build done"),
+            "display notification \"build done\" with title \"umux\""
+        );
+    }
+
+    // T8 (quotes and backslashes in the message must not break out of the
+    // AppleScript string literal — a hostile body can't inject script code):
+    //   Input:  summary `umux "done"`, body `task "x" finished \o/`
+    //   Output: every `"` escaped as `\"`, every `\` doubled.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_script_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            apple_notification_script("umux \"done\"", "task \"x\" finished \\o/"),
+            "display notification \"task \\\"x\\\" finished \\\\o/\" with title \"umux \\\"done\\\"\""
+        );
     }
 
     // --- Phase 14: notification mute wiring (#15) --------------------------
@@ -568,7 +680,7 @@ mod tests {
         flag.store(true, Ordering::SeqCst);
 
         let bytes: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i', 0x07].to_vec();
-        let out = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
+        let (out, events) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
 
         assert!(
             out.is_empty(),
@@ -578,5 +690,9 @@ mod tests {
             rec.calls.lock().unwrap().is_empty(),
             "muted flag suppresses the notification on the live stream"
         );
+        // v0.2 Phase 2 / #26: muting notifications must NOT mute the status
+        // dot — the completion event still travels to the renderer, so the
+        // panel flips to needs-attention even with notifications silenced.
+        assert_eq!(events.len(), 1, "completion signal still routed while muted");
     }
 }

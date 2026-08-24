@@ -24,6 +24,10 @@ import { WriteBatcher } from './WriteBatcher'
 export function TerminalSurface({
   label,
   sshTarget,
+  onActivity,
+  onCompletion,
+  onViewportResize,
+  onUserInput,
 }: {
   label?: string
   // When set, this panel opens a remote shell over SSH (the `ssh_*` command
@@ -31,6 +35,22 @@ export function TerminalSurface({
   // transports, the same shape (open → id; output filtered by id; write/resize/
   // close by id) so a remote panel behaves like a local one (Phase 16 / AC3).
   sshTarget?: string
+  // Per-panel status signals (v0.2 Phase 2 / #26). This surface is the only
+  // place that knows which PTY id the panel owns, so it translates transport
+  // events into panel-level callbacks for the parent's status machines:
+  //   onActivity   any output chunk arrived for THIS panel (content-agnostic —
+  //                the bytes are never inspected, only their arrival counted)
+  //   onCompletion an OSC completion event fired for THIS panel
+  onActivity?: (bytes: number) => void
+  onCompletion?: () => void
+  // The user typed in this panel — per the issue, "focusing OR TYPING clears
+  // needs-attention". Typing `/exit` acknowledges instantly (HITL round 3/4).
+  onUserInput?: () => void
+  // The terminal's geometry changed at xterm level (workspace reveal, window
+  // or split resize). The resize triggers a shell/TUI repaint (SIGWINCH) whose
+  // bytes are NOT agent work — the status machine suppresses them for a short
+  // window after this signal (HITL #1: workspace-switch flicker).
+  onViewportResize?: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   // A connection failure (sync ssh_open rejection, or an async `ssh_exit` event
@@ -68,7 +88,19 @@ export function TerminalSurface({
       return true
     })
 
-    fit.fit()
+    // Fit only when the container actually has size. A hidden workspace is
+    // display:none, so the container reports 0×0 — and the installed
+    // addon-fit CLAMPS that to a degenerate 2×1 terminal (Math.max guards in
+    // proposeDimensions), which SIGWINCHes the shell into a frozen TUI: a
+    // Claude Code agent in a background workspace literally stopped running
+    // until its workspace was revealed again (HITL round 6). Skipping the fit
+    // keeps the last real geometry; the reveal's ResizeObserver pass re-fits.
+    const fitIfVisible = () => {
+      if (container.clientWidth === 0 || container.clientHeight === 0) return
+      fit.fit()
+    }
+
+    fitIfVisible()
 
     let panelId: number | null = null
     // Buffer output chunks that arrive before our panel id is known, so we don't
@@ -120,6 +152,9 @@ export function TerminalSurface({
     const writeIfOurs = (payload: { id: number; data: number[] }) => {
       if (payload.id === panelId) {
         writeToTerm(new Uint8Array(payload.data))
+        // Byte-activity signal for the panel's status machine (#26): the
+        // chunk's LENGTH is the whole signal — content is never inspected.
+        onActivity?.(payload.data.length)
       }
     }
 
@@ -131,6 +166,25 @@ export function TerminalSurface({
         return
       }
       writeIfOurs(event.payload)
+    })
+
+    // Per-panel completion signal (v0.2 Phase 2 / #26): the backend emits
+    // `pty_completion` / `ssh_completion` when the OSC parser sees an AI-CLI
+    // completion in THIS panel's stream (alongside — independent of — the
+    // desktop notification). Same pending pattern as output: the id isn't
+    // known until open resolves, so early payloads are buffered.
+    const completionEvent = isRemote ? 'ssh_completion' : 'pty_completion'
+    const pendingCompletions: Array<{ id: number }> = []
+    const completionIfOurs = (payload: { id: number }) => {
+      if (disposed) return
+      if (payload.id === panelId) onCompletion?.()
+    }
+    const unlistenCompletionP = listen<{ id: number }>(completionEvent, (event) => {
+      if (panelId == null) {
+        pendingCompletions.push(event.payload)
+        return
+      }
+      completionIfOurs(event.payload)
     })
 
     // Remote panels also listen for `ssh_exit`: when the ssh process dies, the
@@ -162,18 +216,25 @@ export function TerminalSurface({
       // Flush anything that arrived before we knew our id, keeping only ours.
       for (const payload of pending) writeIfOurs(payload)
       pending.length = 0
+      for (const payload of pendingCompletions) completionIfOurs(payload)
+      pendingCompletions.length = 0
 
-      // Keystrokes from xterm -> backend PTY.
+      // Keystrokes from xterm -> backend PTY. Each keystroke is also a user
+      // acknowledgement of the panel (clears needs-attention).
       term.onData((data) => {
+        onUserInput?.()
         void invoke(writeCmd, { id: panelId, data })
       })
 
       // Report terminal geometry changes so the shell re-wraps correctly.
+      // Also tell the status machine a resize happened: the repaint the shell
+      // does in response is mechanical, not agent activity.
       term.onResize(({ cols, rows }) => {
+        onViewportResize?.()
         void invoke(resizeCmd, { id: panelId, cols, rows })
       })
 
-      fit.fit()
+      fitIfVisible()
     }).catch((e: unknown) => {
       // Synchronous failure (bad target, empty host/user, spawn error): the
       // backend rejects ssh_open with a friendly message. Catch it so the panel
@@ -184,7 +245,7 @@ export function TerminalSurface({
       }
     })
 
-    const onWindowResize = () => fit.fit()
+    const onWindowResize = () => fitIfVisible()
     window.addEventListener('resize', onWindowResize)
 
     // Re-fit whenever the container itself resizes — most importantly when the
@@ -192,7 +253,7 @@ export function TerminalSurface({
     // shrinks/grows inside the window, so the window 'resize' event never
     // fires. Without this xterm keeps the old cols/rows, so a split panel
     // wraps at the wrong width and a vertical split miscounts rows.
-    const resizeObserver = new ResizeObserver(() => fit.fit())
+    const resizeObserver = new ResizeObserver(() => fitIfVisible())
     resizeObserver.observe(container)
 
     return () => {
@@ -206,6 +267,7 @@ export function TerminalSurface({
       resizeObserver.disconnect()
       void unlistenP.then((fn) => fn())
       void unlistenExitP.then((fn) => fn())
+      void unlistenCompletionP.then((fn) => fn())
       void opened.then(() => {
         if (panelId != null) void invoke(closeCmd, { id: panelId })
       })

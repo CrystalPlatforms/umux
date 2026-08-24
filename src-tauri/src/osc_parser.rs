@@ -19,9 +19,12 @@
 //  - Output: PushResult { passthrough: bytes NOT belonging to a recognized
 //    notification (byte-identical to input), events: one per recognized seq }.
 //  - Terminators accepted: BEL (0x07) and ST (`ESC \`, 0x1B 0x5C).
-//  - ConEmu disambiguation is intentionally NOT done: `9;9;<cwd>` would be
-//    captured as an OSC 9 notification (body "9;<cwd>"). umux targets AI-CLI
-//    completion signals, which emit clean `9;<message>`; ConEmu is out of scope.
+//  - ConEmu/cwd disambiguation: `9;9;<cwd>` (workspace/cwd tracking emitted
+//    by shell integrations) is NOT a notification — payloads whose message
+//    starts with `9;` are passed through untouched. Real AI-CLI completions
+//    carry a human message that never starts with `9;`. Without this, every
+//    cwd update fired a bogus completion -> phantom Needs Input + a decay
+//    cycle in the status dot (v0.2 Phase 2 / #26 HITL #3).
 //  - Boundary: an OSC left unterminated at the end of a chunk is held until the
 //    next push() supplies the terminator.
 //  - NOT tested here: PtyService stream integration (separate phase),
@@ -191,13 +194,17 @@ impl OscParser {
 /// Inspect the OSC parameter bytes (everything between `ESC ]` and terminator)
 /// and return a notification event if this is a recognized protocol.
 fn match_notification(params: &[u8]) -> Option<NotificationEvent> {
-    // iTerm2: `9;<message>`.
+    // iTerm2: `9;<message>` — but NOT `9;9;<cwd>` (ConEmu-style cwd tracking
+    // that shell integrations emit on every prompt; see header). The message
+    // of a real completion never starts with `9;`.
     if let Some(rest) = params.strip_prefix(b"9;") {
-        return Some(NotificationEvent {
+        if !rest.starts_with(b"9;") {
+            return Some(NotificationEvent {
             protocol: OscProtocol::Nine,
             title: String::new(),
             body: String::from_utf8_lossy(rest).into_owned(),
-        });
+            });
+        }
     }
 
     // urxvt: `777;notify;<title>;<body>`. Only the `notify` extension is a
@@ -467,6 +474,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // T13 (v0.2 Phase 2 / #26 HITL #3 — cwd tracking is not a completion):
+    //   Input:  ESC ] 9 ; 9 ; /Users/adam/project BEL
+    //           (ConEmu-style cwd sequence that shell integrations emit on
+    //           every prompt; without the guard every cwd update fired a
+    //           bogus Needs Input + desktop notification)
+    //   Output: passthrough == input exactly, no events.
+    #[test]
+    fn osc_9_9_cwd_tracking_is_not_a_notification() {
+        let mut p = OscParser::new();
+        let input = b"\x1b]9;9;/Users/adam/project\x07";
+
+        let result = p.push(input);
+
+        assert_eq!(result.passthrough, input.as_slice());
+        assert!(result.events.is_empty());
     }
 
     // T12 (AC2 — OSC 777 carries other extensions too; only `notify` is a
