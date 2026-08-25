@@ -1,6 +1,7 @@
 pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_service;
+pub mod settings_store;
 pub mod ssh_manager;
 pub mod workspace_store;
 
@@ -8,12 +9,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use notification_service::{NotificationService, Notifier, PanelOrigin};
 use osc_parser::OscParser;
 use pty_service::{PtyHandle, PtyService};
+use settings_store::{Settings, SettingsStore};
 use ssh_manager::{parse_ssh_target, SshHandle, SshManager};
 use workspace_store::{fallback_warning, Workspace, WorkspaceData, WorkspaceStore};
 
@@ -59,6 +61,7 @@ fn pty_open(
     state: State<'_, Mutex<PtyService>>,
     mute: State<'_, MuteFlag>,
     shell: Option<String>,
+    cwd: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
     label: Option<String>,
@@ -66,7 +69,9 @@ fn pty_open(
     // Default to the user's $SHELL, falling back to /bin/sh; an explicit
     // `shell` override (from a future WorkspaceStore config) wins.
     let shell = resolve_shell(shell.as_deref());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    // A cwd from the session snapshot (v0.2 Phase 5 / #29) when it still
+    // exists; otherwise the app's current dir (v0.1 behavior).
+    let cwd = resolve_cwd(cwd.as_deref());
 
     // Open the PTY at the renderer's measured size from the very first moment.
     // If the frontend hasn't measured yet (or sends nothing), fall back to
@@ -144,6 +149,61 @@ fn pty_close(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<(), String>
     let mut svc = state.lock().map_err(|e| e.to_string())?;
     svc.close(&PtyHandle { id });
     Ok(())
+}
+
+/// v0.2 Phase 4 / #28 — is a live process (not the idle shell) running in
+/// this local panel? Every close path (X button, Ctrl+Shift+W, workspace
+/// close) asks this BEFORE tearing a panel down; `true` means the frontend
+/// must confirm with the user first. SSH panels have no equivalent: the local
+/// `ssh` client is always the foreground group while connected, and the
+/// remote side is opaque (OSC-only, no polling), so they close without asking.
+#[tauri::command]
+fn pty_is_busy(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<bool, String> {
+    let mut svc = state.lock().map_err(|e| e.to_string())?;
+    Ok(svc.is_busy(&PtyHandle { id }))
+}
+
+// --- Session snapshot support (v0.2 Phase 5 / #29) ---------------------------
+//
+// The frontend owns the panelId(leaf)↔ptyId mapping (each TerminalSurface
+// reports its handle via onOpened); the backend owns the OS. One command
+// reads every live local shell's cwd in a single invoke so the frontend can
+// merge them into workspaces.json before persisting a layout change or
+// quitting. Remote panels are not queried — the remote cwd is not visible
+// locally (OSC-only policy), so their snapshot keeps just the ssh target.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CwdQuery {
+    panel_id: String,
+    pty_id: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CwdAnswer {
+    panel_id: String,
+    cwd: Option<String>,
+}
+
+#[tauri::command]
+fn panel_cwds(
+    state: State<'_, Mutex<PtyService>>,
+    panels: Vec<CwdQuery>,
+) -> Result<Vec<CwdAnswer>, String> {
+    let svc = state.lock().map_err(|e| e.to_string())?;
+    Ok(panels
+        .into_iter()
+        .map(|q| {
+            let cwd = svc
+                .cwd(&PtyHandle { id: q.pty_id })
+                .map(|p| p.to_string_lossy().into_owned());
+            CwdAnswer {
+                panel_id: q.panel_id,
+                cwd,
+            }
+        })
+        .collect())
 }
 
 // --- SSH panels (Phase 16 / Issue #17) ----------------------------------------
@@ -328,14 +388,28 @@ fn apple_notification_script(summary: &str, body: &str) -> String {
     )
 }
 
-/// Where the workspace config file lives: `$XDG_CONFIG_HOME/umux/workspaces.json`
-/// or `~/.config/umux/workspaces.json` when XDG is unset.
-fn config_path() -> PathBuf {
+/// The per-user config directory shared by every umux config file:
+/// `$XDG_CONFIG_HOME/umux` or `~/.config/umux` when XDG is unset.
+/// (A per-OS relocation — `~/Library/Application Support/umux` on macOS,
+/// `%APPDATA%\umux` on Windows — is v1.0 Phase 8/9 scope; both files move
+/// together when that lands.)
+fn config_dir() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|_| PathBuf::from("."));
-    base.join("umux").join("workspaces.json")
+    base.join("umux")
+}
+
+/// Where the workspace config file lives: `<config_dir>/workspaces.json`.
+fn config_path() -> PathBuf {
+    config_dir().join("workspaces.json")
+}
+
+/// Where the settings file lives: `<config_dir>/settings.json` (v0.2 Phase 3 /
+/// #27 — same directory, same corruption fallback as workspaces).
+fn settings_path() -> PathBuf {
+    config_dir().join("settings.json")
 }
 
 /// Payload for the `config_fallback` event (Phase 18 / Issue #19, AC3).
@@ -391,6 +465,27 @@ fn set_notifications_muted(muted: bool, state: State<'_, MuteFlag>) -> bool {
 #[tauri::command]
 fn notifications_muted(state: State<'_, MuteFlag>) -> bool {
     state.load(Ordering::SeqCst)
+}
+
+/// Load the persisted feature toggles (v0.2 Phase 3 / #27). A corrupted file
+/// falls back to defaults AND emits the same `config_fallback` warning the
+/// workspace config uses, so the downgrade is surfaced, not silent.
+#[tauri::command]
+fn load_settings(app: AppHandle, state: State<'_, SettingsStore>) -> Settings {
+    let (settings, status) = state.load_with_status();
+    if let Some(message) = settings_store::settings_fallback_warning(status) {
+        log::warn!("[config] settings fallback: {message}");
+        let _ = app.emit("config_fallback", ConfigFallbackPayload { message });
+    }
+    settings
+}
+
+/// Persist the feature toggles. The param is named `settings` to match the
+/// invoke key the frontend sends (`invoke('save_settings', { settings })`) —
+/// Tauri maps arguments by name (see the save_workspaces comment).
+#[tauri::command]
+fn save_settings(state: State<'_, SettingsStore>, settings: Settings) -> Result<(), String> {
+    state.save(&settings).map_err(|e| e.to_string())
 }
 
 /// Poll the ssh child's exit code (briefly, after its output stream ended) and
@@ -453,18 +548,41 @@ pub fn resolve_shell(shell: Option<&str>) -> String {
         .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
 }
 
+/// Decide the working directory a new shell starts in (v0.2 Phase 5 / #29).
+/// A cwd saved in the session snapshot wins when it still exists and is a
+/// directory; anything else (none, empty, deleted, a plain file) falls back
+/// to the app's current dir — exactly v0.1 behavior — so a stale or hostile
+/// snapshot value can never break panel spawn.
+pub fn resolve_cwd(cwd: Option<&str>) -> PathBuf {
+    match cwd {
+        Some(dir) if !dir.is_empty() && std::path::Path::new(dir).is_dir() => PathBuf::from(dir),
+        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Seed the app-wide notification flag from the persisted settings (v0.2
+    // Phase 3 / #27): the AtomicBool is the runtime gate every panel's
+    // notification thread reads; settings.json is its persisted form, so a
+    // disabled-notifications toggle survives a restart.
+    let settings_store = SettingsStore::new(settings_path());
+    let initial_settings = settings_store.load();
+    let mute: MuteFlag = Arc::new(AtomicBool::new(!initial_settings.notifications_enabled));
+
     tauri::Builder::default()
         .manage(Mutex::new(PtyService::new()))
         .manage(Mutex::new(SshManager::new()))
         .manage(WorkspaceStore::new(config_path()))
-        .manage(Arc::new(AtomicBool::new(false)) as MuteFlag)
+        .manage(settings_store)
+        .manage(mute)
         .invoke_handler(tauri::generate_handler![
             pty_open,
             pty_write,
             pty_resize,
             pty_close,
+            pty_is_busy,
+            panel_cwds,
             ssh_open,
             ssh_write,
             ssh_resize,
@@ -473,6 +591,8 @@ pub fn run() {
             save_workspaces,
             set_notifications_muted,
             notifications_muted,
+            load_settings,
+            save_settings,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -510,6 +630,47 @@ mod tests {
     fn resolve_shell_none_uses_shell_env() {
         let expected = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         assert_eq!(resolve_shell(None), expected);
+    }
+
+    // --- v0.2 Phase 5 / #29: restore cwd resolution ---------------------------
+
+    // T-C1 (AC2 — a restored panel re-spawns in its saved cwd):
+    //   Input:  Some(<a directory that exists>)
+    //   Output: that directory, verbatim.
+    #[test]
+    fn resolve_cwd_valid_directory_wins() {
+        let dir = std::env::temp_dir();
+        assert_eq!(resolve_cwd(Some(dir.to_str().unwrap())), dir);
+    }
+
+    // T-C2 (AC3 — a stale snapshot value falls back to v0.1 behavior):
+    //   Input:  Some(<a path that does not exist>)
+    //   Output: the process's current dir — the panel still opens, in the
+    //           same place v0.1 would have put it.
+    #[test]
+    fn resolve_cwd_missing_directory_falls_back() {
+        let expected = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        assert_eq!(resolve_cwd(Some("/definitely/not/a/real/dir/umux-test")), expected);
+    }
+
+    // T-C3 (no saved cwd — panels created fresh this session):
+    //   Input:  None
+    //   Output: current dir, exactly as v0.1's pty_open did.
+    #[test]
+    fn resolve_cwd_none_falls_back() {
+        let expected = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        assert_eq!(resolve_cwd(None), expected);
+    }
+
+    // T-C4 (a hostile/accidental value naming a FILE, not a directory):
+    //   Input:  Some(<path of an existing regular file>)
+    //   Output: current dir — spawning a shell "in" a file is nonsense, and
+    //           is_dir() (not just exists()) is what prevents it.
+    #[test]
+    fn resolve_cwd_file_path_falls_back() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let expected = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        assert_eq!(resolve_cwd(Some(file.path().to_str().unwrap())), expected);
     }
 
     // --- Phase 13 wiring (OSC -> notification) ---

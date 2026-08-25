@@ -34,6 +34,8 @@ import {
   activePanelOf,
   bootState,
   panelIdsOf,
+  upsertPanelCwd,
+  type Panel,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
@@ -42,6 +44,9 @@ import { matchShortcut } from './shortcuts'
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
 import { AgentStatusMachine, type AgentStatus } from './agentStatus'
+import { SettingsDialog } from './SettingsDialog'
+import { CloseConfirmDialog } from './CloseConfirmDialog'
+import { coerceSettings, defaultSettings, type Settings } from './settings'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -131,6 +136,16 @@ function SplitVerticalIcon({ className }: IconProps) {
   )
 }
 
+function SettingsIcon({ className }: IconProps) {
+  // Gear — opens the Settings screen (v0.2 Phase 3 / #27).
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+    </svg>
+  )
+}
+
 // --- Context menu state ------------------------------------------------------
 
 type MenuState = {
@@ -167,10 +182,12 @@ type PanelSurfacesProps = {
   workspaceName: string
   layout: LayoutNode
   activePanelId: string | null
-  // Identity of the tree's first leaf — the legacy SSH wiring (Phase 16 /
-  // #17) passes the workspace's first configured `sshTarget` to it.
+  // Identity of the tree's first leaf — per-leaf panel config (v0.2 Phase 5 /
+  // #29) with a legacy fallback: a leaf with its own entry uses it; the first
+  // leaf additionally falls back to the config's first entry (the pre-v0.2
+  // shape stored one entry for the workspace's only panel).
   firstLeafId: string
-  sshTarget?: string
+  panels: Panel[] | undefined
   onResize: (splitId: string, ratio: number, container: Container) => void
   onResizeEnd: () => void
   onClose: (panelId: string) => void
@@ -182,12 +199,21 @@ type PanelSurfacesProps = {
   onPanelCompletion: (panelId: string) => void
   onPanelViewportResize: (panelId: string) => void
   onPanelUserInput: (panelId: string) => void
+  // v0.2 Phase 4 / #28 + Phase 5 / #29: a surface reports the backend handle
+  // it was assigned (and whether it is a remote/SSH one), so the shell can
+  // ask "is a live process running in this panel?" before a close and read
+  // the shell process's cwd for the session snapshot.
+  onPanelOpened: (panelId: string, ptyId: number, remote: boolean) => void
   // Per-panel statuses (HITL round 3: 3 splits = 3 chips). The workspace row
   // keeps its aggregate; each pane additionally shows its own dot + label.
   statuses: Record<string, AgentStatus>
+  // Settings gate (v0.2 Phase 3 / #27): when the agent-status toggle is off,
+  // panes render no indicator at all — the machines keep running so flipping
+  // the toggle back on is instant and lossless.
+  statusEnabled: boolean
 }
 
-function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, sshTarget, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, statuses }: PanelSurfacesProps) {
+function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, panels, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled }: PanelSurfacesProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
 
@@ -204,6 +230,16 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
   }, [])
 
   const { panes, dividers } = boxes(layout, size, DIVIDER_PX)
+
+  /// A pane's stored config (cwd / SSH target), by leaf id with the
+  /// first-leaf legacy fallback described on the `panels` prop. `?? []` keeps
+  /// a hand-edited config (no panels array) from crashing the render.
+  const metaFor = (paneId: string): Panel | undefined => {
+    const list = panels ?? []
+    const own = list.find((m) => m.id === paneId)
+    if (own != null) return own
+    return paneId === firstLeafId ? list[0] : undefined
+  }
 
   // Drag a divider: the pointer's position along the split's axis becomes the
   // ratio over the DIVIDABLE length (axis minus this divider's own gap), so
@@ -246,6 +282,7 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
         // Stable, human-readable panel tag for notifications and the close
         // button — position names (left/right) stop working with N panels.
         const short = p.id.slice(0, 4)
+        const meta = metaFor(p.id)
         return (
           <div
             key={p.id}
@@ -256,13 +293,17 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
           >
             <TerminalSurface
               label={`${workspaceName} · ${short}`}
-              sshTarget={p.id === firstLeafId ? sshTarget : undefined}
+              sshTarget={meta?.sshTarget}
+              cwd={meta?.workingDirectory}
               onActivity={(bytes) => onPanelActivity(p.id, bytes)}
               onCompletion={() => onPanelCompletion(p.id)}
               onViewportResize={() => onPanelViewportResize(p.id)}
               onUserInput={() => onPanelUserInput(p.id)}
+              onOpened={(ptyId) => onPanelOpened(p.id, ptyId, meta?.sshTarget !== undefined)}
             />
-            <AgentStatusIndicator status={statuses[p.id] ?? 'idle'} />
+            {statusEnabled && (
+              <AgentStatusIndicator status={statuses[p.id] ?? 'idle'} />
+            )}
             <PanelCloseButton onClose={() => onClose(p.id)} short={short} />
           </div>
         )
@@ -312,16 +353,34 @@ export function WorkspaceShell() {
   const menuOpenedAtRef = useRef(0)
   const [collapsed, setCollapsed] = useState(false)
   const [draggedId, setDraggedId] = useState<string | null>(null)
-  // Notification mute (Phase 14 / #15). Session-only — not persisted: the flag
-  // lives in the backend, seeded as audible on app start.
-  const [muted, setMuted] = useState(false)
+  // Feature toggles (v0.2 Phase 3 / #27). Loaded from the Rust SettingsStore
+  // on mount; every change is persisted immediately and takes effect live.
+  // `muted` is derived from the notifications toggle — the bell button and
+  // the Settings switch are one source of truth (supersedes v0.1's
+  // session-only mute).
+  const [settings, setSettings] = useState<Settings>(defaultSettings)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  // Latest settings for event-time readers (the window-close and interval
+  // effects hold first-render closures; they must read current values).
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
   // Config fallback warning (Phase 18 / #19, AC3). Set when the backend emits
   // `config_fallback` (corrupt/unreadable config -> defaults), so the downgrade
   // is surfaced instead of silent. Dismissible; cleared on dismiss.
   const [fallbackMessage, setFallbackMessage] = useState<string | null>(null)
 
+  // Boot (#27 + #29): workspaces and settings load TOGETHER, and panels mount
+  // only after both resolve — the session-restore toggle decides whether a
+  // restored panel receives its saved cwd at PTY-open time (the surface
+  // consumes cwd once, at mount), so it must be known before the first mount.
   useEffect(() => {
-    void invoke<{ workspaces: Workspace[] }>('load_workspaces').then((data) => {
+    void Promise.all([
+      invoke<{ workspaces: Workspace[] }>('load_workspaces').catch(() => ({
+        workspaces: [] as Workspace[],
+      })),
+      invoke<Settings>('load_settings').catch(() => defaultSettings),
+    ]).then(([data, rawSettings]) => {
+      setSettings(coerceSettings(rawSettings))
       // bootState keeps each workspace's persisted layout tree (v0.2 / #25 —
       // the split layout round-trips through restart) and seeds a fresh single
       // leaf for pre-v0.2 configs that have none. Every defined workspace
@@ -330,10 +389,24 @@ export function WorkspaceShell() {
     })
   }, [])
 
-  // Seed the mute indicator from the backend flag (source of truth).
-  useEffect(() => {
-    void invoke<boolean>('notifications_muted').then(setMuted)
-  }, [])
+  /// Apply a settings patch (v0.2 Phase 3 / #27): update local state, persist
+  /// to settings.json, and — when the notifications toggle moved — flip the
+  /// backend runtime flag every panel's notification thread reads. The change
+  /// is live everywhere with no restart.
+  const applySettings = (patch: Partial<Settings>) => {
+    const next = { ...settings, ...patch }
+    setSettings(next)
+    invoke('save_settings', { settings: next }).catch((e) =>
+      console.error('save_settings failed:', e),
+    )
+    if (patch.notificationsEnabled !== undefined) {
+      void invoke('set_notifications_muted', {
+        muted: !patch.notificationsEnabled,
+      })
+    }
+  }
+
+  const muted = !settings.notificationsEnabled
 
   // Surface a config fallback as a visible warning (AC3). The backend emits
   // `config_fallback` from `load_workspaces` only when the config was corrupt
@@ -347,11 +420,48 @@ export function WorkspaceShell() {
     }
   }, [])
 
-  // Toggle the app-wide mute: flip the backend flag, then mirror its returned
-  // state locally so the indicator stays in sync with the panels' threads.
+  // Persist the session BEFORE the window goes away (v0.2 Phase 5 / #29):
+  // intercept the close request, await a cwd snapshot + save, then destroy
+  // the window (destroy bypasses this listener, so there is no loop). The
+  // whole detour is one invoke round-trip — imperceptible on quit. All state
+  // access goes through refs, so the first render's closure stays valid.
+  useEffect(() => {
+    let handled = false
+    const unlistenP = getCurrentWindow().onCloseRequested(async (event) => {
+      if (handled) return
+      handled = true
+      event.preventDefault()
+      try {
+        await snapshotAndPersist()
+      } finally {
+        void getCurrentWindow().destroy()
+      }
+    })
+    return () => {
+      void unlistenP.then((fn) => fn())
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Periodic cwd snapshot (#29 HITL follow-up): quitting through paths that
+  // never fire onCloseRequested — Ctrl+C on `tauri dev`, Cmd+Q's app-level
+  // termination, a crash, a kill — must not lose the session either. One
+  // quiet tick every 20s bounds the loss to the last few seconds of `cd`s;
+  // snapshotAndPersist skips the disk write entirely when nothing moved, so
+  // the steady-state cost is just the (cheap) cwd reads.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void snapshotAndPersist()
+    }, 20_000)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // The bell button and the Settings notifications toggle are the same switch
+  // (one persisted source of truth) — flipping either routes through
+  // applySettings so settings.json and the backend flag never disagree.
   const toggleMute = () => {
-    const next = !muted
-    void invoke<boolean>('set_notifications_muted', { muted: next }).then(setMuted)
+    applySettings({ notificationsEnabled: muted ? true : false })
   }
 
   // Close the context menu on any click outside it — unless it just opened
@@ -378,6 +488,75 @@ export function WorkspaceShell() {
     invoke('save_workspaces', { workspaces: next.workspaces }).catch((e) =>
       console.error('save_workspaces failed:', e),
     )
+  }
+
+  // --- Session snapshot (v0.2 Phase 5 / #29) ---------------------------------
+  //
+  // Reads every live local shell's cwd from the backend (one invoke) and
+  // merges it into the persisted panels[] entries, then saves. Called for
+  // freshness after layout changes (split / closes) and — critically — on
+  // window close, where awaiting it guarantees the snapshot is on disk
+  // before the process exits. Remote panels are not queried: the remote cwd
+  // is not visible locally (OSC-only policy), so their entry keeps the last
+  // known value. A failed read leaves the stored cwd untouched (fallback to
+  // v0.1 behavior, never a crash).
+  const snapshotAndPersist = async () => {
+    // Session-restore toggle off = do not snapshot (#27 HITL follow-up): no
+    // cwd reads, no writes — shells just start in the default directory.
+    if (!settingsRef.current.sessionRestoreEnabled) return
+    const st = stateRef.current
+    const queries: Array<{ panelId: string; ptyId: number }> = []
+    for (const ws of st.workspaces) {
+      if (!st.openIds.includes(ws.id)) continue
+      for (const pid of panelIdsOf(st, ws.id)) {
+        const entry = ptyIdsRef.current.get(pid)
+        if (entry != null && entry.kind === 'local') {
+          queries.push({ panelId: pid, ptyId: entry.id })
+        }
+      }
+    }
+    let cwds: Array<[string, string]> = []
+    if (queries.length > 0) {
+      try {
+        const answers = await invoke<Array<{ panelId: string; cwd: string | null }>>(
+          'panel_cwds',
+          { panels: queries },
+        )
+        cwds = answers
+          .filter((a) => a.cwd != null)
+          .map((a) => [a.panelId, a.cwd as string] as [string, string])
+      } catch (e) {
+        console.error('panel_cwds failed:', e)
+      }
+    }
+    // Nothing learned (no live local panels, or every read failed): touching
+    // state here would only re-write what the triggering persist already
+    // saved — and a synchronous re-render from a pre-persist snapshot would
+    // actively revert the layout change. Leave state and file alone.
+    if (cwds.length === 0) return
+    // Race-proof render: the upserts go in as a FUNCTIONAL update, so React
+    // applies them onto whatever state is current when it processes them. A
+    // whole-state setState from a base read mid-invoke could revert a layout
+    // change that landed in the meantime (same class of bug as the focus
+    // yank fixed above); the keyed upserts are safe to replay on any state.
+    setState((prev) => {
+      let next = prev
+      for (const [pid, cwd] of cwds) next = upsertPanelCwd(next, pid, cwd)
+      return next
+    })
+    // The file gets the same keyed upserts applied to the freshest committed
+    // state. Any later persist already includes them (they are in state by
+    // then), so last-write-wins between concurrent saves never loses the
+    // snapshot. Awaited so the window-close path quits only after the write.
+    // When every upsert no-ops (nothing moved — the common case on the
+    // periodic tick), merged IS the base: skip the write entirely.
+    let merged = stateRef.current
+    for (const [pid, cwd] of cwds) merged = upsertPanelCwd(merged, pid, cwd)
+    if (merged === stateRef.current) return
+    await invoke('save_workspaces', { workspaces: merged.workspaces }).catch((e) => {
+      console.error('save_workspaces failed:', e)
+      return undefined
+    })
   }
 
   // --- Keyboard shortcuts (Phase 11 / #12, story 33) -----------------------
@@ -426,7 +605,9 @@ export function WorkspaceShell() {
       case 'close-panel': {
         if (activeId == null) break
         const panel = activePanelOf(state, activeId)
-        if (panel != null) persist(closePanel(state, activeId, panel))
+        // v0.2 Phase 4 / #28: the keyboard path asks the same live-process
+        // question the X button does — one rule for every close path.
+        if (panel != null) requestClosePanel(activeId, panel)
         break
       }
     }
@@ -486,8 +667,10 @@ export function WorkspaceShell() {
     const id = menu?.workspaceId
     setMenu(null)
     if (id == null) return
-    if (!window.confirm('Delete this workspace? This cannot be undone.')) return
-    persist(deleteWorkspace(state, id))
+    // Ask through the shared modal (window.confirm is a no-op returning
+    // false inside WKWebView — see the pendingDelete block above).
+    const ws = stateRef.current.workspaces.find((w) => w.id === id)
+    setPendingDelete({ id, name: ws?.name ?? 'workspace' })
   }
 
   const splitFromMenu = (orientation: Orientation) => {
@@ -503,26 +686,150 @@ export function WorkspaceShell() {
 
   // Split a workspace's ACTIVE panel (v0.2 / #25 — unlimited panels, no cap;
   // the split targets whichever panel is focused). The layout tree is
-  // persisted with the workspace, so the split survives a restart.
+  // persisted with the workspace, so the split survives a restart; the new
+  // leaf inherits the target's panel config (#29) and a freshness snapshot
+  // rides the same save.
   const splitWorkspace = (id: string, orientation: Orientation) => {
     persist(splitPanel(state, id, orientation))
+    void snapshotAndPersist()
   }
 
   // Focus a panel of a workspace — wired to BOTH pane clicks and keystrokes
   // (HITL round 6: typing in a panel makes it the active one). Only re-renders
   // when the active panel actually changes, so per-keystroke calls on an
   // already-active panel are free.
+  //
+  // MUST read stateRef.current, not the closure `state`: TerminalSurface
+  // registers its onData handler once at mount, so every keystroke arrives
+  // through a first-render closure. Reading the captured `state` here
+  // replaced the WHOLE state with a stale snapshot on every keypress — the
+  // app visibly jumped back to another workspace while typing (HITL: "press
+  // d and it switches workspaces").
   const focusWorkspacePanel = (id: string, panelId: string) => {
     applySignal(panelId, 'focus')
-    if (activePanelOf(state, id) !== panelId) {
-      setState(focusPanel(state, id, panelId))
+    if (activePanelOf(stateRef.current, id) !== panelId) {
+      setState(focusPanel(stateRef.current, id, panelId))
     }
   }
 
-  // Close one panel of a workspace (story 20): siblings fill the freed space.
-  // Persisted like the split so the layout round-trips.
-  const closeWorkspacePanel = (id: string, panelId: string) => {
-    persist(closePanel(state, id, panelId))
+  // --- Safe panel closing (v0.2 Phase 4 / #28) -----------------------------
+  //
+  // ONE rule for every close path (X button, Ctrl+Shift+W, workspace close):
+  // ask the backend whether a live process owns the panel's terminal; if yes,
+  // confirm through the shared dialog naming the risk; if no (idle prompt or
+  // an already-exited shell), close immediately and silently. The panelId →
+  // backend-handle map is filled by each surface's onOpened report.
+  type PtyEntry = { kind: 'local' | 'ssh'; id: number }
+  const ptyIdsRef = useRef<Map<string, PtyEntry>>(new Map())
+  const notePanelOpened = useCallback(
+    (panelId: string, ptyId: number, remote: boolean) => {
+      ptyIdsRef.current.set(panelId, { kind: remote ? 'ssh' : 'local', id: ptyId })
+    },
+    [],
+  )
+
+  // A close waiting on the user's confirmation (null = none pending).
+  // Rendered by CloseConfirmDialog.
+  type PendingClose =
+    | { kind: 'panel'; workspaceId: string; panelId: string; label: string }
+    | { kind: 'workspace'; workspaceId: string; busyCount: number }
+    | null
+  const [pendingClose, setPendingClose] = useState<PendingClose>(null)
+
+  /// Perform the actual per-panel close (post-confirmation or idle shortcut).
+  const doClosePanel = (id: string, panelId: string) => {
+    persist(closePanel(stateRef.current, id, panelId))
+    // Freshness snapshot (#29): survivors' cwds land in the same save the
+    // layout change writes; the closed leaf's entry was dropped above.
+    void snapshotAndPersist()
+  }
+
+  /// Ask-or-close for one panel. Remote panels skip the check: the remote
+  /// side is opaque by policy (OSC-only, no polling), and AC2 demands idle
+  /// panels never ask.
+  const requestClosePanel = (id: string, panelId: string) => {
+    const entry = ptyIdsRef.current.get(panelId)
+    if (entry == null || entry.kind !== 'local') {
+      doClosePanel(id, panelId)
+      return
+    }
+    void invoke<boolean>('pty_is_busy', { id: entry.id })
+      .then((busy) => {
+        if (!busy) {
+          doClosePanel(id, panelId)
+          return
+        }
+        const ws = stateRef.current.workspaces.find((w) => w.id === id)
+        const short = panelId.slice(0, 4)
+        setPendingClose({
+          kind: 'panel',
+          workspaceId: id,
+          panelId,
+          label: `${ws?.name ?? 'workspace'} · ${short}`,
+        })
+      })
+      .catch((e) => {
+        // Unknown handle (shell already gone) or a failed check: fall back to
+        // v0.1's silent close rather than trapping the panel in the UI.
+        console.error('pty_is_busy failed:', e)
+        doClosePanel(id, panelId)
+      })
+  }
+
+  /// Ask-or-close for a whole workspace: one confirmation naming HOW MANY
+  /// panels have live processes, when any of them does. With no local panels
+  /// to check (e.g. all remote, or none mounted yet) nothing can be busy, so
+  /// the close happens synchronously like v0.1.
+  const requestCloseWorkspace = (id: string) => {
+    const locals = panelIdsOf(state, id)
+      .map((pid) => ptyIdsRef.current.get(pid))
+      .filter((e): e is PtyEntry => e != null && e.kind === 'local')
+    if (locals.length === 0) {
+      setState(closeWorkspace(stateRef.current, id))
+      void snapshotAndPersist()
+      return
+    }
+    void Promise.all(
+      locals.map((e) =>
+        invoke<boolean>('pty_is_busy', { id: e.id }).catch(() => false),
+      ),
+    ).then((results) => {
+      const busyCount = results.filter(Boolean).length
+      if (busyCount === 0) {
+        setState(closeWorkspace(stateRef.current, id))
+        void snapshotAndPersist()
+        return
+      }
+      setPendingClose({ kind: 'workspace', workspaceId: id, busyCount })
+    })
+  }
+
+  const confirmPendingClose = () => {
+    const pc = pendingClose
+    setPendingClose(null)
+    if (pc == null) return
+    if (pc.kind === 'panel') doClosePanel(pc.workspaceId, pc.panelId)
+    else {
+      setState(closeWorkspace(stateRef.current, pc.workspaceId))
+      void snapshotAndPersist()
+    }
+  }
+
+  // --- Delete-workspace confirmation ----------------------------------------
+  //
+  // window.confirm is a dead end in the macOS WebView (WKWebView): it never
+  // shows a dialog and synchronously returns false, so the delete silently
+  // did nothing (HITL: "the Delete Workspace button doesn't work"). We render
+  // the SAME shared modal the close paths use instead — one confirmation
+  // language everywhere.
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(
+    null,
+  )
+  const confirmPendingDelete = () => {
+    const pd = pendingDelete
+    setPendingDelete(null)
+    if (pd == null) return
+    persist(deleteWorkspace(stateRef.current, pd.id))
   }
 
   // Dragging a divider (story 18) updates state live (cheap, in-memory) while
@@ -605,6 +912,11 @@ export function WorkspaceShell() {
         if (!stateRef.current.openIds.includes(ws.id)) continue
         for (const pid of panelIdsOf(stateRef.current, ws.id)) live.add(pid)
       }
+      // Prune backend-handle reports alongside the machines (#28): a closed
+      // panel's entry must go so the map only ever describes live panels.
+      for (const pid of ptyIdsRef.current.keys()) {
+        if (!live.has(pid)) ptyIdsRef.current.delete(pid)
+      }
       let changed = false
       const now = performance.now()
       for (const [panelId, machine] of machines) {
@@ -668,6 +980,14 @@ export function WorkspaceShell() {
             </div>
             <div className="header-actions">
               <NotificationMuteButton muted={muted} onToggle={toggleMute} />
+              <button
+                className="icon-btn"
+                aria-label="Settings"
+                title="Settings"
+                onClick={() => setSettingsOpen(true)}
+              >
+                <SettingsIcon />
+              </button>
               <button
                 className="icon-btn"
                 aria-label="New workspace"
@@ -750,7 +1070,8 @@ export function WorkspaceShell() {
               ) : (
                 <>
                   <span className="workspace-name">{ws.name}</span>
-                  {state.openIds.includes(ws.id) &&
+                  {settings.agentStatusEnabled &&
+                    state.openIds.includes(ws.id) &&
                     (() => {
                       // One chip per panel, the ACTIVE panel's chip first with
                       // the bigger dot (HITL round 5: the big dot marks the
@@ -792,7 +1113,9 @@ export function WorkspaceShell() {
                     title="Close (keep workspace)"
                     onClick={(e) => {
                       e.stopPropagation()
-                      setState(closeWorkspace(state, ws.id))
+                      // v0.2 Phase 4 / #28: workspace close asks when ANY of
+                      // its panels has a live process (shared dialog).
+                      requestCloseWorkspace(ws.id)
                     }}
                   >
                     <CloseIcon />
@@ -845,24 +1168,72 @@ export function WorkspaceShell() {
                     layout={layout}
                     activePanelId={activePanelOf(state, ws.id)}
                     firstLeafId={panelIds[0] ?? ''}
-                    sshTarget={ws.panels?.[0]?.sshTarget}
+                    // Session-restore toggle off (#27 HITL follow-up): strip
+                    // the saved cwds so every shell starts in the default
+                    // directory. sshTarget survives — a configured remote
+                    // panel must not silently become local.
+                    panels={
+                      settings.sessionRestoreEnabled
+                        ? ws.panels
+                        : (ws.panels ?? []).map((p) =>
+                            p.workingDirectory == null
+                              ? p
+                              : { ...p, workingDirectory: undefined },
+                          )
+                    }
                     onResize={(splitId, ratio, container) =>
                       resizeWorkspacePanel(ws.id, splitId, ratio, container)
                     }
                     onResizeEnd={commitResize}
-                    onClose={(panelId) => closeWorkspacePanel(ws.id, panelId)}
+                    onClose={(panelId) => requestClosePanel(ws.id, panelId)}
                     onFocusPanel={(panelId) => focusWorkspacePanel(ws.id, panelId)}
                     onPanelActivity={notePanelActivity}
                     onPanelCompletion={notePanelCompletion}
                     onPanelViewportResize={notePanelViewportResize}
                     onPanelUserInput={(panelId) => focusWorkspacePanel(ws.id, panelId)}
+                    onPanelOpened={notePanelOpened}
                     statuses={statuses}
+                    statusEnabled={settings.agentStatusEnabled}
                   />
                 )}
               </div>
             )
           })}
       </main>
+
+      {settingsOpen && (
+        <SettingsDialog
+          settings={settings}
+          onChange={applySettings}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {pendingClose != null && (
+        <CloseConfirmDialog
+          title={
+            pendingClose.kind === 'panel' ? 'Close this panel?' : 'Close this workspace?'
+          }
+          message={
+            pendingClose.kind === 'panel'
+              ? `Panel ${pendingClose.label} has a running process. Closing it now will terminate that process.`
+              : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in this workspace ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+          }
+          confirmLabel="Close anyway"
+          onConfirm={confirmPendingClose}
+          onCancel={() => setPendingClose(null)}
+        />
+      )}
+
+      {pendingDelete != null && (
+        <CloseConfirmDialog
+          title="Delete this workspace?"
+          message={`Delete "${pendingDelete.name}" and close its panels? Its saved layout and settings for these panels are removed. This cannot be undone.`}
+          confirmLabel="Delete"
+          onConfirm={confirmPendingDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
 
       {menu && (
         <div

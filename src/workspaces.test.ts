@@ -35,6 +35,7 @@ import {
   activePanelOf,
   bootState,
   panelIdsOf,
+  upsertPanelCwd,
 } from './workspaces'
 import { leafIds, type LayoutNode } from './PaneLayout'
 
@@ -618,4 +619,124 @@ describe('workspace state', () => {
       expect(state.openIds).toEqual([])
     })
   })
+})
+
+// --- v0.2 Phase 5 / #29: per-panel cwd metadata (snapshot + restore) ---------
+
+describe('session snapshot metadata (#29)', () => {
+  // One workspace, one leaf p-1, carrying a cwd + ssh target in panels[].
+  function withMeta() {
+    return {
+      ...emptyState,
+      workspaces: [
+        {
+          id: 'ws-1',
+          name: 'alpha',
+          panels: [
+            { id: 'p-1', workingDirectory: '/home/adam/proj', sshTarget: 'adam@host' },
+          ],
+          layout: { kind: 'leaf', id: 'p-1' } as LayoutNode,
+        },
+      ],
+      activeId: 'ws-1',
+      openIds: ['ws-1'],
+      activePanelId: { 'ws-1': 'p-1' },
+    }
+  }
+
+  // T-M1 (AC1/AC2 — a split inherits the source panel's config): splitting a
+  //   panel that sits in ~/proj over SSH gives the new leaf the SAME cwd and
+  //   ssh target, so the restored sibling respawns in the same place.
+  it('splitPanel copies the target panel meta to the new leaf', () => {
+    const next = splitPanel(withMeta(), 'ws-1', 'horizontal', seq('s-1', 'p-2'))
+
+    const panels = next.workspaces[0].panels ?? []
+    expect(panels).toEqual([
+      { id: 'p-1', workingDirectory: '/home/adam/proj', sshTarget: 'adam@host' },
+      { id: 'p-2', workingDirectory: '/home/adam/proj', sshTarget: 'adam@host' },
+    ])
+  })
+
+  // T-M2 (payload compatibility — a workspace with NO panel meta must not
+  //   gain a `panels` key just because a split happened; old saves stay
+  //   byte-identical):
+  it('splitPanel leaves a meta-less workspace untouched', () => {
+    const bare = { ...withMeta(), workspaces: [{ ...withMeta().workspaces[0], panels: undefined }] }
+    const next = splitPanel(bare, 'ws-1', 'horizontal', seq('s-1', 'p-2'))
+
+    expect(next.workspaces[0].panels).toBeUndefined()
+  })
+
+  // T-M3 (closing a panel drops its meta entry — the config never accumulates
+  //   orphans for leaves that no longer exist):
+  it('closePanel removes the closed leaf meta entry', () => {
+    const split = splitPanel(withMeta(), 'ws-1', 'horizontal', seq('s-1', 'p-2'))
+
+    const next = closePanel(split, 'ws-1', 'p-2')
+
+    expect(next.workspaces[0].panels).toEqual([
+      { id: 'p-1', workingDirectory: '/home/adam/proj', sshTarget: 'adam@host' },
+    ])
+  })
+
+  // T-M4 (upsert updates an existing entry in place — a fresh cwd overwrites
+  //   the stale one for the SAME leaf):
+  it('upsertPanelCwd updates an existing entry', () => {
+    const next = upsertPanelCwd(withMeta(), 'p-1', '/home/adam/other')
+
+    expect(next.workspaces[0].panels).toEqual([
+      { id: 'p-1', workingDirectory: '/home/adam/other', sshTarget: 'adam@host' },
+    ])
+  })
+
+  // T-M5 (upsert creates an entry for a leaf that has none yet — panels
+  //   created fresh this session start without meta):
+  it('upsertPanelCwd creates a missing entry without clobbering siblings', () => {
+    const split = splitPanel(withMeta(), 'ws-1', 'horizontal', seq('s-1', 'p-2'))
+    const stripped = {
+      ...split,
+      workspaces: [
+        { ...split.workspaces[0], panels: [{ id: 'p-1', workingDirectory: '/x' }] },
+      ],
+    }
+
+    const next = upsertPanelCwd(stripped, 'p-2', '/home/adam/proj')
+
+    expect(next.workspaces[0].panels).toEqual([
+      { id: 'p-1', workingDirectory: '/x' },
+      { id: 'p-2', workingDirectory: '/home/adam/proj' },
+    ])
+  })
+
+  // T-M6 (a cwd read that raced a teardown is a no-op, never a crash —
+  //   unknown panel ids and empty strings are dropped silently):
+  it('upsertPanelCwd ignores unknown panels and empty cwds', () => {
+    const state = withMeta()
+
+    expect(upsertPanelCwd(state, 'nope', '/somewhere')).toBe(state)
+    expect(upsertPanelCwd(state, 'p-1', '')).toBe(state)
+  })
+})
+
+// T-M7 (the periodic snapshot must not rewrite state/disk when nothing
+//   moved): upserting the cwd a panel ALREADY has returns the SAME state
+//   object (reference equality) — the caller uses that to skip the write.
+it('upsertPanelCwd with an unchanged cwd returns the same reference', () => {
+  const state = {
+    ...emptyState,
+    workspaces: [
+      {
+        id: 'ws-1',
+        name: 'alpha',
+        panels: [{ id: 'p-1', workingDirectory: '/x' }],
+        layout: { kind: 'leaf', id: 'p-1' } as LayoutNode,
+      },
+    ],
+    activeId: 'ws-1',
+    openIds: ['ws-1'],
+    activePanelId: { 'ws-1': 'p-1' },
+  }
+
+  expect(upsertPanelCwd(state, 'p-1', '/x')).toBe(state)
+  expect(upsertPanelCwd(state, 'p-1', '/y')).not.toBe(state)
 })

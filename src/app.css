@@ -644,3 +644,160 @@ body {
     opacity: 0.35;
   }
 }
+
+/* ---- Settings + confirm dialogs (v0.2 Phase 3 / #27, Phase 4 / #28) ------ */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 8, 12, 0.62);
+}
+
+.modal-card {
+  width: min(430px, calc(100vw - 48px));
+  padding: 18px 18px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  font-size: var(--text-md);
+}
+
+.modal-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.modal-card__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.modal-card__message {
+  margin: 10px 0 18px;
+  color: var(--text);
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.modal-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 2px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-row:last-of-type {
+  border-bottom: none;
+}
+
+.settings-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-row__label {
+  color: var(--text);
+}
+
+.settings-row__description {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+.settings-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg-input);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.settings-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.settings-switch.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.settings-switch.is-on .settings-switch__knob {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+
+.settings-footnote {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.settings-footnote__path {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+/* Confirm-dialog buttons (v0.2 Phase 4 / #28) — siblings of .btn-primary. */
+.btn-secondary {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.btn-secondary:hover {
+  background: var(--bg-sidebar-hover);
+}
+
+.btn-danger {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-weight: 600;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: filter 0.12s ease;
+}
+
+.btn-danger:hover {
+  filter: brightness(1.1);
+}

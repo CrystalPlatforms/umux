@@ -21,6 +21,7 @@
 //  - activeId is NOT persisted (runtime-only).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { useEffect, useRef } from 'react'
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 
 // Boundary: Tauri invoke. Default returns empty config; tests override via
@@ -46,11 +47,20 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }))
 
-// Boundary: native window controls.
+// Boundary: native window controls. `closeRequested` captures the handler
+// so a test can fire a close request and assert the session snapshot ran
+// before the window went away (v0.2 Phase 5 / #29); `destroy` stands in for
+// the post-snapshot teardown.
 const winMock = {
   minimize: vi.fn(),
   toggleMaximize: vi.fn(),
   close: vi.fn(),
+  destroy: vi.fn(),
+  closeRequested: null as ((e: { preventDefault: () => void }) => void) | null,
+  onCloseRequested: (handler: (e: { preventDefault: () => void }) => void) => {
+    winMock.closeRequested = handler
+    return Promise.resolve(() => {})
+  },
 }
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => winMock,
@@ -58,11 +68,37 @@ vi.mock('@tauri-apps/api/window', () => ({
 
 // Boundary: the heavy terminal surface. Mocked to a tiny div that echoes the
 // `sshTarget` prop into a data attribute so a configured remote panel can be
-// detected without mounting xterm.
+// detected without mounting xterm. When `surfacesReportHandles` is set, the
+// mock also reports the backend handle (onOpened(42)) like the real surface
+// does — the #28 close-confirmations and #29 cwd snapshots key off that map.
+let surfacesReportHandles = false
 vi.mock('./TerminalSurface', () => ({
-  TerminalSurface: (props: { sshTarget?: string }) => (
-    <div data-testid="terminal-surface" data-ssh-target={props.sshTarget ?? ''} />
-  ),
+  TerminalSurface: (props: {
+    sshTarget?: string
+    cwd?: string
+    onOpened?: (id: number) => void
+    onUserInput?: () => void
+  }) => {
+    // Mirror the real surface's architecture: xterm's onData handler is
+    // registered ONCE at mount, so keystrokes forever arrive through the
+    // FIRST render's onUserInput closure. The mock captures it the same
+    // way — a fresh-render call here would silently skip the stale-closure
+    // class of bugs the regression test exists to catch.
+    const userInputRef = useRef<(() => void) | null>(null)
+    useEffect(() => {
+      userInputRef.current = props.onUserInput ?? null
+      if (surfacesReportHandles) props.onOpened?.(42)
+    }, [])
+    return (
+      <div
+        data-testid="terminal-surface"
+        data-ssh-target={props.sshTarget ?? ''}
+        data-cwd={props.cwd ?? ''}
+        // Stand-in for "the user typed in this terminal" (xterm onData).
+        onKeyDown={() => userInputRef.current?.()}
+      />
+    )
+  },
 }))
 
 import { WorkspaceShell } from './WorkspaceShell'
@@ -71,6 +107,9 @@ describe('WorkspaceShell', () => {
   beforeEach(() => {
     invokeMock.mockReset()
     configFallbackHandler = null
+    winMock.closeRequested = null
+    surfacesReportHandles = false
+    winMock.destroy.mockClear()
     winMock.minimize.mockClear()
     winMock.toggleMaximize.mockClear()
     winMock.close.mockClear()
@@ -369,10 +408,16 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-
+    // v0.2 Phase 4+ follow-up: the confirmation is our shared modal, not
+    // window.confirm (a silent no-op returning false inside WKWebView).
     fireEvent.contextMenu(screen.getByText('alpha'))
     fireEvent.click(screen.getByRole('menuitem', { name: /delete workspace/i }))
+
+    // The dialog names the workspace and nothing is deleted yet.
+    const dialog = await screen.findByTestId('close-confirm-dialog')
+    expect(dialog.textContent).toContain('alpha')
+
+    fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
 
     expect(screen.queryByText('alpha')).not.toBeInTheDocument()
     expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
@@ -387,8 +432,6 @@ describe('WorkspaceShell', () => {
         ],
       }),
     )
-
-    confirmSpy.mockRestore()
   })
 
   it('canceling the delete confirmation leaves the workspace in place', async () => {
@@ -401,16 +444,16 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-
     fireEvent.contextMenu(screen.getByText('alpha'))
     fireEvent.click(screen.getByRole('menuitem', { name: /delete workspace/i }))
+
+    // Cancel the shared modal — the workspace survives untouched.
+    expect(await screen.findByTestId('close-confirm-dialog')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
 
     expect(screen.getByText('alpha')).toBeInTheDocument()
     expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument()
     expect(invokeMock).not.toHaveBeenCalledWith('save_workspaces', expect.anything())
-
-    confirmSpy.mockRestore()
   })
 
   it('reorders workspaces via drag-and-drop and persists the new order', async () => {
@@ -818,3 +861,350 @@ describe('WorkspaceShell', () => {
     })
   })
 })
+
+  // --- v0.2 Phase 3 / #27: Settings screen with feature toggles --------------
+
+  describe('settings screen (#27)', () => {
+    const seedSettings = (overrides: Record<string, unknown> = {}) => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'load_settings')
+          return Promise.resolve({
+            notificationsEnabled: true,
+            agentStatusEnabled: true,
+            analyticsEnabled: false,
+            ...overrides,
+          })
+        return Promise.resolve(undefined)
+      })
+    }
+
+    // T-SE1 (AC1 — the screen opens from the main UI and shows the toggles):
+    //   the gear button opens the dialog; load_settings seeds it on mount.
+    it('loads settings on mount and opens the dialog from the gear button', async () => {
+      seedSettings({ analyticsEnabled: true })
+      render(<WorkspaceShell />)
+
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_settings'))
+      fireEvent.click(screen.getByRole('button', { name: /^settings$/i }))
+
+      expect(await screen.findByTestId('settings-dialog')).toBeInTheDocument()
+      expect(screen.getByTestId('toggle-notifications')).toHaveAttribute('aria-checked', 'true')
+      expect(screen.getByTestId('toggle-agent-status')).toHaveAttribute('aria-checked', 'true')
+      // Analytics has no switch (always-on, HITL decision) — it must not
+      // appear even with analyticsEnabled seeded true.
+      expect(screen.queryByTestId('toggle-analytics')).toBeNull()
+    })
+
+    // T-SE2 (AC2 — toggling agent status hides the indicators without a
+    //   restart): chips in the workspace row disappear the moment the switch
+    //   flips, and the choice is persisted via save_settings.
+    it('toggling agent status off hides the per-panel chips live', async () => {
+      seedSettings()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      const row = screen.getByTestId('workspace-row-ws-1')
+      expect(row.querySelector('.workspace-statuses')).not.toBeNull()
+
+      fireEvent.click(screen.getByRole('button', { name: /^settings$/i }))
+      fireEvent.click(await screen.findByTestId('toggle-agent-status'))
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_settings',
+          expect.objectContaining({
+            settings: expect.objectContaining({ agentStatusEnabled: false }),
+          }),
+        ),
+      )
+      await waitFor(() =>
+        expect(
+          screen.getByTestId('workspace-row-ws-1').querySelector('.workspace-statuses'),
+        ).toBeNull(),
+      )
+    })
+
+    // T-SE3 (AC3 — the notifications toggle gates the app-wide mute): flipping
+    //   it off flips the backend runtime flag (set_notifications_muted true),
+    //   and the bell button — the same switch, one source of truth — shows
+    //   muted without a restart.
+    it('toggling notifications off mutes the backend flag and the bell', async () => {
+      seedSettings()
+      render(<WorkspaceShell />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^settings$/i }))
+      fireEvent.click(await screen.findByTestId('toggle-notifications'))
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith('set_notifications_muted', {
+          muted: true,
+        }),
+      )
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: /notifications muted/i }),
+        ).toBeInTheDocument(),
+      )
+    })
+
+    // T-SE4 (the bell button and the Settings switch are ONE toggle — the
+    //   v0.1 session-only mute is superseded by the persisted setting):
+    it('the bell button routes through the persisted settings toggle', async () => {
+      seedSettings()
+      render(<WorkspaceShell />)
+
+      fireEvent.click(screen.getByRole('button', { name: /mute notifications/i }))
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_settings',
+          expect.objectContaining({
+            settings: expect.objectContaining({ notificationsEnabled: false }),
+          }),
+        ),
+      )
+    })
+  })
+
+  // --- v0.2 Phase 4 / #28: safe panel closing -----------------------------------
+
+  describe('safe panel closing (#28)', () => {
+    const seedBusy = (busy: boolean) => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'load_settings')
+          return Promise.resolve({
+            notificationsEnabled: true,
+            agentStatusEnabled: true,
+            analyticsEnabled: false,
+          })
+        if (cmd === 'pty_is_busy') return Promise.resolve(busy)
+        return Promise.resolve(undefined)
+      })
+    }
+
+    const splitIntoTwo = async () => {
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      await waitFor(() =>
+        expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2),
+      )
+    }
+
+    // T-SC1 (AC1 — closing a panel with a live process always asks): the X
+    //   button on a busy panel opens the shared dialog naming the risk, and
+    //   only confirming actually closes the panel.
+    it('asks before closing a busy panel and closes on confirm', async () => {
+      seedBusy(true)
+      await splitIntoTwo()
+
+      fireEvent.click(screen.getAllByRole('button', { name: /close panel/i })[0])
+
+      const dialog = await screen.findByTestId('close-confirm-dialog')
+      expect(dialog.textContent).toMatch(/running process/i)
+      expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2)
+
+      fireEvent.click(screen.getByTestId('close-confirm-ok'))
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId('terminal-surface')).toHaveLength(1),
+      )
+    })
+
+    // T-SC2 (AC2 — closing an idle panel never asks): busy=false closes
+    //   immediately, no dialog.
+    it('closes an idle panel immediately without asking', async () => {
+      seedBusy(false)
+      await splitIntoTwo()
+
+      fireEvent.click(screen.getAllByRole('button', { name: /close panel/i })[0])
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId('terminal-surface')).toHaveLength(1),
+      )
+      expect(screen.queryByTestId('close-confirm-dialog')).toBeNull()
+    })
+
+    // T-SC3 (the keyboard path asks the same question — one rule for every
+    //   close path): Ctrl+Shift+W on a busy panel opens the dialog.
+    it('asks from the Ctrl+Shift+W keyboard path too', async () => {
+      seedBusy(true)
+      await splitIntoTwo()
+
+      fireEvent.keyDown(window, {
+        key: 'w',
+        ctrlKey: true,
+        shiftKey: true,
+      })
+
+      expect(await screen.findByTestId('close-confirm-dialog')).toBeInTheDocument()
+      expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2)
+    })
+  })
+
+  // --- v0.2 Phase 5 / #29: session snapshot on window close --------------------
+
+  describe('session snapshot on window close (#29)', () => {
+    // T-SN1 (AC1 — quitting snapshots the runtime session first): the close
+    //   request is intercepted, every live local panel's cwd is read
+    //   (panel_cwds), the merged result is saved, and only then the window is
+    //   destroyed.
+    it('snapshots panel cwds and saves before destroying the window', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args: unknown) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'panel_cwds') {
+          const panels = (args as { panels: Array<{ panelId: string }> }).panels
+          return Promise.resolve(
+            panels.map((q) => ({ panelId: q.panelId, cwd: '/home/adam/proj' })),
+          )
+        }
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      expect(winMock.closeRequested).not.toBeNull()
+      const preventDefault = vi.fn()
+      await act(async () => {
+        winMock.closeRequested?.({ preventDefault })
+      })
+
+      expect(preventDefault).toHaveBeenCalled()
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'panel_cwds',
+          expect.objectContaining({ panels: [expect.objectContaining({ ptyId: 42 })] }),
+        ),
+      )
+      await waitFor(() => {
+        const saves = invokeMock.mock.calls.filter(([c]) => c === 'save_workspaces')
+        expect(saves.length).toBeGreaterThan(0)
+        const last = saves[saves.length - 1][1] as { workspaces: Array<{ panels?: unknown }> }
+        expect(last.workspaces[0].panels).toEqual([
+          { id: expect.any(String), workingDirectory: '/home/adam/proj' },
+        ])
+      })
+      await waitFor(() => expect(winMock.destroy).toHaveBeenCalled())
+    })
+  })
+
+  // --- Regression: typing in a terminal must never rewind app state ----------
+  //
+  // TerminalSurface registers its onData handler once at mount, so keystrokes
+  // arrive through a FIRST-RENDER closure. The old focusWorkspacePanel read
+  // the captured `state` and replaced the WHOLE state with that stale
+  // snapshot whenever its focus guard tripped — later-created workspaces
+  // vanished and the app jumped elsewhere mid-typing (HITL: "pressing d
+  // switches me to another workspace"). The fix reads stateRef.current; this
+  // test pins it.
+  describe('typing does not rewind state (stale-closure regression)', () => {
+    it('keeps workspaces created after a panel remount when typing in it', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+
+      // Split alpha: two surfaces, focus moves to the new leaf.
+      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      await waitFor(() =>
+        expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2),
+      )
+
+      // Focus the FIRST panel, then close + reopen the workspace so both
+      // surfaces remount with a closure that predates the workspace below.
+      fireEvent.click(screen.getAllByTestId('terminal-surface')[0])
+      fireEvent.click(screen.getByRole('button', { name: /close alpha/i }))
+      await waitFor(() =>
+        expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument(),
+      )
+      fireEvent.click(screen.getByTestId('workspace-row-ws-1'))
+      await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
+
+      // Create a second workspace AFTER the remount.
+      fireEvent.click(screen.getByRole('button', { name: /new workspace/i }))
+      fireEvent.change(screen.getByLabelText(/new workspace name/i), {
+        target: { value: 'beta' },
+      })
+      fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+      await waitFor(() => expect(screen.getByText('beta')).toBeInTheDocument())
+
+      // Switch back to alpha and focus its second panel.
+      fireEvent.click(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.click(screen.getAllByTestId('terminal-surface')[1])
+
+      // Type a letter in that panel — with the stale closure this rewound
+      // state to the remount snapshot and deleted "beta" outright.
+      fireEvent.keyDown(screen.getAllByTestId('terminal-surface')[1], { key: 'd' })
+
+      expect(screen.getByText('beta')).toBeInTheDocument()
+      expect(screen.getByText('alpha')).toBeInTheDocument()
+    })
+  })
+
+  // --- Session-restore toggle (#27 HITL follow-up) ------------------------------
+  //
+  // Off = panels still restore (layout round-trips) but every shell starts in
+  // the DEFAULT directory — the saved cwd must not reach the surface. The
+  // sshTarget must survive the strip: a configured remote panel must not
+  // silently become local.
+  describe('session restore toggle (#27 follow-up)', () => {
+    const seedWithCwd = (sessionRestoreEnabled: boolean) => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              {
+                id: 'ws-1',
+                name: 'alpha',
+                panels: [
+                  {
+                    id: 'p-1',
+                    workingDirectory: '/home/adam/proj',
+                    sshTarget: 'adam@host',
+                  },
+                ],
+                layout: { kind: 'leaf', id: 'p-1' },
+              },
+            ],
+          })
+        if (cmd === 'load_settings')
+          return Promise.resolve({
+            notificationsEnabled: true,
+            agentStatusEnabled: true,
+            sessionRestoreEnabled,
+            analyticsEnabled: false,
+          })
+        return Promise.resolve(undefined)
+      })
+    }
+
+    it('restores the saved cwd when the toggle is on', async () => {
+      seedWithCwd(true)
+      render(<WorkspaceShell />)
+
+      const surface = await screen.findByTestId('terminal-surface')
+      expect(surface).toHaveAttribute('data-cwd', '/home/adam/proj')
+      expect(surface).toHaveAttribute('data-ssh-target', 'adam@host')
+    })
+
+    it('strips the saved cwd (not the ssh target) when the toggle is off', async () => {
+      seedWithCwd(false)
+      render(<WorkspaceShell />)
+
+      const surface = await screen.findByTestId('terminal-surface')
+      expect(surface).toHaveAttribute('data-cwd', '')
+      expect(surface).toHaveAttribute('data-ssh-target', 'adam@host')
+    })
+  })

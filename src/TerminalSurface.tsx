@@ -24,10 +24,12 @@ import { WriteBatcher } from './WriteBatcher'
 export function TerminalSurface({
   label,
   sshTarget,
+  cwd,
   onActivity,
   onCompletion,
   onViewportResize,
   onUserInput,
+  onOpened,
 }: {
   label?: string
   // When set, this panel opens a remote shell over SSH (the `ssh_*` command
@@ -35,6 +37,14 @@ export function TerminalSurface({
   // transports, the same shape (open → id; output filtered by id; write/resize/
   // close by id) so a remote panel behaves like a local one (Phase 16 / AC3).
   sshTarget?: string
+  // Working directory the shell should start in (v0.2 Phase 5 / #29 session
+  // restore). Local panels only — a remote shell's cwd is the server's call.
+  // Consumed once, at PTY open time (the effect below runs per mount).
+  cwd?: string
+  // Reports the backend PTY/SSH id assigned to this surface (v0.2 Phase 4
+  // / #28): this component owns the panelId↔ptyId mapping, and the close-
+  // confirmation check needs it ("is a live process running in THIS panel?").
+  onOpened?: (ptyId: number) => void
   // Per-panel status signals (v0.2 Phase 2 / #26). This surface is the only
   // place that knows which PTY id the panel owns, so it translates transport
   // events into panel-level callbacks for the parent's status machines:
@@ -205,13 +215,16 @@ export function TerminalSurface({
     // its target string; a local one passes nothing extra.
     const openArgs = isRemote
       ? { target: sshTarget, cols: term.cols, rows: term.rows, label }
-      : { cols: term.cols, rows: term.rows, label }
+      : { cwd, cols: term.cols, rows: term.rows, label }
     const opened = invoke<number>(openCmd, openArgs).then((id) => {
       if (disposed) {
         void invoke(closeCmd, { id })
         return
       }
       panelId = id
+      // Tell the shell which backend handle this panel owns (#28 close
+      // confirmations, #29 cwd snapshots).
+      onOpened?.(id)
 
       // Flush anything that arrived before we knew our id, keeping only ours.
       for (const payload of pending) writeIfOurs(payload)

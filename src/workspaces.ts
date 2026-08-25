@@ -32,7 +32,10 @@ export type Panel = {
 export type Workspace = {
   id: string
   name: string
-  panels: Panel[]
+  // Optional at runtime: hand-edited and pre-v0.2 configs carry none, and
+  // the persisted payload must not gain the key just by passing through
+  // here — guards at the use sites keep old saves byte-identical.
+  panels?: Panel[]
   // Split tree (v0.2 / #25); leaf ids ARE panel ids. Optional because
   // pre-v0.2 configs have none — bootState seeds a fresh single leaf there.
   layout?: LayoutNode
@@ -223,11 +226,54 @@ export function panelIdsOf(state: WorkspaceState, id: string): string[] {
   return ws?.layout == null ? [] : leafIds(ws.layout)
 }
 
+/// Record a snapshot cwd for leaf `panelId` (v0.2 Phase 5 / #29): upserts the
+/// panel's `workingDirectory` in its workspace's `panels` array, creating the
+/// entry when absent. The workspace is located by the LAYOUT TREE (the entry
+/// may not exist yet); leaf ids are UUIDs, so the first workspace whose tree
+/// contains the leaf is the right one. No-op for an unknown panel id (a panel
+/// that was just closed, or a cwd read that raced a teardown) and for an
+/// empty cwd.
+export function upsertPanelCwd(
+  state: WorkspaceState,
+  panelId: string,
+  cwd: string,
+): WorkspaceState {
+  if (cwd === '') return state
+  const owner = state.workspaces.find(
+    (w) => w.layout != null && leafIds(w.layout).includes(panelId),
+  )
+  if (owner == null) return state
+  // Same cwd as stored: return the SAME state object (reference equality) —
+  // the periodic snapshot uses it to skip both the re-render and the disk
+  // write when nothing moved.
+  if (owner.panels?.some((p) => p.id === panelId && p.workingDirectory === cwd)) {
+    return state
+  }
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) =>
+      w.id !== owner.id
+        ? w
+        : {
+            ...w,
+            panels: (w.panels ?? []).some((p) => p.id === panelId)
+              ? (w.panels ?? []).map((p) =>
+                  p.id === panelId ? { ...p, workingDirectory: cwd } : p,
+                )
+              : [...(w.panels ?? []), { id: panelId, workingDirectory: cwd }],
+          },
+    ),
+  }
+}
+
 /// Split the ACTIVE panel of workspace `id` in `orientation` (v0.2 / #25,
 /// stories 15–17 — unlimited panels, no cap). The existing panel keeps its
 /// shell (its leaf becomes the split's first child); `genId` yields the new
 /// split-node id, then the new leaf id. The new panel becomes focused so
-/// keystrokes follow the split. No-op for an unknown workspace id.
+/// keystrokes follow the split. The new leaf INHERITS the split target's
+/// panel config (v0.2 Phase 5 / #29): splitting a panel that sits in ~/proj
+/// gives its sibling the same cwd — and an SSH panel splits into a second
+/// shell on the same host. No-op for an unknown workspace id.
 export function splitPanel(
   state: WorkspaceState,
   id: string,
@@ -242,10 +288,26 @@ export function splitPanel(
   const ids = { splitId: genId(), newLeafId: genId() }
   const next = splitLeaf(layout, target, orientation, ids)
   if (next == null) return state
+  const inherited = (ws.panels ?? []).find((p) => p.id === target)
+  const newEntry = inherited
+    ? {
+        id: ids.newLeafId,
+        ...(inherited.workingDirectory != null
+          ? { workingDirectory: inherited.workingDirectory }
+          : {}),
+        ...(inherited.sshTarget != null ? { sshTarget: inherited.sshTarget } : {}),
+      }
+    : undefined
+  // Only touch `panels` when there is something to record — a workspace
+  // without entries (undefined) must persist unchanged.
+  const panels =
+    newEntry != null
+      ? [...(ws.panels ?? []).filter((p) => p.id !== ids.newLeafId), newEntry]
+      : ws.panels
   return {
     ...state,
     workspaces: state.workspaces.map((w) =>
-      w.id === id ? { ...w, layout: next } : w,
+      w.id === id ? { ...w, layout: next, panels } : w,
     ),
     activePanelId: { ...state.activePanelId, [id]: ids.newLeafId },
   }
@@ -278,8 +340,10 @@ export function resizePanel(
 
 /// Close one panel of workspace `id` — the panel whose leaf id is `panelId`
 /// (v0.2 / #25, story 20). Siblings fill the freed space (the tree collapses
-/// one-child splits). No-op when the workspace id is unknown, the panel does
-/// not exist, or only one panel is mounted (close the workspace instead).
+/// one-child splits); the closed leaf's `panels` entry is dropped with it so
+/// the config never accumulates orphans (#29). No-op when the workspace id is
+/// unknown, the panel does not exist, or only one panel is mounted (close the
+/// workspace instead).
 export function closePanel(
   state: WorkspaceState,
   id: string,
@@ -299,7 +363,14 @@ export function closePanel(
   return {
     ...state,
     workspaces: state.workspaces.map((w) =>
-      w.id === id ? { ...w, layout: next } : w,
+      w.id === id
+        ? {
+            ...w,
+            layout: next,
+            // `?.` keeps a panel-less workspace's payload unchanged.
+            panels: w.panels?.filter((p) => p.id !== panelId),
+          }
+        : w,
     ),
     activePanelId,
   }

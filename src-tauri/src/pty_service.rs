@@ -60,6 +60,52 @@ fn pt_err(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e.to_string())
 }
 
+// --- Process cwd lookup (v0.2 Phase 5 / #29 session snapshot) ---------------
+//
+// The snapshot needs each live shell's current working directory at save
+// time. There is no portable Rust API for another process's cwd, so this is
+// a per-OS boundary (the same split NativeNotifier uses):
+//   - Linux: readlink /proc/<pid>/cwd — a kernel-provided symlink, instant.
+//   - macOS: no /proc; shell out to `lsof -a -p <pid> -d cwd -Fn` and parse
+//     the `n<path>` line. Runs only at snapshot time (a handful of calls per
+//     save), never on the output hot path.
+//   - Windows: not available yet (v1.0 Phase 9 scope) — panels snapshot as
+//     cwd-less and restore in the default directory.
+// Failure is always `None`: a cwd that cannot be read is simply not snapshotted.
+
+/// The current working directory of process `pid`, if it can be determined.
+#[cfg(target_os = "linux")]
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+    let output = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    parse_lsof_cwd(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+/// Parse the `n<path>` line out of `lsof -Fn` output (macOS cwd lookup).
+/// Pure — unit-testable with fixed fixtures.
+#[cfg(target_os = "macos")]
+pub fn parse_lsof_cwd(output: &str) -> Option<PathBuf> {
+    let line = output.lines().find(|l| l.starts_with('n'))?;
+    let path = line.strip_prefix('n')?;
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
 impl PtyService {
     pub fn new() -> Self {
         Self {
@@ -188,6 +234,58 @@ impl PtyService {
             drop(entry.writer);
             drop(entry.master);
         }
+    }
+
+    /// The child's OS process id (the shell for a local panel, the `ssh`
+    /// client for a remote one). `None` for an unknown handle or a child that
+    /// never reported one.
+    pub fn child_pid(&self, handle: &PtyHandle) -> Option<u32> {
+        self.entries.get(&handle.id)?.child.process_id()
+    }
+
+    /// Whether a live process (not the idle shell itself) is running on this
+    /// PTY — v0.2 Phase 4 / #28's "running process" check.
+    ///
+    /// The terminal's FOREGROUND process group (tcgetpgrp on the master fd,
+    /// exposed by portable-pty as `process_group_leader`) says who owns the
+    /// terminal right now: an idle shell sits in the foreground itself, while
+    /// a program it launched (`sleep 300`, vim, Claude Code) runs in its own
+    /// process group with the terminal handed over. Comparing that group
+    /// leader with the child's own pid distinguishes exactly the two states
+    /// the issue names:
+    ///   - child exited (or unknown handle) -> not busy: close without asking
+    ///   - fg group == child pid            -> idle prompt: close without asking
+    ///   - fg group is someone else         -> a live process owns the panel: ask
+    /// This is the technique tmux/wezterm use; it polls nothing and never
+    /// inspects terminal content (the OSC-only policy is untouched). A failed
+    /// tcgetpgrp matches v0.1's silent close rather than nagging on every idle
+    /// panel (the AC demands idle NEVER asks).
+    pub fn is_busy(&mut self, handle: &PtyHandle) -> bool {
+        // An exited child can't lose work — never busy.
+        match self.child_exit_code(handle) {
+            Ok(Some(_)) => return false,
+            Ok(None) => {}
+            Err(_) => return false, // unknown handle: nothing to protect
+        }
+        let Some(child_pid) = self.child_pid(handle) else {
+            return false;
+        };
+        match self.entries.get(&handle.id) {
+            // i64 comparison avoids needing a libc pid_t cast in this module.
+            Some(entry) => match entry.master.0.process_group_leader() {
+                Some(fg) => i64::from(fg) != i64::from(child_pid),
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// The shell process's CURRENT working directory (v0.2 Phase 5 / #29
+    /// session snapshot), read from the OS at call time — it follows `cd`s.
+    /// `None` for an unknown handle, a child without a pid, or an OS that
+    /// cannot answer (the caller then leaves the panel's stored cwd alone).
+    pub fn cwd(&self, handle: &PtyHandle) -> Option<PathBuf> {
+        process_cwd(self.child_pid(handle)?)
     }
 
     /// Non-blocking poll for the child's exit code. Returns `Ok(None)` while the
@@ -345,6 +443,174 @@ mod tests {
         );
 
         svc.close(&handle);
+    }
+
+    // --- v0.2 Phase 4 / #28: is_busy (live-process detection) ------------------
+
+    /// Poll `is_busy` until it returns `want` or the deadline passes. The
+    /// shell needs a moment to fork the foreground child and hand over the
+    /// terminal, so a one-shot assert would be flaky.
+    fn wait_for_busy(
+        svc: &mut PtyService,
+        handle: &PtyHandle,
+        want: bool,
+        timeout: Duration,
+    ) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if svc.is_busy(handle) == want {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    // T-B1 (#28 AC2 — an idle shell at its prompt is NOT busy):
+    //   Input:  a freshly opened login shell (drained prompt).
+    //   Output: is_busy == false — the shell itself is the foreground process
+    //           group, so closing must not ask (idle panels never ask).
+    #[test]
+    fn is_busy_false_for_idle_shell() {
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+
+        // Give job control a beat to settle before judging.
+        std::thread::sleep(Duration::from_millis(300));
+        let busy = svc.is_busy(&handle);
+
+        svc.close(&handle);
+
+        assert!(!busy, "a shell sitting at its prompt must read as idle");
+    }
+
+    // T-B2 (#28 AC1 — a foreground process like `sleep 300` IS busy):
+    //   Input:  `sleep 30` launched in the shell (job control puts it in its
+    //           own foreground process group).
+    //   Output: is_busy == true — closing now must ask for confirmation.
+    #[test]
+    fn is_busy_true_while_process_runs() {
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+
+        svc.write(&handle, b"sleep 30\n").expect("write");
+        let became_busy = wait_for_busy(&mut svc, &handle, true, Duration::from_secs(5));
+
+        svc.close(&handle);
+
+        assert!(
+            became_busy,
+            "running `sleep 30` must flip the panel to busy"
+        );
+    }
+
+    // T-B3 (#28 — an exited child is never busy):
+    //   Input:  `sh -c 'exit 0'` (dies immediately).
+    //   Output: once the child has exited, is_busy == false regardless of
+    //           process-group state — there is no work left to lose.
+    #[test]
+    fn is_busy_false_after_child_exits() {
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .spawn_argv(
+                vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()],
+                PathBuf::from("/tmp"),
+                80,
+                24,
+            )
+            .expect("spawn");
+
+        // Drain until exit, then give the reaper a beat.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let busy = svc.is_busy(&handle);
+
+        svc.close(&handle);
+
+        assert!(!busy, "an exited child must read as idle");
+    }
+
+    // --- v0.2 Phase 5 / #29: cwd snapshot ---------------------------------------
+
+    // T-D1 (AC2 — the snapshot follows `cd`): open a shell, cd into a real
+    //   directory, and expect `cwd()` to report it. The temp dir is kept
+    //   alive for the whole test (a dropped TempDir deletes itself) and
+    //   canonicalized first so the assertion holds on macOS too (where /tmp
+    //   and /var are symlinks and both the lsof and /proc paths report the
+    //   canonical path). Cross-platform: Linux + macOS.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn cwd_follows_cd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).expect("canonicalize tempdir");
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+        // Drain the initial prompt. The needle is prompt-agnostic (bash's $,
+        // zsh's ➜ both echo the typed command back), so just give the shell
+        // a moment to be ready rather than matching a specific prompt glyph.
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = rx.try_recv();
+
+        let cd = format!("cd {}\n", dir.display());
+        svc.write(&handle, cd.as_bytes()).expect("write cd");
+
+        // The shell applies the cd asynchronously; poll for the report.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw = None;
+        while Instant::now() < deadline {
+            if let Some(cwd) = svc.cwd(&handle) {
+                saw = Some(cwd);
+                if saw.as_ref().unwrap() == &dir {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        svc.close(&handle);
+
+        assert_eq!(
+            saw,
+            Some(dir),
+            "expected the shell's cwd to be reported after `cd`"
+        );
+    }
+
+    // T-D2 (an unknown handle has no cwd — the snapshot leaves the stored
+    //   value alone instead of erroring):
+    #[test]
+    fn cwd_unknown_handle_is_none() {
+        let svc = PtyService::new();
+        assert_eq!(svc.cwd(&PtyHandle { id: 9999 }), None);
+    }
+
+    // T-D3 (macOS — the pure lsof parser):
+    //   Input:  realistic `lsof -Fn` output (pid, fd descriptor, name line).
+    //   Output: the path after the first `n`; garbage and empty paths -> None.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_lsof_cwd_extracts_name_line() {
+        assert_eq!(
+            parse_lsof_cwd("p12345\nfcwd\nn/Users/adam/proj\n"),
+            Some(PathBuf::from("/Users/adam/proj"))
+        );
+        assert_eq!(parse_lsof_cwd("p12345\nfcwd\nn\n"), None);
+        assert_eq!(parse_lsof_cwd("totally unexpected output"), None);
+        assert_eq!(parse_lsof_cwd(""), None);
     }
 
     // GUI-launched apps inherit no TERM (verified on macOS Finder launches),
