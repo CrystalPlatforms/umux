@@ -4,7 +4,7 @@ A terminal workspace manager for **Linux, Windows, and macOS** — a lightweight
 
 umux watches the terminal byte stream for the completion signals emitted by AI CLI tools (Claude Code, Aider, etc.) — the standard `OSC 9;9` / `OSC 99` / `OSC 777` escape sequences — and fires a native desktop notification when such a task completes, so you can step away while code is being generated.
 
-> **Platform:** Linux (Ubuntu/Wayland), Windows 10+, and macOS 11+. Windows and macOS installers arrive with the **v1.0.0** release — until then, released builds are Linux-only.
+> **Platform:** Linux (Ubuntu/Wayland), Windows 10+, and macOS 11+. Releases carry Linux installers and a universal macOS `.dmg`; the Windows installer arrives with the **v1.0.0** release.
 >
 > **Stack:** [Tauri v2](https://tauri.app) (Rust backend) + React + TypeScript (frontend), rendering its own embedded terminal via [xterm.js](https://xtermjs.org).
 
@@ -17,16 +17,16 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 - **Embedded terminal** — a real terminal surface (colors, cursor movement, alternate screen) so tools like `vim`, `htop`, and `fzf` render correctly. Each panel opens an interactive shell (your `$SHELL` by default).
 - **SSH panels** — open a panel connected to a remote machine over SSH, using your local agent and keys. Remote panels look and behave exactly like local ones.
 - **Completion notifications** — when an AI CLI tool signals that a long-running task is done, umux fires a native desktop notification. Notifications can be toggled on/off app-wide.
-- **Agent status** *(planned v0.2.0)* — each panel shows a live status indicator: **working** while an AI CLI (Claude Code, Codex, Gemini CLI, Aider…) streams or thinks, **needs-attention** the moment it waits for you (opened, finished a task, or asking a question), and idle once you exit it. Detected from OSC completion signals plus the panel's foreground process name — never from terminal content.
-- **Settings & toggles** *(planned v0.2.0)* — turn optional features (agent status, notifications) on or off; your choices persist across restarts.
-- **Session restore** *(planned v0.2.0)* — reopening umux brings back your workspaces, panels, layout, working directories, and shells.
+- **Agent status** — each panel shows a live status indicator: **working** while an AI CLI (Claude Code, Codex, Gemini CLI, Aider…) streams or thinks, **needs-attention** the moment it waits for you (opened, finished a task, or asking a question), and idle once you exit it. Detected from OSC completion signals plus the panel's foreground process name — never from terminal content.
+- **Settings & toggles** — turn optional features (agent status, notifications) on or off; your choices persist across restarts.
+- **Session restore** — reopening umux brings back your workspaces, panels, layout, working directories, and shells.
 - **Keyboard-first** — switch workspaces, split/close panels, and more without leaving the keyboard.
 
 ---
 
 ## Installation
 
-umux runs on **Linux (Ubuntu/Wayland)** today; **Windows** (`.exe` installer) and **macOS** (universal `.dmg`) builds arrive with the v1.0.0 release. There are two ways to install it:
+umux runs on **Linux (Ubuntu/Wayland)** and **macOS** (11+, universal binary); **Windows** (`.exe` installer) arrives with the v1.0.0 release. There are two ways to install it:
 
 - **Option A — Download a prebuilt package** (recommended for most users). Grab a ready `.deb` or `.AppImage` from GitHub Releases — no compiler or toolchain needed.
 - **Option B — Build from source**. Clone the repo and compile it yourself. Useful if you want the latest unreleased code or want to contribute.
@@ -84,9 +84,9 @@ The `.AppImage` is a single portable file — no installation, no root permissio
 
 To **update**, just download the new `.AppImage` and replace the old file. To **uninstall**, simply delete the file.
 
-#### A.3 — Windows & macOS (from v1.0.0)
+#### A.3 — Windows & macOS
 
-Starting with the v1.0.0 release, each release also ships a Windows installer (`umux_<version>_x64-setup.exe`) and a universal macOS image (`umux_<version>_universal.dmg`, Apple Silicon + Intel in one file). Download, run the installer / drag to Applications, done.
+Each release ships a universal macOS image (`umux_<version>_universal.dmg`, Apple Silicon + Intel in one file). A Windows installer (`umux_<version>_x64-setup.exe`) arrives with the v1.0.0 release. Download, run the installer / drag to Applications, done.
 
 > **Unsigned builds:** umux is free open source and uses no paid signing certificates. On first run, macOS will report an "unidentified developer" — right-click the app and choose **Open** (or run `xattr -cr /Applications/umux.app` in a terminal). On Windows, SmartScreen may show a blue warning — click **More info → Run anyway**. This only happens once.
 
