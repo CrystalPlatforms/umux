@@ -44,6 +44,7 @@ import { matchShortcut } from './shortcuts'
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
 import { AgentStatusMachine, type AgentStatus } from './agentStatus'
+import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
@@ -198,7 +199,7 @@ type PanelSurfacesProps = {
   onPanelActivity: (panelId: string, bytes: number) => void
   onPanelCompletion: (panelId: string) => void
   onPanelViewportResize: (panelId: string) => void
-  onPanelUserInput: (panelId: string) => void
+  onPanelUserInput: (panelId: string, submitted: boolean) => void
   // v0.2 Phase 4 / #28 + Phase 5 / #29: a surface reports the backend handle
   // it was assigned (and whether it is a remote/SSH one), so the shell can
   // ask "is a live process running in this panel?" before a close and read
@@ -298,7 +299,7 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
               onActivity={(bytes) => onPanelActivity(p.id, bytes)}
               onCompletion={() => onPanelCompletion(p.id)}
               onViewportResize={() => onPanelViewportResize(p.id)}
-              onUserInput={() => onPanelUserInput(p.id)}
+              onUserInput={(submitted) => onPanelUserInput(p.id, submitted)}
               onOpened={(ptyId) => onPanelOpened(p.id, ptyId, meta?.sshTarget !== undefined)}
             />
             {statusEnabled && (
@@ -846,12 +847,14 @@ export function WorkspaceShell() {
   // injected (performance.now); the machine itself is unit-tested in
   // agentStatus.test.ts. This block is glue, verified in the HITL pass.
   const machinesRef = useRef<Map<string, AgentStatusMachine>>(new Map())
+  // Counts 500ms ticks so the presence poll fires every 4th one (~2s).
+  const presenceTickCount = useRef(0)
   const [statuses, setStatuses] = useState<Record<string, AgentStatus>>({})
   const applySignal = useCallback(
     (
       panelId: string,
-      signal: 'activity' | 'completion' | 'focus' | 'resize',
-      bytes?: number,
+      signal: 'activity' | 'completion' | 'focus' | 'resize' | 'input' | 'presence',
+      value?: number | boolean,
     ) => {
       const machines = machinesRef.current
       let machine = machines.get(panelId)
@@ -861,9 +864,11 @@ export function WorkspaceShell() {
       }
       const before = machine.status
       const now = performance.now()
-      if (signal === 'activity') machine.onActivity(now, bytes)
+      if (signal === 'activity') machine.onActivity(now, value as number)
       else if (signal === 'completion') machine.onCompletion(now)
       else if (signal === 'resize') machine.onRedraw(now)
+      else if (signal === 'input') machine.onUserInput(now, value === true)
+      else if (signal === 'presence') machine.onPresence(now, value === true)
       else machine.onFocus(now)
       const after = machine.status
       if (after !== before) {
@@ -882,6 +887,10 @@ export function WorkspaceShell() {
   )
   const notePanelViewportResize = useCallback(
     (panelId: string) => applySignal(panelId, 'resize'),
+    [applySignal],
+  )
+  const notePanelUserInput = useCallback(
+    (panelId: string, submitted: boolean) => applySignal(panelId, 'input', submitted),
     [applySignal],
   )
 
@@ -934,9 +943,33 @@ export function WorkspaceShell() {
         for (const [panelId, machine] of machines) snapshot[panelId] = machine.status
         setStatuses(snapshot)
       }
+
+      // Agent-status presence (model v2 / HITL 2026-08-25): every 4th tick
+      // (~2s) ask the backend for each LOCAL panel's foreground program name
+      // and feed the machines a known-CLI presence signal. The backend does
+      // a process-table lookup (never reads terminal content); remote panels
+      // are skipped — the local foreground is always the ssh client there.
+      presenceTickCount.current += 1
+      if (presenceTickCount.current % 4 === 0) {
+        const localPanels = [...ptyIdsRef.current.entries()]
+          .filter(([, entry]) => entry.kind === 'local')
+          .map(([panelId, entry]) => ({ panelId, ptyId: entry.id }))
+        if (localPanels.length > 0) {
+          void invoke<{ panelId: string; process: string | null }[]>(
+            'panel_processes',
+            { panels: localPanels },
+          )
+            .then((answers) => {
+              for (const answer of answers) {
+                applySignal(answer.panelId, 'presence', isAiCliProcess(answer.process))
+              }
+            })
+            .catch((e) => console.error('panel_processes failed:', e))
+        }
+      }
     }, 500)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [applySignal])
   const resizeWorkspacePanel = (
     id: string,
     splitId: string,
@@ -1190,7 +1223,10 @@ export function WorkspaceShell() {
                     onPanelActivity={notePanelActivity}
                     onPanelCompletion={notePanelCompletion}
                     onPanelViewportResize={notePanelViewportResize}
-                    onPanelUserInput={(panelId) => focusWorkspacePanel(ws.id, panelId)}
+                    onPanelUserInput={(panelId, submitted) => {
+                      focusWorkspacePanel(ws.id, panelId)
+                      notePanelUserInput(panelId, submitted)
+                    }}
                     onPanelOpened={notePanelOpened}
                     statuses={statuses}
                     statusEnabled={settings.agentStatusEnabled}

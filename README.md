@@ -17,7 +17,7 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 - **Embedded terminal** — a real terminal surface (colors, cursor movement, alternate screen) so tools like `vim`, `htop`, and `fzf` render correctly. Each panel opens an interactive shell (your `$SHELL` by default).
 - **SSH panels** — open a panel connected to a remote machine over SSH, using your local agent and keys. Remote panels look and behave exactly like local ones.
 - **Completion notifications** — when an AI CLI tool signals that a long-running task is done, umux fires a native desktop notification. Notifications can be toggled on/off app-wide.
-- **Agent status** *(planned v0.2.0)* — each panel shows a live status indicator (working / waiting for you / idle), so you can see at a glance which AI agent needs attention.
+- **Agent status** *(planned v0.2.0)* — each panel shows a live status indicator: **working** while an AI CLI (Claude Code, Codex, Gemini CLI, Aider…) streams or thinks, **needs-attention** the moment it waits for you (opened, finished a task, or asking a question), and idle once you exit it. Detected from OSC completion signals plus the panel's foreground process name — never from terminal content.
 - **Settings & toggles** *(planned v0.2.0)* — turn optional features (agent status, notifications) on or off; your choices persist across restarts.
 - **Session restore** *(planned v0.2.0)* — reopening umux brings back your workspaces, panels, layout, working directories, and shells.
 - **Keyboard-first** — switch workspaces, split/close panels, and more without leaving the keyboard.
@@ -276,6 +276,19 @@ macOS:   ~/Library/Application Support/umux/workspaces.json
 On macOS the config directory is `~/Library/Application Support/umux`; on first launch after the change, umux automatically moves `workspaces.json` and `settings.json` from the old `~/.config/umux` location, so nothing is lost.
 
 If the file is missing, umux starts fresh. If it is corrupt, umux falls back to default workspaces and shows a warning rather than failing to launch.
+
+### Enabling completion signals from Claude Code
+
+umux detects finished AI-CLI tasks purely through OSC escape sequences in the terminal stream (OSC 9 / 99 / 777). Claude Code emits those notification sequences **automatically only in Ghostty, Kitty, and iTerm2** — in any other terminal (umux panels included) it stays silent by default, so you get neither the desktop notification nor the *needs-attention* status dot.
+
+To turn the signals on, set Claude Code's notification channel to `iterm2` (it emits the iTerm2-style OSC 9 sequence, which umux parses directly):
+
+```json
+// ~/.claude/settings.json
+{ "preferredNotifChannel": "iterm2" }
+```
+
+This is machine-local and reversible (`"auto"` restores the default). Other AI CLIs that print OSC 99 / 777 notifications work with no configuration.
 
 ### Privacy & analytics
 

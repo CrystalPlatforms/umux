@@ -55,7 +55,7 @@ export function TerminalSurface({
   onCompletion?: () => void
   // The user typed in this panel — per the issue, "focusing OR TYPING clears
   // needs-attention". Typing `/exit` acknowledges instantly (HITL round 3/4).
-  onUserInput?: () => void
+  onUserInput?: (submitted: boolean) => void
   // The terminal's geometry changed at xterm level (workspace reveal, window
   // or split resize). The resize triggers a shell/TUI repaint (SIGWINCH) whose
   // bytes are NOT agent work — the status machine suppresses them for a short
@@ -233,9 +233,11 @@ export function TerminalSurface({
       pendingCompletions.length = 0
 
       // Keystrokes from xterm -> backend PTY. Each keystroke is also a user
-      // acknowledgement of the panel (clears needs-attention).
+      // acknowledgement of the panel (clears needs-attention); one carrying
+      // Enter additionally reports a PROMPT SUBMITTED (model v2: a present
+      // AI CLI is now working on it, even while thinking silently).
       term.onData((data) => {
-        onUserInput?.()
+        onUserInput?.(/[\r\n]/.test(data))
         void invoke(writeCmd, { id: panelId, data })
       })
 

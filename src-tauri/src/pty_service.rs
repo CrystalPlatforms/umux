@@ -106,6 +106,70 @@ pub fn parse_lsof_cwd(output: &str) -> Option<PathBuf> {
     }
 }
 
+// --- Foreground process name (agent-status presence, model v2) ---------------
+//
+// The per-panel status model (HITL 2026-08-25) needs to know WHEN an AI CLI
+// (claude, codex, gemini, aider, …) is the program a panel is currently
+// running — "opened and waiting" shows needs-attention, "exited" shows idle.
+// is_busy already detects "someone else owns the terminal" via the PTY's
+// foreground process group; this NAMES that someone. Per-OS boundary, same
+// shape as process_cwd:
+//   - Linux: /proc/<pid>/comm — kernel-provided, instant.
+//   - macOS: `ps -o comm= -p <pid>` (comm may be a full path; the pure
+//     parser basenames it).
+//   - Windows: v1.0 Phase 9 — None.
+// Terminal CONTENT is never read: completion stays OSC-only; presence is a
+// separate process-table signal (PRD clarification, 2026-08-25).
+
+/// The name the user TYPED to run process `pid` (argv[0]'s basename), if it
+/// can be determined. argv[0] — not the executable — because AI CLIs are
+/// usually shebang scripts: `claude` runs on node, and the kernel reports
+/// the executable as "node"; argv[0] still carries the word the user typed.
+#[cfg(target_os = "linux")]
+pub fn process_name(pid: u32) -> Option<String> {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    parse_argv0(&cmdline)
+}
+
+/// The name the user TYPED to run process `pid` (argv[0]'s basename), if it
+/// can be determined — see the Linux variant for why argv[0].
+#[cfg(target_os = "macos")]
+pub fn process_name(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    parse_ps_command(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The name the user TYPED to run process `pid`, if it can be determined.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_name(_pid: u32) -> Option<String> {
+    None
+}
+
+/// First NUL-separated token of /proc/<pid>/cmdline, basenamed. Pure —
+/// unit-testable with fixed fixtures.
+pub fn parse_argv0(cmdline: &[u8]) -> Option<String> {
+    let argv0 = cmdline.split(|b| *b == 0).next()?;
+    if argv0.is_empty() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(argv0);
+    PathBuf::from(s.trim())
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
+/// First whitespace-separated token of `ps -o command=` output, basenamed.
+/// Pure — unit-testable with fixed fixtures.
+pub fn parse_ps_command(output: &str) -> Option<String> {
+    let argv0 = output.split_whitespace().next()?;
+    PathBuf::from(argv0)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
 impl PtyService {
     pub fn new() -> Self {
         Self {
@@ -164,6 +228,15 @@ impl PtyService {
         // inheriting the parent's TERM when we have one (`tauri dev`).
         let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
         cmd.env("TERM", term);
+        // A terminal's job is a FRESH shell environment. Claude Code marks
+        // its child processes with CLAUDE_CODE_CHILD_SESSION; when umux
+        // itself is launched from inside such a session (a dev run, or
+        // `open` from a CC-powered terminal), panels would inherit the
+        // marker and every `claude` inside them would start as a "child
+        // session": transcript saving off, and completion signals muted
+        // (HITL 2026-08-25). Strip it so AI CLIs in panels always start as
+        // top-level sessions.
+        cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
         let child = pair.slave.spawn_command(cmd).map_err(pt_err)?;
 
         let reader = pair.master.try_clone_reader().map_err(pt_err)?;
@@ -278,6 +351,27 @@ impl PtyService {
             },
             None => false,
         }
+    }
+
+    /// The NAME of the program currently owning this panel's terminal (the
+    /// PTY's foreground process-group leader), or `None` when the idle shell
+    /// itself owns it, the child has exited, or the OS can't say. This is the
+    /// agent-status PRESENCE signal (model v2, HITL 2026-08-25): the
+    /// frontend matches it against known AI-CLI names to show
+    /// needs-attention while a CLI sits waiting and idle after it exits.
+    /// Same mechanism is_busy uses — the fg group leader — only named here;
+    /// terminal content is never read.
+    pub fn foreground_process_name(&mut self, handle: &PtyHandle) -> Option<String> {
+        if !self.is_busy(handle) {
+            return None; // idle shell / exited child: no foreground program
+        }
+        let fg = self
+            .entries
+            .get(&handle.id)?
+            .master
+            .0
+            .process_group_leader()?;
+        process_name(u32::try_from(fg).ok()?)
     }
 
     /// The shell process's CURRENT working directory (v0.2 Phase 5 / #29
@@ -542,6 +636,107 @@ mod tests {
         assert!(!busy, "an exited child must read as idle");
     }
 
+    // --- Agent-status presence: foreground process name (model v2, HITL
+    //     2026-08-25) ------------------------------------------------------------
+
+    /// Poll `foreground_process_name` until it returns `want` or the
+    /// deadline passes (job control needs a beat to hand the terminal over).
+    fn wait_for_foreground_name(
+        svc: &mut PtyService,
+        handle: &PtyHandle,
+        want: Option<&str>,
+        timeout: Duration,
+    ) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if svc.foreground_process_name(handle).as_deref() == want {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    // T-F1 (a foreground program is reported by name):
+    //   Input:  `sleep 30` in the shell (its own fg process group).
+    //   Output: Some("sleep") — the status model can match CLI names against
+    //           exactly this. Cross-platform: /proc comm (Linux) and
+    //           ps-comm basename (macOS) both land on "sleep".
+    #[test]
+    fn foreground_name_reports_running_program() {
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+
+        svc.write(&handle, b"sleep 30\n").expect("write");
+        let saw = wait_for_foreground_name(&mut svc, &handle, Some("sleep"), Duration::from_secs(5));
+
+        svc.close(&handle);
+
+        assert!(saw, "running `sleep` must be reported by name");
+    }
+
+    // T-F2 (an idle shell owns the terminal itself -> None: no CLI present):
+    #[test]
+    fn foreground_name_idle_shell_is_none() {
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), PathBuf::from("/tmp"), 80, 24)
+            .expect("open pty");
+        let _ = wait_for_output(&rx, b"$", Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(300));
+
+        let name = svc.foreground_process_name(&handle);
+
+        svc.close(&handle);
+
+        assert!(name.is_none(), "idle shell must read as no foreground program");
+    }
+
+    // T-F3 (an exited child -> None, same as is_busy):
+    #[test]
+    fn foreground_name_exited_child_is_none() {
+        let mut svc = PtyService::new();
+        let (handle, _rx) = svc
+            .spawn_argv(
+                vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
+                PathBuf::from("/tmp"),
+                80,
+                24,
+            )
+            .expect("spawn");
+        // `sleep 30` owns the terminal; closing the pty kills the children,
+        // and the (now unknown) handle must read as no foreground program.
+        let _ = wait_for_foreground_name(&mut svc, &handle, Some("sleep"), Duration::from_secs(5));
+        svc.close(&handle);
+
+        assert_eq!(svc.foreground_process_name(&handle), None);
+    }
+
+    // T-F4 (pure parsers: full path -> basename; bare name kept; blank ->
+    // None; argv[0] wins over the node executable for shebang CLIs):
+    #[test]
+    fn parse_process_name_parsers_basename_argv0() {
+        // ps -o command= style (macOS): first token, basenamed.
+        assert_eq!(
+            parse_ps_command("/opt/homebrew/bin/claude\n"),
+            Some("claude".to_string())
+        );
+        assert_eq!(parse_ps_command("sleep 30\n"), Some("sleep".to_string()));
+        assert_eq!(parse_ps_command(""), None);
+        assert_eq!(parse_ps_command("   \n"), None);
+        // /proc cmdline style (Linux): NUL-separated argv[0].
+        assert_eq!(
+            parse_argv0(b"/opt/homebrew/bin/claude\0--model\0haiku\0"),
+            Some("claude".to_string())
+        );
+        assert_eq!(parse_argv0(b"sleep\030\0"), Some("sleep".to_string()));
+        assert_eq!(parse_argv0(b"\0"), None);
+        assert_eq!(parse_argv0(b""), None);
+    }
+
     // --- v0.2 Phase 5 / #29: cwd snapshot ---------------------------------------
 
     // T-D1 (AC2 — the snapshot follows `cd`): open a shell, cd into a real
@@ -635,6 +830,50 @@ mod tests {
             None => std::env::remove_var("TERM"),
         }
         assert!(saw_term, "expected TERM=xterm-256color in `env` output");
+    }
+
+    // A terminal must hand every panel a FRESH environment. Claude Code
+    // marks its children with CLAUDE_CODE_CHILD_SESSION; umux launched from
+    // inside a CC session would push that marker into every panel, and each
+    // `claude` there would run as a child session (transcripts off,
+    // completion signals muted — HITL 2026-08-25). Set the marker in the
+    // test process, spawn `env`, and require it absent from the child's
+    // environment. Restores the marker afterwards.
+    #[test]
+    fn spawn_argv_strips_child_session_marker() {
+        let saved_marker = std::env::var("CLAUDE_CODE_CHILD_SESSION").ok();
+        std::env::set_var("CLAUDE_CODE_CHILD_SESSION", "1");
+
+        let mut svc = PtyService::new();
+        let (_handle, rx) = svc
+            .spawn_argv(vec!["/usr/bin/env".to_string()], PathBuf::from("/"), 80, 24)
+            .expect("open pty");
+
+        // Collect everything `env` printed (it exits immediately).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut buf = Vec::new();
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => buf.extend_from_slice(&chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        match saved_marker {
+            Some(v) => std::env::set_var("CLAUDE_CODE_CHILD_SESSION", v),
+            None => std::env::remove_var("CLAUDE_CODE_CHILD_SESSION"),
+        }
+
+        assert!(
+            buf.windows(b"TERM=".len()).any(|w| w == b"TERM="),
+            "`env` produced no output — test harness broken"
+        );
+        assert!(
+            !buf.windows(b"CLAUDE_CODE_CHILD_SESSION".len())
+                .any(|w| w == b"CLAUDE_CODE_CHILD_SESSION"),
+            "panel inherited CLAUDE_CODE_CHILD_SESSION"
+        );
     }
 
     #[test]

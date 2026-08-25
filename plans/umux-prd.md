@@ -149,7 +149,7 @@ umux is a single desktop application with its own embedded terminal surface, rat
 
 ### Technology-specific constraints
 - Supported platforms: **Linux (developed and tested on Ubuntu/Wayland), Windows 10+, and macOS 11+** (universal binary: Apple Silicon + Intel). X11 sessions on Linux are not tested and not officially supported.
-- Completion detection relies on AI CLI tools emitting OSC 9;9 / OSC 99 / OSC 777 sequences (Claude Code emits these automatically). No process polling or output pattern matching is required.
+- Completion detection relies on AI CLI tools emitting OSC 9;9 / OSC 99 / OSC 777 sequences (Claude Code needs `preferredNotifChannel: "iterm2"` — it emits them automatically only in Ghostty/Kitty/iTerm2; see README). No output pattern matching, ever. Clarified 2026-08-25: the per-panel status model MAY additionally detect an AI CLI's PRESENCE by reading the panel's foreground process name from the OS process table (a closed known-CLI list, never terminal content) — completion itself stays OSC-only.
 - Builds are **unsigned** (no paid certificates, zero-cost policy). First-run warnings (macOS Gatekeeper, Windows SmartScreen) are documented in the README rather than paid away.
 - CI (GitHub Actions, on release publish) builds all three platforms: `.deb` + `.AppImage` (Linux), NSIS `-setup.exe` (Windows), universal `.dmg` (macOS).
 

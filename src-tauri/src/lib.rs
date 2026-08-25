@@ -207,6 +207,38 @@ fn panel_cwds(
         .collect())
 }
 
+// --- Agent-status presence (model v2, HITL 2026-08-25) ------------------------
+//
+// The renderer polls this every couple of seconds: one invoke returns the
+// foreground program NAME per local panel, which the frontend matches
+// against known AI-CLI names (src/aiCli.ts) to drive the "opened and
+// waiting -> needs-attention / exited -> idle" half of the status model.
+// Reuses CwdQuery's wire shape ({panelId, ptyId}); remote (SSH) panels are
+// not polled — the local foreground program is always the ssh client, which
+// says nothing about the remote side (OSC-only there, as ever).
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PanelProcessAnswer {
+    panel_id: String,
+    process: Option<String>,
+}
+
+#[tauri::command]
+fn panel_processes(
+    state: State<'_, Mutex<PtyService>>,
+    panels: Vec<CwdQuery>,
+) -> Result<Vec<PanelProcessAnswer>, String> {
+    let mut svc = state.lock().map_err(|e| e.to_string())?;
+    Ok(panels
+        .into_iter()
+        .map(|q| {
+            let process = svc.foreground_process_name(&PtyHandle { id: q.pty_id });
+            PanelProcessAnswer { panel_id: q.panel_id, process }
+        })
+        .collect())
+}
+
 // --- SSH panels (Phase 16 / Issue #17) ----------------------------------------
 //
 // Remote panels live in a separate `SshManager` (which owns its own PtyService),
@@ -670,6 +702,7 @@ pub fn run() {
             pty_close,
             pty_is_busy,
             panel_cwds,
+            panel_processes,
             ssh_open,
             ssh_write,
             ssh_resize,
