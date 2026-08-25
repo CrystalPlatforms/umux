@@ -27,6 +27,13 @@ import {
   closeWorkspace,
   deleteWorkspace,
   moveWorkspace,
+  setWorkspacePinned,
+  addTab,
+  closeTab,
+  switchTab,
+  renameTab,
+  setTabPinned,
+  activeTabOf,
   splitPanel,
   resizePanel,
   closePanel,
@@ -39,7 +46,7 @@ import {
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
-import { boxes, type LayoutNode, type Orientation, type Container } from './PaneLayout'
+import { boxes, leafIds, type LayoutNode, type Orientation, type Container } from './PaneLayout'
 import { matchShortcut } from './shortcuts'
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
@@ -117,6 +124,16 @@ function SidebarExpandIcon({ className }: IconProps) {
 }
 
 
+function PinIcon({ className }: IconProps) {
+  // Pushpin — marks a pinned workspace (#37).
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z" />
+    </svg>
+  )
+}
+
 function SplitHorizontalIcon({ className }: IconProps) {
   // A panel split into left | right by a vertical divider.
   return (
@@ -154,6 +171,10 @@ type MenuState = {
   y: number
   header: boolean
   workspaceId?: string
+  // Set when the menu was opened from a TERMINAL TAB (#37 follow-up): the
+  // tab-scoped actions (Rename tab / Pin tab / Close tab) show instead of
+  // the workspace-list actions.
+  tabId?: string
 } | null
 
 /// A mouse press that should open the context menu: the right button, or
@@ -162,6 +183,13 @@ type MenuState = {
 /// so the menu must open here too, not only on `onContextMenu`.
 function isMenuPress(e: React.MouseEvent): boolean {
   return e.button === 2 || (e.ctrlKey && e.button === 0)
+}
+
+/// Human-readable label for a tab (confirmations, menu): the workspace's
+/// name plus the tab's own name, falling back to its positional number.
+function tabMenuLabel(ws: Workspace | undefined, tabId: string, index: number): string {
+  const tab = ws?.tabs?.find((t) => t.id === tabId)
+  return `${ws?.name ?? 'workspace'} · ${tab?.name ?? `Tab ${index + 1}`}`
 }
 
 // PanelSurfaces — renders a workspace's split tree as a FLAT list of
@@ -347,6 +375,10 @@ export function WorkspaceShell() {
   const [draftName, setDraftName] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
+  // Tab rename (#37 follow-up): which TAB is being renamed inline (double
+  // click or the tab menu) and the draft name.
+  const [editingTab, setEditingTab] = useState<{ wsId: string; tabId: string } | null>(null)
+  const [editTabName, setEditTabName] = useState('')
   const [menu, setMenu] = useState<MenuState>(null)
   // When the current menu was opened (ms epoch). The same gesture can emit a
   // click/contextmenu right AFTER the mousedown that opened the menu (Linux/
@@ -591,6 +623,11 @@ export function WorkspaceShell() {
       case 'new-workspace':
         persist(createWorkspace(state, defaultWorkspaceName(state)))
         break
+      case 'new-tab':
+        // Ctrl+Shift+T (#37 rework): a fresh terminal tab in the active
+        // workspace — the browser instinct.
+        if (activeId != null) persist(addTab(stateRef.current, activeId))
+        break
       case 'next-workspace':
         setState(cycleWorkspace(1))
         break
@@ -646,6 +683,13 @@ export function WorkspaceShell() {
     setCreating(false)
   }
 
+  /// Cancel workspace creation (#37): hide the name form and drop the draft.
+  /// The visible × button and the Escape key share this one path.
+  const cancelCreate = () => {
+    setCreating(false)
+    setDraftName('')
+  }
+
   const startRename = (ws: Workspace) => {
     setEditingId(ws.id)
     setEditName(ws.name)
@@ -657,11 +701,78 @@ export function WorkspaceShell() {
     if (name !== '') persist(renameWorkspace(state, id, name))
   }
 
-  const openMenu = (e: React.MouseEvent, header: boolean, workspaceId?: string) => {
+  // --- Tab rename + pin (#37 follow-up) ------------------------------------
+  // The tab-level twins of the workspace actions: one inline-edit path
+  // (double-click or the tab menu), definitions persist on commit, and the
+  // pin groups tabs at the top of their bar (setTabPinned keeps the
+  // invariant).
+  const startTabRename = (wsId: string, tabId: string, current?: string) => {
+    // Belt and braces: when the caller does not pass the current name, look
+    // it up — the input must always open showing the tab's existing name
+    // (HITL: "when I click rename, the input should hold the current name").
+    const fallback = stateRef.current.workspaces
+      .find((w) => w.id === wsId)
+      ?.tabs?.find((t) => t.id === tabId)?.name
+    setEditingTab({ wsId, tabId })
+    setEditTabName(current ?? fallback ?? '')
+  }
+
+  const cancelTabRename = () => {
+    setEditingTab(null)
+    setEditTabName('')
+  }
+
+  const commitTabRename = (wsId: string, tabId: string) => {
+    const name = editTabName
+    setEditingTab(null)
+    setEditTabName('')
+    // An empty commit is a CANCEL, not "unname": a nameless tab would fall
+    // back to a POSITIONAL number, which reshuffles on pin/reorder (the
+    // very bug class this UI just escaped).
+    if (name.trim() === '') return
+    persist(renameTab(stateRef.current, wsId, tabId, name))
+  }
+
+  const renameTabFromMenu = () => {
+    const { workspaceId, tabId } = menu ?? {}
+    setMenu(null)
+    if (workspaceId == null || tabId == null) return
+    const tab = stateRef.current.workspaces
+      .find((w) => w.id === workspaceId)
+      ?.tabs?.find((t) => t.id === tabId)
+    if (tab != null) startTabRename(workspaceId, tabId, tab.name)
+  }
+
+  const togglePinTabFromMenu = () => {
+    const { workspaceId, tabId } = menu ?? {}
+    setMenu(null)
+    if (workspaceId == null || tabId == null) return
+    const tab = stateRef.current.workspaces
+      .find((w) => w.id === workspaceId)
+      ?.tabs?.find((t) => t.id === tabId)
+    persist(setTabPinned(stateRef.current, workspaceId, tabId, tab?.pinned !== true))
+  }
+
+  const closeTabFromMenu = () => {
+    const { workspaceId, tabId } = menu ?? {}
+    setMenu(null)
+    if (workspaceId == null || tabId == null) return
+    const ws = stateRef.current.workspaces.find((w) => w.id === workspaceId)
+    const index = ws?.tabs?.findIndex((t) => t.id === tabId) ?? -1
+    const label = tabMenuLabel(ws, tabId, index)
+    requestCloseTab(workspaceId, tabId, label)
+  }
+
+  const openMenu = (
+    e: React.MouseEvent,
+    header: boolean,
+    workspaceId?: string,
+    tabId?: string,
+  ) => {
     e.preventDefault()
     e.stopPropagation()
     menuOpenedAtRef.current = Date.now()
-    setMenu({ x: e.clientX, y: e.clientY, header, workspaceId })
+    setMenu({ x: e.clientX, y: e.clientY, header, workspaceId, tabId })
   }
 
   const deleteFromMenu = () => {
@@ -679,6 +790,26 @@ export function WorkspaceShell() {
     setMenu(null)
     if (id == null) return
     splitWorkspace(id, orientation)
+  }
+
+  /// Pin/unpin from the context menu (#37): flips the workspace's pinned flag
+  /// and moves it to the top group (setWorkspacePinned keeps the invariant).
+  const togglePinFromMenu = () => {
+    const id = menu?.workspaceId
+    setMenu(null)
+    if (id == null) return
+    const ws = stateRef.current.workspaces.find((w) => w.id === id)
+    persist(setWorkspacePinned(stateRef.current, id, ws?.pinned !== true))
+  }
+
+  /// Rename from the context menu (#37): opens the SAME inline edit the pencil
+  /// icon uses — one rename path everywhere.
+  const renameFromMenu = () => {
+    const id = menu?.workspaceId
+    setMenu(null)
+    if (id == null) return
+    const ws = stateRef.current.workspaces.find((w) => w.id === id)
+    if (ws != null) startRename(ws)
   }
 
   const minimize = () => { void getCurrentWindow().minimize() }
@@ -733,6 +864,7 @@ export function WorkspaceShell() {
   // Rendered by CloseConfirmDialog.
   type PendingClose =
     | { kind: 'panel'; workspaceId: string; panelId: string; label: string }
+    | { kind: 'tab'; workspaceId: string; tabId: string; label: string; busyCount: number }
     | { kind: 'workspace'; workspaceId: string; busyCount: number }
     | null
   const [pendingClose, setPendingClose] = useState<PendingClose>(null)
@@ -810,10 +942,44 @@ export function WorkspaceShell() {
     setPendingClose(null)
     if (pc == null) return
     if (pc.kind === 'panel') doClosePanel(pc.workspaceId, pc.panelId)
-    else {
+    else if (pc.kind === 'tab') {
+      persist(closeTab(stateRef.current, pc.workspaceId, pc.tabId))
+      void snapshotAndPersist()
+    } else {
       setState(closeWorkspace(stateRef.current, pc.workspaceId))
       void snapshotAndPersist()
     }
+  }
+
+  /// Ask-or-close for a TAB (#37 rework): one confirmation naming HOW MANY of
+  /// the tab's panels have live processes, when any of them does — the same
+  /// rule the workspace close uses (#28), one level down. With no local
+  /// panels to check nothing can be busy, so the close is synchronous.
+  const requestCloseTab = (workspaceId: string, tabId: string, label: string) => {
+    const ws = stateRef.current.workspaces.find((w) => w.id === workspaceId)
+    const tab = ws?.tabs?.find((t) => t.id === tabId)
+    if (ws == null || tab == null) return
+    const locals = leafIds(tab.layout)
+      .map((pid) => ptyIdsRef.current.get(pid))
+      .filter((e): e is PtyEntry => e != null && e.kind === 'local')
+    if (locals.length === 0) {
+      persist(closeTab(stateRef.current, workspaceId, tabId))
+      void snapshotAndPersist()
+      return
+    }
+    void Promise.all(
+      locals.map((e) =>
+        invoke<boolean>('pty_is_busy', { id: e.id }).catch(() => false),
+      ),
+    ).then((results) => {
+      const busyCount = results.filter(Boolean).length
+      if (busyCount === 0) {
+        persist(closeTab(stateRef.current, workspaceId, tabId))
+        void snapshotAndPersist()
+        return
+      }
+      setPendingClose({ kind: 'tab', workspaceId, tabId, label, busyCount })
+    })
   }
 
   // --- Delete-workspace confirmation ----------------------------------------
@@ -1051,14 +1217,21 @@ export function WorkspaceShell() {
               onChange={(e) => setDraftName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleCreate()
-                if (e.key === 'Escape') {
-                  setCreating(false)
-                  setDraftName('')
-                }
+                if (e.key === 'Escape') cancelCreate()
               }}
             />
             <button className="btn-primary" onClick={handleCreate}>
               Create
+            </button>
+            {/* #37: a visible way out of the creation form — same path as
+                Escape, for when the keyboard is not the instinct. */}
+            <button
+              className="icon-btn"
+              aria-label="Cancel creating workspace"
+              title="Cancel"
+              onClick={cancelCreate}
+            >
+              <CloseIcon />
             </button>
           </div>
         )}
@@ -1102,6 +1275,9 @@ export function WorkspaceShell() {
                 />
               ) : (
                 <>
+                  {/* #37: pinned workspaces carry a pin glyph; the pinned
+                      group always leads the list (setWorkspacePinned). */}
+                  {ws.pinned === true && <PinIcon className="row-pin" />}
                   <span className="workspace-name">{ws.name}</span>
                   {settings.agentStatusEnabled &&
                     state.openIds.includes(ws.id) &&
@@ -1109,7 +1285,10 @@ export function WorkspaceShell() {
                       // One chip per panel, the ACTIVE panel's chip first with
                       // the bigger dot (HITL round 5: the big dot marks the
                       // terminal you're in — switching panel focus moves it),
-                      // the remaining panels' statuses as minis below.
+                      // the remaining panels' statuses as minis below. Since
+                      // the #37 rework this covers EVERY tab's panes — all of
+                      // a workspace's statuses live here, on its row (Adam's
+                      // call: tabs stay clean, no chips on the tab bar).
                       const pids = panelIdsOf(state, ws.id)
                       if (pids.length === 0) return null
                       const activePid = activePanelOf(state, ws.id) ?? pids[0]
@@ -1178,63 +1357,178 @@ export function WorkspaceShell() {
             </button>
           </div>
         )}
-        {state.workspaces.length === 0 && !creating ? (
-          <EmptyState onCreate={startCreate} />
-        ) : null}
-        {state.workspaces
+        {/* `.panels` is the positioning context for the absolute `.panel`s
+            (that used to be `.main` itself). */}
+        <div className="panels">
+          {state.workspaces.length === 0 && !creating ? (
+            <EmptyState onCreate={startCreate} />
+          ) : null}
+          {state.workspaces
           .filter((ws) => state.openIds.includes(ws.id))
           .map((ws) => {
-            const layout = ws.layout
             const isActive = ws.id === state.activeId
-            const panelIds = panelIdsOf(state, ws.id)
+            const activeTab = activeTabOf(state, ws.id)
             return (
               <div
                 key={ws.id}
                 data-testid={`panel-${ws.id}`}
                 className={`panel ${isActive ? '' : 'is-hidden'}`}
-                data-split-orientation={layout?.kind === 'split' ? layout.orientation : undefined}
+                data-split-orientation={
+                  activeTab?.layout.kind === 'split'
+                    ? activeTab.layout.orientation
+                    : undefined
+                }
               >
-                {layout != null && (
-                  <PanelSurfaces
-                    workspaceId={ws.id}
-                    workspaceName={ws.name}
-                    layout={layout}
-                    activePanelId={activePanelOf(state, ws.id)}
-                    firstLeafId={panelIds[0] ?? ''}
-                    // Session-restore toggle off (#27 HITL follow-up): strip
-                    // the saved cwds so every shell starts in the default
-                    // directory. sshTarget survives — a configured remote
-                    // panel must not silently become local.
-                    panels={
-                      settings.sessionRestoreEnabled
-                        ? ws.panels
-                        : (ws.panels ?? []).map((p) =>
-                            p.workingDirectory == null
-                              ? p
-                              : { ...p, workingDirectory: undefined },
-                          )
-                    }
-                    onResize={(splitId, ratio, container) =>
-                      resizeWorkspacePanel(ws.id, splitId, ratio, container)
-                    }
-                    onResizeEnd={commitResize}
-                    onClose={(panelId) => requestClosePanel(ws.id, panelId)}
-                    onFocusPanel={(panelId) => focusWorkspacePanel(ws.id, panelId)}
-                    onPanelActivity={notePanelActivity}
-                    onPanelCompletion={notePanelCompletion}
-                    onPanelViewportResize={notePanelViewportResize}
-                    onPanelUserInput={(panelId, submitted) => {
-                      focusWorkspacePanel(ws.id, panelId)
-                      notePanelUserInput(panelId, submitted)
-                    }}
-                    onPanelOpened={notePanelOpened}
-                    statuses={statuses}
-                    statusEnabled={settings.agentStatusEnabled}
-                  />
-                )}
+                {/* Terminal tabs (#37 rework, Adam's correction): tabs are
+                    the separate terminal WINDOWS of THIS workspace — a
+                    workspace is the project, tabs are the terminals open in
+                    it, and a tab's area splits into panes. Each workspace
+                    renders its own bar; switching tabs keeps every shell
+                    mounted (hidden panes below). No status chips here —
+                    agent statuses stay on the workspace rows in the
+                    sidebar, covering every tab's panes. */}
+                <div
+                  className="tab-bar"
+                  role="tablist"
+                  aria-label={`${ws.name} terminals`}
+                >
+                  {(ws.tabs ?? []).map((tab, i) => {
+                    const tabActive = tab.id === activeTab?.id
+                    const only = (ws.tabs ?? []).length <= 1
+                    const editing = editingTab?.wsId === ws.id && editingTab.tabId === tab.id
+                    const label = tab.name ?? `Tab ${i + 1}`
+                    return (
+                      <div
+                        key={tab.id}
+                        role="tab"
+                        aria-selected={tabActive}
+                        data-testid={`tab-${ws.id}-${tab.id}`}
+                        className={`tab ${tabActive ? 'is-active' : ''}`}
+                        title={`${ws.name} · ${label}`}
+                        onClick={() => setState(switchTab(state, ws.id, tab.id))}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation()
+                          startTabRename(ws.id, tab.id, tab.name)
+                        }}
+                        onContextMenu={(e) => openMenu(e, false, ws.id, tab.id)}
+                        onMouseDown={(e) => {
+                          // A right-press must open the menu WITHOUT letting
+                          // WebKit start a text selection of the tab title
+                          // (HITL: right-click highlighted the label).
+                          if (isMenuPress(e)) {
+                            e.preventDefault()
+                            setState(switchTab(state, ws.id, tab.id))
+                            openMenu(e, false, ws.id, tab.id)
+                          }
+                        }}
+                      >
+                        {tab.pinned === true && <PinIcon className="tab-pin" />}
+                        {editing ? (
+                          <input
+                            className="tab-rename"
+                            aria-label="Rename tab"
+                            autoFocus
+                            value={editTabName}
+                            onChange={(e) => setEditTabName(e.target.value)}
+                            // The current name is visible AND pre-selected —
+                            // typing replaces it outright, arrows/Escape edit
+                            // it in place.
+                            onFocus={(e) => e.currentTarget.select()}
+                            onClick={(e) => e.stopPropagation()}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') commitTabRename(ws.id, tab.id)
+                              if (e.key === 'Escape') cancelTabRename()
+                            }}
+                            onBlur={() => commitTabRename(ws.id, tab.id)}
+                          />
+                        ) : (
+                          <span className="tab-name">{label}</span>
+                        )}
+                        <button
+                          className="tab-close"
+                          aria-label={`Close ${label}`}
+                          title={
+                            only
+                              ? 'A workspace keeps at least one terminal'
+                              : 'Close tab'
+                          }
+                          disabled={only}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            requestCloseTab(ws.id, tab.id, tabMenuLabel(ws, tab.id, i))
+                          }}
+                        >
+                          <CloseIcon />
+                        </button>
+                      </div>
+                    )
+                  })}
+                  <button
+                    className="tab-add icon-btn"
+                    aria-label="New terminal tab"
+                    title="New terminal tab"
+                    onClick={() => persist(addTab(stateRef.current, ws.id))}
+                  >
+                    <PlusIcon />
+                  </button>
+                </div>
+                {/* Every tab's panes stay mounted (hidden when not active) so
+                    each keeps its shells — the same contract workspace
+                    switching already follows. */}
+                <div className="tab-panes-area">
+                  {(ws.tabs ?? []).map((tab) => (
+                    <div
+                      key={tab.id}
+                      data-testid={`tab-panes-${tab.id}`}
+                      className={`tab-panes ${tab.id === activeTab?.id ? '' : 'is-hidden'}`}
+                    >
+                      <PanelSurfaces
+                        workspaceId={ws.id}
+                        workspaceName={ws.name}
+                        layout={tab.layout}
+                        activePanelId={
+                          tab.id === activeTab?.id ? activePanelOf(state, ws.id) : null
+                        }
+                        firstLeafId={leafIds(tab.layout)[0] ?? ''}
+                        // Session-restore toggle off (#27 HITL follow-up):
+                        // strip the saved cwds so every shell starts in the
+                        // default directory. sshTarget survives — a
+                        // configured remote panel must not silently become
+                        // local.
+                        panels={
+                          settings.sessionRestoreEnabled
+                            ? ws.panels
+                            : (ws.panels ?? []).map((p) =>
+                                p.workingDirectory == null
+                                  ? p
+                                  : { ...p, workingDirectory: undefined },
+                              )
+                        }
+                        onResize={(splitId, ratio, container) =>
+                          resizeWorkspacePanel(ws.id, splitId, ratio, container)
+                        }
+                        onResizeEnd={commitResize}
+                        onClose={(panelId) => requestClosePanel(ws.id, panelId)}
+                        onFocusPanel={(panelId) => focusWorkspacePanel(ws.id, panelId)}
+                        onPanelActivity={notePanelActivity}
+                        onPanelCompletion={notePanelCompletion}
+                        onPanelViewportResize={notePanelViewportResize}
+                        onPanelUserInput={(panelId, submitted) => {
+                          focusWorkspacePanel(ws.id, panelId)
+                          notePanelUserInput(panelId, submitted)
+                        }}
+                        onPanelOpened={notePanelOpened}
+                        statuses={statuses}
+                        statusEnabled={settings.agentStatusEnabled}
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             )
           })}
+        </div>
       </main>
 
       {settingsOpen && (
@@ -1248,12 +1542,18 @@ export function WorkspaceShell() {
       {pendingClose != null && (
         <CloseConfirmDialog
           title={
-            pendingClose.kind === 'panel' ? 'Close this panel?' : 'Close this workspace?'
+            pendingClose.kind === 'panel'
+              ? 'Close this panel?'
+              : pendingClose.kind === 'tab'
+                ? 'Close this tab?'
+                : 'Close this workspace?'
           }
           message={
             pendingClose.kind === 'panel'
               ? `Panel ${pendingClose.label} has a running process. Closing it now will terminate that process.`
-              : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in this workspace ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+              : pendingClose.kind === 'tab'
+                ? `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in tab ${pendingClose.label} ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+                : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in this workspace ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
           }
           confirmLabel="Close anyway"
           onConfirm={confirmPendingClose}
@@ -1281,13 +1581,82 @@ export function WorkspaceShell() {
           // time-guarded against the opening gesture.
           onClick={() => setMenu(null)}
         >
-          <button className="menu-item" role="menuitem" onClick={startCreate}>
-            <PlusIcon />
-            New workspace
-          </button>
-          {menu.workspaceId && (() => {
+          {menu.tabId == null && (
+            <button className="menu-item" role="menuitem" onClick={startCreate}>
+              <PlusIcon />
+              New workspace
+            </button>
+          )}
+          {/* Tab-scoped actions (#37 follow-up): the menu opened from a
+              TERMINAL TAB offers the tab's own actions — rename, pin, close —
+              plus the splits (they target the tab's active panel). The
+              workspace-list actions below stay hidden here. */}
+          {menu.tabId != null &&
+            menu.workspaceId != null &&
+            (() => {
+              const ws = state.workspaces.find((w) => w.id === menu.workspaceId)
+              const index = ws?.tabs?.findIndex((t) => t.id === menu.tabId) ?? -1
+              const tab = ws?.tabs?.[index]
+              const pinned = tab?.pinned === true
+              const only = (ws?.tabs ?? []).length <= 1
+              return (
+                <>
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={renameTabFromMenu}
+                  >
+                    <PencilIcon />
+                    Rename tab
+                  </button>
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={togglePinTabFromMenu}
+                  >
+                    <PinIcon />
+                    {pinned ? 'Unpin tab' : 'Pin tab'}
+                  </button>
+                  <div className="menu-separator" />
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={() => splitFromMenu('horizontal')}
+                  >
+                    <SplitHorizontalIcon />
+                    Split horizontal
+                  </button>
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={() => splitFromMenu('vertical')}
+                  >
+                    <SplitVerticalIcon />
+                    Split vertical
+                  </button>
+                  <div className="menu-separator" />
+                  <button
+                    className="menu-item danger"
+                    role="menuitem"
+                    disabled={only}
+                    title={only ? 'A workspace keeps at least one terminal' : undefined}
+                    onClick={closeTabFromMenu}
+                  >
+                    <CloseIcon />
+                    Close tab
+                  </button>
+                </>
+              )
+            })()}
+          {menu.tabId == null && menu.workspaceId && (() => {
             // v0.2 / #25: unlimited panels — the split actions are always
             // available (they split the workspace's active panel).
+            // #37: Pin and Rename sit between the splits and Delete (Adam's
+            // requested position: Pin directly before Delete).
+            const menuTarget = state.workspaces.find(
+              (w) => w.id === menu.workspaceId,
+            )
+            const pinned = menuTarget?.pinned === true
             return (
               <>
                 <div className="menu-separator" />
@@ -1306,6 +1675,23 @@ export function WorkspaceShell() {
                 >
                   <SplitVerticalIcon />
                   Split vertical
+                </button>
+                <div className="menu-separator" />
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={togglePinFromMenu}
+                >
+                  <PinIcon />
+                  {pinned ? 'Unpin workspace' : 'Pin workspace'}
+                </button>
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={renameFromMenu}
+                >
+                  <PencilIcon />
+                  Rename workspace
                 </button>
                 <div className="menu-separator" />
                 <button

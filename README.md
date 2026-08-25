@@ -12,10 +12,10 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 
 ## Features
 
-- **Workspaces** — create, rename, delete, close, and reorder named workspace collections. Each workspace typically maps to one project, and your setup **persists across restarts** (stored under the per-OS config directory — see [Configuration](#configuration)).
-- **Panels** — split a workspace's terminal into **as many resizable panels as you need** (drag the dividers). A sensible minimum size is enforced so no panel can collapse to nothing.
-- **Embedded terminal** — a real terminal surface (colors, cursor movement, alternate screen) so tools like `vim`, `htop`, and `fzf` render correctly. Each panel opens an interactive shell (your `$SHELL` by default).
-- **SSH panels** — open a panel connected to a remote machine over SSH, using your local agent and keys. Remote panels look and behave exactly like local ones.
+- **Workspaces** — create, rename, delete, close, pin (pinned workspaces stay on top), and reorder named workspace collections. Each workspace typically maps to one project, and your setup **persists across restarts** (stored under the per-OS config directory — see [Configuration](#configuration)).
+- **Tabs & panels** — every workspace keeps its terminals in **tabs** (separate terminal windows within the project; `Ctrl+Shift+T` adds one, double-click renames, right-click pins), and any tab's area splits into **as many resizable panels as you need** (drag the dividers). A sensible minimum size is enforced so no panel can collapse to nothing.
+- **Embedded terminal** — a real terminal surface (colors, cursor movement, alternate screen) so tools like `vim`, `htop`, and `fzf` render correctly. Each panel opens an interactive shell (your `$SHELL` by default; PowerShell on Windows).
+- **SSH panels** — open a panel connected to a remote machine over SSH, using your local agent and keys. Remote panels look and behave exactly like local ones. (Linux/macOS; Windows support is planned for v2.0.)
 - **Completion notifications** — when an AI CLI tool signals that a long-running task is done, umux fires a native desktop notification. Notifications can be toggled on/off app-wide.
 - **Agent status** — each panel shows a live status indicator: **working** while an AI CLI (Claude Code, Codex, Gemini CLI, Aider…) streams or thinks, **needs-attention** the moment it waits for you (opened, finished a task, or asking a question), and idle once you exit it. Detected from OSC completion signals plus the panel's foreground process name — never from terminal content.
 - **Settings & toggles** — turn optional features (agent status, notifications) on or off; your choices persist across restarts.

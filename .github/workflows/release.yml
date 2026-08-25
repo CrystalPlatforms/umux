@@ -2,9 +2,9 @@ name: release
 
 # Ten workflow uruchamia się automatycznie, gdy na GitHubie
 # opublikujesz nowy "Release" (z tagiem, np. v0.1.0).
-# Buduje wtedy aplikację na Ubuntu i macOS i dołącza pliki instalacyjne
-# (.deb, .AppImage oraz uniwersalny .dmg) do tego release'a,
-# żeby każdy mógł je pobrać.
+# Buduje wtedy aplikację na Ubuntu, Windows i macOS i dołącza pliki
+# instalacyjne (.deb, .AppImage, NSIS .exe oraz uniwersalny .dmg)
+# do tego release'a, żeby każdy mógł je pobrać.
 on:
   release:
     types: [published]
@@ -84,3 +84,35 @@ jobs:
           prerelease: false
           # .app + .dmg uniwersalny (Apple Silicon i Intel w jednym)
           args: --target universal-apple-darwin
+
+  # v1.0 Phase 10 / #34: trzecia platforma w macierzy release'u.
+  # Windows buduje przez ConPTY-ready backend (v1.0 Phase 9 / #33);
+  # runner windows-latest ma MSVC, Rust i WebView2 out-of-the-box.
+  # Budujemy JEDEN deterministyczny artefakt: instalator NSIS
+  # (umux_<wersja>_x64-setup.exe) — .msi celowo pomijamy, żeby zestaw
+  # plików w release'e był przewidywalny (README obiecuje .exe).
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Pobierz kod repozytorium
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Zainstaluj zależności frontendu (npm ci)
+        run: npm ci
+
+      - name: Zbuduj aplikację i dołącz pliki do release'a (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.release.tag_name }}
+          releaseName: ${{ github.event.release.name }}
+          releaseDraft: false
+          prerelease: false
+          # Instalator NSIS: umux_<wersja>_x64-setup.exe
+          args: --bundles nsis

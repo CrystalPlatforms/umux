@@ -26,6 +26,24 @@ pub struct Panel {
     pub ssh_target: Option<String>,
 }
 
+/// One terminal tab inside a workspace (#37 rework): its own split tree of
+/// panes, an optional display name (Adam's follow-up — absent = positional
+/// "Tab N"), and an optional pin (pinned tabs group at the top of the bar).
+/// Kept shape-identical to the TS `Tab` in workspaces.ts (layout is always
+/// present once the frontend has seeded it; `Option` + `default` +
+/// `skip_serializing_if` keep old configs loading and old saves unchanged).
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Tab {
+    pub id: String,
+    #[serde(default)]
+    pub layout: Option<LayoutNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Workspace {
@@ -36,11 +54,23 @@ pub struct Workspace {
     // so old files keep working (PRD story 38).
     #[serde(default)]
     pub panels: Vec<Panel>,
-    // Split tree (v0.2 Phase 1 / #25); leaf ids ARE panel ids. `Option` +
-    // `default` so pre-v0.2 configs (no layout) load as `None`. Kept
-    // byte-identical to the TS `LayoutNode` in PaneLayout.ts.
+    // Split tree (v0.2 Phase 1 / #25); leaf ids ARE panel ids. LEGACY since
+    // the #37 rework: the tree moved under `tabs`, but this field must stay
+    // so old configs round-trip to the frontend, which migrates them (and
+    // new saves no longer carry it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<LayoutNode>,
+    // The workspace's terminal tabs (#37 rework — tabs are terminal windows
+    // INSIDE a workspace, not workspaces). Empty for pre-rework configs; the
+    // frontend's bootState migrates the legacy `layout` into one tab.
+    #[serde(default)]
+    pub tabs: Vec<Tab>,
+    // Pinned workspaces sit at the top of the list as a group (#37). `Option`
+    // + `default` + `skip_serializing_if` so configs written before pinning
+    // existed load as `None` and re-save without gaining the key — mirrors
+    // the optional `pinned` on the TS `Workspace` in workspaces.ts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
@@ -200,8 +230,8 @@ mod tests {
     fn serialize_config_round_trips() {
         let data = WorkspaceData {
             workspaces: vec![
-                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![], layout: None },
-                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![], layout: None },
+                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![], layout: None, pinned: None, tabs: vec![] },
+                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![], layout: None, pinned: None, tabs: vec![] },
             ],
         };
 
@@ -240,6 +270,8 @@ mod tests {
                     ssh_target: Some("adam@host".into()),
                 }],
                 layout: None,
+                pinned: None,
+                tabs: vec![],
             }],
         };
 
@@ -277,6 +309,8 @@ mod tests {
                 name: "alpha".into(),
                 panels: vec![],
                 layout: None,
+                pinned: None,
+                tabs: vec![],
             }],
         };
 
@@ -305,6 +339,8 @@ mod tests {
                     ssh_target: Some("adam@host".into()),
                 }],
                 layout: None,
+                pinned: None,
+                tabs: vec![],
             }],
         };
 
@@ -411,6 +447,8 @@ mod tests {
                     ssh_target: Some("adam@host".into()),
                 }],
                 layout: None,
+                pinned: None,
+                tabs: vec![],
             }],
         };
 
@@ -464,6 +502,8 @@ mod tests {
                 name: "alpha".into(),
                 panels: vec![],
                 layout: Some(nested_tree()),
+                pinned: None,
+                tabs: vec![],
             }],
         };
 
@@ -499,6 +539,8 @@ mod tests {
                 name: "alpha".into(),
                 panels: vec![],
                 layout: Some(nested_tree()),
+                pinned: None,
+                tabs: vec![],
             }],
         };
 
@@ -537,6 +579,8 @@ mod tests {
                 name: "alpha".into(),
                 panels: vec![],
                 layout: Some(nested_tree()),
+                pinned: None,
+                tabs: vec![],
             }],
         };
 

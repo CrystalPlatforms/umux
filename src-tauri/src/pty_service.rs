@@ -51,6 +51,25 @@ struct PtyEntry {
 struct SendMaster(Box<dyn portable_pty::MasterPty>);
 unsafe impl Send for SendMaster {}
 
+/// The PTY's foreground process-group leader (who owns the terminal right
+/// now), or `None` when the OS cannot say. Unix: portable-pty's
+/// `process_group_leader` (a cfg(unix) method on MasterPty — tcgetpgrp
+/// semantics, the technique tmux/wezterm use). Windows (v1.0 Phase 9 /
+/// #33): ConPTY masters expose no such concept, so this returns `None`;
+/// both callers already treat an unreadable answer as "idle" (close never
+/// nags, no presence name) — the direction the safe-closing contract
+/// calls conservative. A Windows-native busy check (a child-process-tree
+/// walk) is v2.0 follow-up material, out of #33's scope.
+#[cfg(unix)]
+fn fg_group_leader(entry: &PtyEntry) -> Option<i32> {
+    entry.master.0.process_group_leader()
+}
+
+#[cfg(windows)]
+fn fg_group_leader(_entry: &PtyEntry) -> Option<i32> {
+    None
+}
+
 pub struct PtyService {
     next_id: u32,
     entries: HashMap<u32, PtyEntry>,
@@ -117,7 +136,8 @@ pub fn parse_lsof_cwd(output: &str) -> Option<PathBuf> {
 //   - Linux: /proc/<pid>/comm — kernel-provided, instant.
 //   - macOS: `ps -o comm= -p <pid>` (comm may be a full path; the pure
 //     parser basenames it).
-//   - Windows: v1.0 Phase 9 — None.
+//   - Windows (v1.0 Phase 9 / #33): `tasklist /FI "PID eq <pid>" /FO CSV`
+//     — the image name column (pure parser strips the .exe suffix).
 // Terminal CONTENT is never read: completion stays OSC-only; presence is a
 // separate process-table signal (PRD clarification, 2026-08-25).
 
@@ -143,9 +163,37 @@ pub fn process_name(pid: u32) -> Option<String> {
 }
 
 /// The name the user TYPED to run process `pid`, if it can be determined.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+pub fn process_name(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    parse_tasklist_name(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The name the user TYPED to run process `pid`, if it can be determined.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn process_name(_pid: u32) -> Option<String> {
     None
+}
+
+/// Image-name column of `tasklist /FO CSV /NH` output (Windows foreground
+/// lookup). Pure — unit-testable with fixed fixtures. The image name carries
+/// the `.exe` suffix on Windows, which the known-CLI presence list does not,
+/// so it is stripped here; like the other platforms this reports the
+/// EXECUTABLE's name (a `claude` installed as a node script surfaces as
+/// `node`), which presence detection treats as "unknown CLI".
+#[cfg(target_os = "windows")]
+pub fn parse_tasklist_name(output: &str) -> Option<String> {
+    let line = output.lines().find(|l| !l.trim().is_empty())?;
+    let first = line.split(',').next()?;
+    let name = first.trim().trim_matches('"');
+    if name.is_empty() {
+        return None;
+    }
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    Some(name.to_string())
 }
 
 /// First NUL-separated token of /proc/<pid>/cmdline, basenamed. Pure —
@@ -188,6 +236,13 @@ impl PtyService {
         // Launch as a login shell so the user's `.profile` / `.bash_profile`
         // (and thus their environment + dotfiles) are loaded, matching the
         // PRD requirement that a panel respects the chosen shell's config.
+        // `-l` is POSIX-only: PowerShell has no login flag (it would refuse
+        // to start), so on Windows (v1.0 Phase 9 / #33, ConPTY +
+        // powershell.exe) pass -NoLogo instead — panels start clean without
+        // the version banner, the closest spirit of "respect the config".
+        #[cfg(windows)]
+        let argv = vec![shell.to_string(), "-NoLogo".to_string()];
+        #[cfg(not(windows))]
         let argv = vec![shell.to_string(), "-l".to_string()];
         self.spawn_argv(argv, cwd, cols, rows)
     }
@@ -345,7 +400,7 @@ impl PtyService {
         };
         match self.entries.get(&handle.id) {
             // i64 comparison avoids needing a libc pid_t cast in this module.
-            Some(entry) => match entry.master.0.process_group_leader() {
+            Some(entry) => match fg_group_leader(entry) {
                 Some(fg) => i64::from(fg) != i64::from(child_pid),
                 None => false,
             },
@@ -367,10 +422,8 @@ impl PtyService {
         }
         let fg = self
             .entries
-            .get(&handle.id)?
-            .master
-            .0
-            .process_group_leader()?;
+            .get(&handle.id)
+            .and_then(fg_group_leader)?;
         process_name(u32::try_from(fg).ok()?)
     }
 

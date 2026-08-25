@@ -14,6 +14,7 @@
 
 export type Command =
   | 'new-workspace'
+  | 'new-tab'
   | 'next-workspace'
   | 'prev-workspace'
   | 'split-horizontal'
@@ -37,6 +38,7 @@ export type ShortcutEvent = {
 /// does not matter.
 const TABLE: Record<string, Command> = {
   n: 'new-workspace',
+  t: 'new-tab',
   h: 'split-horizontal',
   v: 'split-vertical',
   w: 'close-panel',

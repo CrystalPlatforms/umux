@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What umux is
 
-umux is an open-source terminal workspace manager (a "cmux alternative") for **Linux (Ubuntu/Wayland), Windows, and macOS**. It's a single Tauri v2 desktop app with its own embedded terminal surface — not a tool that manipulates external windows. Users group terminals into named **workspaces** (typically one per project), each holding **any number of resizable panels** (unlimited from v0.2.0; originally capped at two). The app inspects the terminal byte stream for AI-CLI completion signals (OSC 9;9 / OSC 99 / OSC 777 escape sequences, which Claude Code emits automatically) and fires a native desktop notification when a long-running task finishes.
+umux is an open-source terminal workspace manager (a "cmux alternative") for **Linux (Ubuntu/Wayland), Windows, and macOS**. It's a single Tauri v2 desktop app with its own embedded terminal surface — not a tool that manipulates external windows. Users group terminals into named **workspaces** (typically one per project), each holding **terminal tabs** (separate terminal windows, since issue #37's rework) that split into **any number of resizable panels** (unlimited from v0.2.0; originally capped at two). The app inspects the terminal byte stream for AI-CLI completion signals (OSC 9;9 / OSC 99 / OSC 777 escape sequences, which Claude Code emits automatically) and fires a native desktop notification when a long-running task finishes.
 
 The formal spec is the PRD at `plans/umux-prd.md` (user stories, constraints, Roadmap); `README.md` is the user-facing guide (install, build). Keep both in sync when scope changes; discovery decisions from August 2026 live in `plans/umux-2.0-plan.md`. **Implementation status: v0.1 shipped** (Linux; all core modules exist — see "Repo layout notes"). Cross-platform builds, unlimited panels, agent status, Settings, and session restore are planned per the PRD Roadmap (v0.2.0/v1.0.0).
 
@@ -37,7 +37,7 @@ Backend modules in `src-tauri/src/` (all implemented as of v0.1):
 
 Frontend components in `src/` (implemented as of v0.1):
 - **TerminalSurface** — wraps `xterm.js` per panel; attaches to a PTY handle's output stream and sends keystrokes back through CommandBridge.
-- **PaneLayout** *(deep, pure)* — split state + geometry. v0.1 covers ≤2 panels; **v0.2.0 rewrites it for unlimited panels** (tree of splits, per-panel minimum sizes). Testable without a live terminal.
+- **PaneLayout** *(deep, pure)* — split state + geometry. v0.1 covers ≤2 panels; **v0.2.0 rewrites it for unlimited panels** (tree of splits, per-panel minimum sizes). Since the #37 rework each **tab** owns one tree (workspaces hold tabs, tabs split into panels). Testable without a live terminal.
 - **WorkspaceShell** — workspace switcher (list + create/rename/delete/close).
 - **SshConnectDialog** — SSH target entry/selection.
 
@@ -51,7 +51,7 @@ The modules marked *(deep)* are intended to have small interfaces hiding large, 
 ## Hard constraints (from the PRD — do not drift without a decision)
 
 - **Platforms:** Linux (Ubuntu/Wayland is the reference), Windows 10+, macOS 11+ (universal binary). X11 sessions untested. Windows/macOS builds land at v1.0.0.
-- **Panels:** unlimited per workspace (decided Aug 2026 — supersedes the original two-panel cap). PaneLayout enforces a sensible per-panel minimum.
+- **Panels:** unlimited per workspace (decided Aug 2026 — supersedes the original two-panel cap). PaneLayout enforces a sensible per-panel minimum. **Tabs:** terminal windows inside a workspace (issue #37 rework, Adam's correction — tabs are NOT workspaces); agent-status chips stay on the workspace rows in the sidebar, never on tabs.
 - Completion detection relies **solely on OSC escape sequences** — no process polling or output pattern matching.
 - **Normal terminal output must be byte-identical** whether or not the OSC parser is active (OscParser only passes bytes through and extracts events; it never mutates terminal output).
 - **Notifications are stable on Linux** — don't change their behavior; only verify portability to Windows/macOS.

@@ -311,20 +311,189 @@ body {
 
 /* ---- Main / terminal area ------------------------------------------------ */
 
+/* Flex column since #37: the fallback banner in normal flow on top, the
+   panels region below it. Previously `.main` was a bare positioning context
+   for the absolute `.panel`s; the `.panels` wrapper took over that role. */
 .main {
   position: relative;
   flex: 1;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-terminal);
   overflow: hidden;
 }
 
+.panels {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* One workspace's view (#37 rework): its terminal tab bar on top, the tab
+   panes below. Column flex inside the absolute per-workspace container. */
 .panel {
   position: absolute;
   inset: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .panel.is-hidden {
   display: none;
+}
+
+/* The stacked panes of a workspace's tabs: one absolute layer per tab, the
+   active one visible — the same stacking contract workspaces follow in
+   `.panels`, one level down. */
+.tab-panes-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.tab-panes {
+  position: absolute;
+  inset: 0;
+}
+
+.tab-panes.is-hidden {
+  display: none;
+}
+
+/* ---- Terminal tab bar (#37 rework) -----------------------------------------
+   Tabs are the terminal WINDOWS of ONE workspace (not workspaces): the bar
+   lives inside each workspace's view. Click activates, × closes (disabled on
+   the last tab), + adds a terminal, right-click opens the workspace menu.
+   Deliberately NO status chips here — agent statuses live on the workspace
+   rows in the sidebar, covering every tab's panes. */
+
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 6px 8px 0;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+  /* Tab titles are UI chrome, not document text: never selectable, so a
+     right-click (menu) or double-click (rename) never highlights them. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tab:hover {
+  background: var(--bg-sidebar-hover);
+  color: var(--text);
+}
+
+.tab.is-active {
+  background: var(--bg-sidebar-active);
+  border-color: var(--border-soft);
+  color: var(--text);
+  box-shadow: inset 0 2px 0 0 var(--accent-line);
+}
+
+.tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Close affordance inside a tab — smaller and quieter than .icon-btn so the
+   label stays the focus. */
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tab-close:hover {
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--text);
+}
+
+.tab-close:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.tab-close:disabled:hover {
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.tab-close svg {
+  width: 11px;
+  height: 11px;
+}
+
+.tab-add {
+  align-self: center;
+  margin-left: 2px;
+}
+
+/* Pin glyph on a pinned terminal tab (#37 follow-up) — sits before the
+   name, same accent color as the workspace-row pin. */
+.tab-pin {
+  width: 11px;
+  height: 11px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* Inline rename input inside a tab (double-click or the tab menu): a slim
+   variant of .text-input sized to the tab, so the bar does not jump. The
+   one selectable element in the bar — its text must stay editable. */
+.tab-rename {
+  width: 110px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--accent-line);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Pin glyph on a pinned workspace's row in the sidebar (#37). Sits before
+   the name. */
+.row-pin {
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+  flex-shrink: 0;
 }
 
 /* Friendly onboarding shown in the main area when there are no workspaces

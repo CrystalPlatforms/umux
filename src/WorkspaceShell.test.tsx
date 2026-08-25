@@ -22,7 +22,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useEffect, useRef } from 'react'
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 
 // Boundary: Tauri invoke. Default returns empty config; tests override via
 // invokeMock.mockImplementation for seeded scenarios.
@@ -190,7 +190,7 @@ describe('WorkspaceShell', () => {
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'my-project' } })
     fireEvent.click(screen.getByRole('button', { name: /create/i }))
 
-    expect(await screen.findByText('my-project')).toBeInTheDocument()
+    expect(await screen.findByText('my-project', { selector: '.workspace-name' })).toBeInTheDocument()
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
         workspaces: [
@@ -198,7 +198,7 @@ describe('WorkspaceShell', () => {
             id: expect.any(String),
             name: 'my-project',
             panels: [],
-            layout: { kind: 'leaf', id: expect.any(String) },
+            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
           },
         ],
       }),
@@ -218,7 +218,7 @@ describe('WorkspaceShell', () => {
     })
 
     render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('beta')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument())
 
     const panel1 = screen.getByTestId('panel-ws-1')
     const panel2 = screen.getByTestId('panel-ws-2')
@@ -226,7 +226,7 @@ describe('WorkspaceShell', () => {
     expect(panel2.className).toContain('is-hidden')
 
     act(() => {
-      fireEvent.click(screen.getByText('beta'))
+      fireEvent.click(screen.getByText('beta', { selector: '.workspace-name' }))
     })
 
     expect(panel1.className).toContain('is-hidden')
@@ -243,14 +243,14 @@ describe('WorkspaceShell', () => {
     })
 
     render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
     fireEvent.click(screen.getByRole('button', { name: /rename/i }))
     const input = screen.getByLabelText(/rename workspace/i)
     fireEvent.change(input, { target: { value: 'alpha-renamed' } })
     fireEvent.keyDown(input, { key: 'Enter' })
 
-    expect(await screen.findByText('alpha-renamed')).toBeInTheDocument()
+    expect(await screen.findByText('alpha-renamed', { selector: '.workspace-name' })).toBeInTheDocument()
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
         workspaces: [
@@ -259,7 +259,7 @@ describe('WorkspaceShell', () => {
             name: 'alpha-renamed',
             // bootState seeded a fresh single-leaf layout for the config that
             // had none (v0.2 / #25) — it persists along with the rename.
-            layout: { kind: 'leaf', id: expect.any(String) },
+            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
           },
         ],
       }),
@@ -302,7 +302,7 @@ describe('WorkspaceShell', () => {
       return Promise.resolve(undefined)
     })
     render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
     fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-1'), { button: 2 })
 
@@ -316,7 +316,7 @@ describe('WorkspaceShell', () => {
       return Promise.resolve(undefined)
     })
     render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
     fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-1'), {
       button: 0,
@@ -365,12 +365,12 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: /close alpha/i }))
+    fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /close/i }))
 
     // The panel is gone (unmounted -> its shell is torn down via pty_close).
     expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
     // The definition stays in the sidebar.
-    expect(screen.getByText('alpha')).toBeInTheDocument()
+    expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument()
     // Close is runtime-only: definitions did not change, so nothing is saved.
     expect(invokeMock).not.toHaveBeenCalledWith('save_workspaces', expect.anything())
   })
@@ -385,10 +385,10 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: /close alpha/i }))
+    fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /close/i }))
     expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByText('alpha'))
+    fireEvent.click(screen.getByText('alpha', { selector: '.workspace-name' }))
 
     expect(await screen.findByTestId('panel-ws-1')).toBeInTheDocument()
   })
@@ -406,11 +406,11 @@ describe('WorkspaceShell', () => {
     })
 
     render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
     // v0.2 Phase 4+ follow-up: the confirmation is our shared modal, not
     // window.confirm (a silent no-op returning false inside WKWebView).
-    fireEvent.contextMenu(screen.getByText('alpha'))
+    fireEvent.contextMenu(screen.getByText('alpha', { selector: '.workspace-name' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /delete workspace/i }))
 
     // The dialog names the workspace and nothing is deleted yet.
@@ -427,7 +427,7 @@ describe('WorkspaceShell', () => {
           {
             id: 'ws-2',
             name: 'beta',
-            layout: { kind: 'leaf', id: expect.any(String) },
+            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
           },
         ],
       }),
@@ -442,16 +442,16 @@ describe('WorkspaceShell', () => {
     })
 
     render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
-    fireEvent.contextMenu(screen.getByText('alpha'))
+    fireEvent.contextMenu(screen.getByText('alpha', { selector: '.workspace-name' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /delete workspace/i }))
 
     // Cancel the shared modal — the workspace survives untouched.
     expect(await screen.findByTestId('close-confirm-dialog')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
 
-    expect(screen.getByText('alpha')).toBeInTheDocument()
+    expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument()
     expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument()
     expect(invokeMock).not.toHaveBeenCalledWith('save_workspaces', expect.anything())
   })
@@ -470,7 +470,7 @@ describe('WorkspaceShell', () => {
     })
 
     render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('gamma')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('gamma', { selector: '.workspace-name' })).toBeInTheDocument())
 
     // Drag the alpha row onto the gamma row -> alpha moves to the end.
     fireEvent.dragStart(screen.getByTestId('workspace-row-ws-1'))
@@ -482,17 +482,17 @@ describe('WorkspaceShell', () => {
           {
             id: 'ws-2',
             name: 'beta',
-            layout: { kind: 'leaf', id: expect.any(String) },
+            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
           },
           {
             id: 'ws-3',
             name: 'gamma',
-            layout: { kind: 'leaf', id: expect.any(String) },
+            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
           },
           {
             id: 'ws-1',
             name: 'alpha',
-            layout: { kind: 'leaf', id: expect.any(String) },
+            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
           },
         ],
       }),
@@ -517,7 +517,7 @@ describe('WorkspaceShell', () => {
     it('mounts a single terminal surface per open workspace', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       expect(screen.getAllByTestId('terminal-surface')).toHaveLength(1)
     })
@@ -525,7 +525,7 @@ describe('WorkspaceShell', () => {
     it('offers the split actions in the workspace context menu', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       openRowMenu()
 
@@ -536,7 +536,7 @@ describe('WorkspaceShell', () => {
     it('splits horizontally into two independent surfaces side by side', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       openRowMenu()
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
@@ -548,7 +548,7 @@ describe('WorkspaceShell', () => {
     it('splits vertically into two stacked surfaces', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       openRowMenu()
       fireEvent.click(await screen.findByRole('menuitem', { name: /split vertical/i }))
@@ -562,7 +562,7 @@ describe('WorkspaceShell', () => {
     it('keeps the split actions enabled and splits again into three surfaces', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       // First split applies and closes the menu.
       openRowMenu()
@@ -584,7 +584,7 @@ describe('WorkspaceShell', () => {
     it('renders a divider between the two panels of a split', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       openRowMenu()
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
@@ -596,7 +596,7 @@ describe('WorkspaceShell', () => {
     it('collapses back to one surface after closing a panel', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       openRowMenu()
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
@@ -615,7 +615,7 @@ describe('WorkspaceShell', () => {
     it('closes a middle panel of three without leaving a gap', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       // Two splits -> panels A | (B / C); the active panel after the first
       // split is the new one, so the second split nests under it.
@@ -644,7 +644,7 @@ describe('WorkspaceShell', () => {
     it('keeps the surviving surface mounted (same DOM node) when a sibling closes', async () => {
       seedOne()
       const { container } = render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       openRowMenu()
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
@@ -667,7 +667,7 @@ describe('WorkspaceShell', () => {
     it('keeps the existing surface mounted (same DOM node) when a split happens', async () => {
       seedOne()
       const { container } = render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       const original = container.querySelector<HTMLElement>('[data-panel-id]')
       expect(original).not.toBeNull()
@@ -696,7 +696,7 @@ describe('WorkspaceShell', () => {
     const splitIntoTwo = async () => {
       seedOne()
       const { container } = render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
       fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
       await screen.findAllByTestId('terminal-surface')
@@ -732,12 +732,14 @@ describe('WorkspaceShell', () => {
     it('Ctrl+Shift+N creates a new workspace', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
       expect(document.querySelectorAll('.workspace-row')).toHaveLength(1)
 
       press('n')
 
-      expect(await screen.findAllByText('alpha')).toHaveLength(1)
+      // 'alpha' renders in the sidebar row AND its tab since #37 — one ROW
+      // is still exactly one 'alpha' workspace.
+      expect(await screen.findAllByText('alpha', { selector: '.workspace-name' })).toHaveLength(1)
       expect(document.querySelectorAll('.workspace-row')).toHaveLength(2)
     })
 
@@ -755,7 +757,7 @@ describe('WorkspaceShell', () => {
     it('Ctrl+Shift+H splits the active workspace', async () => {
       seedOne()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
       expect(screen.getAllByTestId('terminal-surface')).toHaveLength(1)
 
       press('h')
@@ -777,7 +779,7 @@ describe('WorkspaceShell', () => {
         return Promise.resolve(undefined)
       })
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
       // alpha is active initially; its panel is visible, beta's is hidden.
       expect(screen.getByTestId('panel-ws-1').className).not.toContain('is-hidden')
       expect(screen.getByTestId('panel-ws-2').className).toContain('is-hidden')
@@ -815,7 +817,7 @@ describe('WorkspaceShell', () => {
         return Promise.resolve(undefined)
       })
       const { container } = render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       const remote = container.querySelector<HTMLElement>(
         '[data-ssh-target="adam@example.com"]',
@@ -834,7 +836,7 @@ describe('WorkspaceShell', () => {
         return Promise.resolve(undefined)
       })
       const { container } = render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       const surface = container.querySelector<HTMLElement>('[data-ssh-target]')
       expect(surface?.dataset.sshTarget).toBe('')
@@ -903,7 +905,7 @@ describe('WorkspaceShell', () => {
     it('toggling agent status off hides the per-panel chips live', async () => {
       seedSettings()
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       const row = screen.getByTestId('workspace-row-ws-1')
       expect(row.querySelector('.workspace-statuses')).not.toBeNull()
@@ -989,7 +991,7 @@ describe('WorkspaceShell', () => {
 
     const splitIntoTwo = async () => {
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
       fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
       await waitFor(() =>
@@ -1069,7 +1071,7 @@ describe('WorkspaceShell', () => {
         return Promise.resolve(undefined)
       })
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       expect(winMock.closeRequested).not.toBeNull()
       const preventDefault = vi.fn()
@@ -1113,7 +1115,7 @@ describe('WorkspaceShell', () => {
         return Promise.resolve(undefined)
       })
       render(<WorkspaceShell />)
-      await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       // Split alpha: two surfaces, focus moves to the new leaf.
       fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
@@ -1125,20 +1127,25 @@ describe('WorkspaceShell', () => {
       // Focus the FIRST panel, then close + reopen the workspace so both
       // surfaces remount with a closure that predates the workspace below.
       fireEvent.click(screen.getAllByTestId('terminal-surface')[0])
-      fireEvent.click(screen.getByRole('button', { name: /close alpha/i }))
+      fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /close/i }))
       await waitFor(() =>
         expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument(),
       )
       fireEvent.click(screen.getByTestId('workspace-row-ws-1'))
       await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
 
-      // Create a second workspace AFTER the remount.
-      fireEvent.click(screen.getByRole('button', { name: /new workspace/i }))
+      // Create a second workspace AFTER the remount. Scoped to the sidebar:
+      // the tab bar carries its own "+" since #37.
+      fireEvent.click(
+        within(screen.getByRole('complementary')).getByRole('button', {
+          name: /new workspace/i,
+        }),
+      )
       fireEvent.change(screen.getByLabelText(/new workspace name/i), {
         target: { value: 'beta' },
       })
       fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
-      await waitFor(() => expect(screen.getByText('beta')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument())
 
       // Switch back to alpha and focus its second panel.
       fireEvent.click(screen.getByTestId('workspace-row-ws-1'))
@@ -1148,8 +1155,8 @@ describe('WorkspaceShell', () => {
       // state to the remount snapshot and deleted "beta" outright.
       fireEvent.keyDown(screen.getAllByTestId('terminal-surface')[1], { key: 'd' })
 
-      expect(screen.getByText('beta')).toBeInTheDocument()
-      expect(screen.getByText('alpha')).toBeInTheDocument()
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument()
+      expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument()
     })
   })
 
@@ -1208,3 +1215,447 @@ describe('WorkspaceShell', () => {
       expect(surface).toHaveAttribute('data-ssh-target', 'adam@host')
     })
   })
+
+// --- Terminal tabs, pin, and rename menu (#37 rework) ------------------------
+//
+// Assumptions encoded:
+//  - Tabs are the terminal WINDOWS INSIDE a workspace (Adam's correction —
+//    NOT workspaces). Every workspace renders its own tab bar inside its
+//    panel view; a seeded legacy config migrates to one tab per workspace.
+//  - The tab-bar + adds a TERMINAL TAB (definitions persist via
+//    save_workspaces with the tabs array); the sidebar + still creates
+//    workspaces.
+//  - Clicking a tab switches tabs; every tab's panes stay MOUNTED (hidden
+//    via .is-hidden) so shells survive switches — the workspace contract
+//    one level down.
+//  - A tab's × closes the tab (with the #28 busy-confirmation when needed);
+//    the LAST tab of a workspace is protected (disabled ×) — close the
+//    workspace instead.
+//  - The tab bar carries NO status chips: agent statuses stay on the
+//    workspace rows in the sidebar (one chip per panel, across all tabs).
+//  - The create form has a visible cancel (aria-label "Cancel creating
+//    workspace") that follows the Escape path: hides the form, drops the
+//    draft, persists nothing.
+//  - The row context menu offers "Pin workspace" / "Unpin workspace" and
+//    "Rename workspace", both between the split actions and Delete; rename
+//    opens the SAME inline edit the pencil icon uses.
+//  - Pinning reorders definitions (pinned group leads) and persists
+//    `pinned: true` on the workspace; unpinning drops the key entirely.
+describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
+  // Top-level describe: re-seed the invoke boundary like the main block's
+  // beforeEach (mockReset drops the implementation between describes).
+  beforeEach(() => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  const seedTwo = () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  const rowOrder = () =>
+    [...document.querySelectorAll('.workspace-row')].map((el) =>
+      el.getAttribute('data-testid'),
+    )
+
+  it('cancelling the create form hides it and creates nothing', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    fireEvent.click(
+      within(screen.getByRole('complementary')).getByRole('button', {
+        name: /new workspace/i,
+      }),
+    )
+    fireEvent.change(screen.getByLabelText(/new workspace name/i), {
+      target: { value: 'draft' },
+    })
+    fireEvent.click(
+      screen.getByRole('button', { name: /cancel creating workspace/i }),
+    )
+
+    expect(
+      screen.queryByLabelText(/new workspace name/i),
+    ).not.toBeInTheDocument()
+    expect(document.querySelectorAll('.workspace-row')).toHaveLength(2)
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'save_workspaces',
+      expect.objectContaining({
+        workspaces: expect.arrayContaining([
+          expect.objectContaining({ name: 'draft' }),
+        ]),
+      }),
+    )
+  })
+
+  it('offers Pin and Rename in the row menu, both before Delete', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+    const names = (await screen.findAllByRole('menuitem')).map((el) =>
+      el.textContent?.trim(),
+    )
+
+    const pin = names.indexOf('Pin workspace')
+    const rename = names.indexOf('Rename workspace')
+    const del = names.indexOf('Delete workspace')
+    expect(pin).toBeGreaterThan(-1)
+    expect(rename).toBeGreaterThan(-1)
+    expect(del).toBeGreaterThan(-1)
+    // Adam's requested position: Pin (and Rename) directly before Delete,
+    // after the split actions.
+    expect(pin).toBeLessThan(del)
+    expect(rename).toBeLessThan(del)
+    expect(pin).toBeGreaterThan(names.indexOf('Split vertical'))
+  })
+
+  it('pins a workspace from the menu: it leads the list and persists', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-2'))
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: /^pin workspace$/i }),
+    )
+
+    // Definitions reorder: the pinned group leads the sidebar rows.
+    await waitFor(() =>
+      expect(rowOrder()).toEqual(['workspace-row-ws-2', 'workspace-row-ws-1']),
+    )
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
+        workspaces: [
+          expect.objectContaining({ id: 'ws-2', name: 'beta', pinned: true }),
+          expect.objectContaining({ id: 'ws-1', name: 'alpha' }),
+        ],
+      }),
+    )
+
+    // The menu label flips for a pinned workspace, and unpinning drops the
+    // key from the persisted payload (order keeps the unpinned leader).
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-2'))
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: /^unpin workspace$/i }),
+    )
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(
+        (c) => c[0] === 'save_workspaces',
+      )
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<Record<string, unknown>>
+      }
+      expect(last.workspaces).toHaveLength(2)
+      expect(last.workspaces[0]).not.toHaveProperty('pinned')
+      expect(last.workspaces[1]).not.toHaveProperty('pinned')
+    })
+  })
+
+  it('Rename workspace in the menu opens the same inline edit', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: /^rename workspace$/i }),
+    )
+
+    const input = await screen.findByLabelText(/rename workspace/i)
+    expect(input).toHaveValue('alpha')
+    fireEvent.change(input, { target: { value: 'renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(
+      await screen.findByText('renamed', { selector: '.workspace-name' }),
+    ).toBeInTheDocument()
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
+        workspaces: [
+          expect.objectContaining({ id: 'ws-1', name: 'renamed' }),
+          expect.objectContaining({ id: 'ws-2', name: 'beta' }),
+        ],
+      }),
+    )
+  })
+
+  it("renders the active workspace's terminal tabs and adds one from the +", async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    // Each workspace renders its OWN tab bar (inside its panel view); a
+    // seeded config migrates to one terminal tab per workspace.
+    const ws1Tabs = within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')
+    expect(ws1Tabs).toHaveLength(1)
+    expect(ws1Tabs[0]).toHaveAttribute('aria-selected', 'true')
+    expect(within(screen.getByTestId('panel-ws-2')).getAllByRole('tab')).toHaveLength(1)
+
+    // The tab-bar + adds a TERMINAL TAB (not a workspace): a second surface
+    // mounts, the definitions persist with two tabs, and the sidebar still
+    // lists two workspaces.
+    fireEvent.click(
+      within(screen.getByTestId('panel-ws-1')).getByRole('button', {
+        name: /new terminal tab/i,
+      }),
+    )
+
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('panel-ws-1')).getAllByRole('tab'),
+      ).toHaveLength(2),
+    )
+    expect(screen.getAllByTestId('terminal-surface')).toHaveLength(3)
+    expect(document.querySelectorAll('.workspace-row')).toHaveLength(2)
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(
+        (c) => c[0] === 'save_workspaces',
+      )
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<{ id: string; tabs?: unknown[] }>
+      }
+      expect(last.workspaces.find((w) => w.id === 'ws-1')?.tabs).toHaveLength(2)
+    })
+  })
+
+  it('shows no tab bar when there are no workspaces', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
+  })
+
+  it('switches tabs: the active tab is selected and its panes visible', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    const panel = screen.getByTestId('panel-ws-1')
+    fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+    await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+
+    const [tab1, tab2] = within(panel).getAllByRole('tab')
+    const panes1 = within(panel).getAllByTestId(/^tab-panes-/)[0]
+    const panes2 = within(panel).getAllByTestId(/^tab-panes-/)[1]
+
+    // The new tab is active; the first tab's panes are hidden but MOUNTED
+    // (its shell survives the switch — the workspace contract, one level
+    // down).
+    expect(tab2).toHaveAttribute('aria-selected', 'true')
+    expect(panes1.className).toContain('is-hidden')
+    expect(panes2.className).not.toContain('is-hidden')
+
+    fireEvent.click(tab1)
+    expect(tab1).toHaveAttribute('aria-selected', 'true')
+    expect(panes1.className).not.toContain('is-hidden')
+    expect(panes2.className).toContain('is-hidden')
+  })
+
+  it('closes a tab from the ×; the last tab of a workspace is protected', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    const panel = screen.getByTestId('panel-ws-1')
+
+    // One terminal left: the × is disabled (closing it would empty the
+    // workspace — close the workspace instead).
+    const onlyClose = within(panel).getByRole('button', { name: /close tab 1/i })
+    expect(onlyClose).toBeDisabled()
+
+    // Add a second tab, then close the FIRST one: back to one tab, one
+    // surface, persisted.
+    fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+    await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+
+    fireEvent.click(within(panel).getByRole('button', { name: /close tab 1/i }))
+    await waitFor(() =>
+      expect(within(panel).getAllByRole('tab')).toHaveLength(1),
+    )
+    expect(within(panel).getAllByTestId('terminal-surface')).toHaveLength(1)
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(
+        (c) => c[0] === 'save_workspaces',
+      )
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<{ id: string; tabs?: unknown[] }>
+      }
+      expect(last.workspaces.find((w) => w.id === 'ws-1')?.tabs).toHaveLength(1)
+    })
+  })
+
+  // Adam's follow-up: tab RENAME (persisted) and tab PINNING (pinned tabs
+  // lead the bar). Assumptions encoded:
+  //  - Double-clicking a tab reveals an inline rename input (aria-label
+  //    "Rename tab"); Enter commits + persists `name` on the tab, Escape
+  //    cancels, an unnamed tab falls back to the positional "Tab N".
+  //  - Right-clicking a TAB opens a tab-scoped menu: Rename tab, Pin/Unpin
+  //    tab, the splits, Close tab — and NOT the workspace-list actions.
+  //  - Pinning reorders the workspace's tabs (pinned group first, pin glyph
+  //    on the tab) and persists `pinned: true`.
+  it('renames a tab via double-click and persists the name', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    const panel = screen.getByTestId('panel-ws-1')
+    fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+    await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+
+    const [tab1] = within(panel).getAllByRole('tab')
+    fireEvent.doubleClick(tab1)
+
+    const input = await within(panel).findByLabelText(/rename tab/i)
+    fireEvent.change(input, { target: { value: 'build' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    // The named label replaces the positional one; save persists it.
+    await waitFor(() =>
+      expect(within(panel).getByText('build', { selector: '.tab-name' })).toBeInTheDocument(),
+    )
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(
+        (c) => c[0] === 'save_workspaces',
+      )
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<{
+          id: string
+          tabs?: Array<{ name?: string }>
+        }>
+      }
+      const tabs = last.workspaces.find((w) => w.id === 'ws-1')?.tabs ?? []
+      expect(tabs.some((t) => t.name === 'build')).toBe(true)
+    })
+  })
+
+  it('Escape cancels the tab rename and persists nothing new', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    const panel = screen.getByTestId('panel-ws-1')
+    const [tab1] = within(panel).getAllByRole('tab')
+    fireEvent.doubleClick(tab1)
+
+    const input = await within(panel).findByLabelText(/rename tab/i)
+    fireEvent.change(input, { target: { value: 'draft' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+
+    expect(within(panel).queryByLabelText(/rename tab/i)).not.toBeInTheDocument()
+    expect(within(panel).getByText('Tab 1', { selector: '.tab-name' })).toBeInTheDocument()
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'save_workspaces',
+      expect.objectContaining({
+        workspaces: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'ws-1',
+            tabs: expect.arrayContaining([expect.objectContaining({ name: 'draft' })]),
+          }),
+        ]),
+      }),
+    )
+  })
+
+  it('offers tab actions on a tab right-click and pins the tab to the top', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('alpha', { selector: '.workspace-name' }),
+      ).toBeInTheDocument(),
+    )
+
+    const panel = screen.getByTestId('panel-ws-1')
+    fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+    await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+
+    // Right-click the SECOND tab: the menu is tab-scoped — no workspace-list
+    // actions.
+    const [, tab2] = within(panel).getAllByRole('tab')
+    fireEvent.contextMenu(tab2)
+
+    expect(await screen.findByRole('menuitem', { name: /^rename tab$/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /^pin tab$/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /split horizontal/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /^close tab$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /^new workspace$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /delete workspace/i })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: /^pin tab$/i }))
+
+    // The pinned tab now LEADS the bar with a pin glyph, and the flag
+    // persists.
+    await waitFor(() => {
+      const tabsNow = within(panel).getAllByRole('tab')
+      expect(tabsNow[0]).toBe(tab2)
+    })
+    expect(within(panel).getAllByRole('tab')[0].querySelector('.tab-pin')).not.toBeNull()
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(
+        (c) => c[0] === 'save_workspaces',
+      )
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<{ id: string; tabs?: Array<{ pinned?: boolean }> }>
+      }
+      const tabs = last.workspaces.find((w) => w.id === 'ws-1')?.tabs ?? []
+      expect(tabs[0].pinned).toBe(true)
+    })
+
+    // The menu label flips for a pinned tab.
+    fireEvent.contextMenu(within(panel).getAllByRole('tab')[0])
+    expect(
+      await screen.findByRole('menuitem', { name: /^unpin tab$/i }),
+    ).toBeInTheDocument()
+  })
+})

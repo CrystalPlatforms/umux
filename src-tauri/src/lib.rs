@@ -265,6 +265,15 @@ fn ssh_open(
     rows: Option<u16>,
     label: Option<String>,
 ) -> Result<u32, String> {
+    // v1.0 Phase 9 / #33: SSH panels are Linux/macOS-only until v2.0. On
+    // Windows the command answers with a clear, user-readable error instead
+    // of spawning a session that may misbehave — the panel surfaces the
+    // message (same path as any connection failure), never a hung blank
+    // surface. There is no SSH entry point in the UI to hide: targets come
+    // from hand-edited configs only.
+    if cfg!(windows) {
+        return Err("SSH panels are not supported on Windows yet — planned for v2.0. Remove the panel's sshTarget to make it local.".to_string());
+    }
     let parsed = parse_ssh_target(&target).map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let cols = cols.unwrap_or(80);
@@ -355,10 +364,10 @@ fn ssh_close(state: State<'_, Mutex<SshManager>>, id: u32) -> Result<(), String>
 ///    bundle (UNUserNotificationCenter-based plugins can't post from an
 ///    unbundled dev process, and osascript needs no permission dance), which
 ///    keeps the zero-cost policy intact.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 struct NativeNotifier;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl Notifier for NativeNotifier {
     fn show(&self, summary: &str, body: &str) {
         let result = std::process::Command::new("notify-send")
@@ -421,6 +430,58 @@ fn apple_notification_script(summary: &str, body: &str) -> String {
     )
 }
 
+/// The Windows notifier (v1.0 Phase 9 / #33): a native toast through the
+/// WinRT toast API driven by PowerShell — zero extra crates, the same
+/// shell-out pattern as notify-send (Linux) and osascript (macOS), keeping
+/// the zero-cost policy. ToastText02 renders one bold heading (summary) and
+/// one body line — the same two-line shape the other platforms show.
+#[cfg(target_os = "windows")]
+struct NativeNotifier;
+
+#[cfg(target_os = "windows")]
+impl Notifier for NativeNotifier {
+    fn show(&self, summary: &str, body: &str) {
+        let script = windows_toast_script(summary, body);
+        let result = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output();
+        match &result {
+            Ok(out) if out.status.success() => {
+                log::info!("[notify] dispatched: summary={summary:?} body={body:?}")
+            }
+            Ok(out) => log::error!(
+                "[notify] powershell exited {}: stderr={}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => log::error!("[notify] failed to spawn powershell.exe: {e}"),
+        }
+    }
+}
+
+/// Build the PowerShell statement that posts a ToastText02 toast with
+/// summary/body (Windows notifier). Text goes in through CreateTextNode —
+/// the XML DOM API escapes content itself — so the ONLY quoting layer is the
+/// PowerShell single-quoted literal (a literal ' doubles up). The script
+/// travels as ONE argv element (`-Command <script>`), never through a
+/// shell. Pure — same testability contract as apple_notification_script.
+#[cfg(target_os = "windows")]
+fn windows_toast_script(summary: &str, body: &str) -> String {
+    fn ps(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+    format!(
+        "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]> $null; \
+         $t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+         $x=$t.GetElementsByTagName('text'); \
+         $null=$x.Item(0).AppendChild($t.CreateTextNode({})); \
+         $null=$x.Item(1).AppendChild($t.CreateTextNode({})); \
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('umux').Show([Windows.UI.Notifications.ToastNotification]::new($t))",
+        ps(summary),
+        ps(body)
+    )
+}
+
 /// Pure: the macOS config directory under a given home directory
 /// (v1.0 Phase 8 / #32). `~/Library/Application Support/umux` — where a Mac
 /// app is expected to keep its state.
@@ -434,17 +495,30 @@ fn xdg_config_dir(home: &std::path::Path) -> PathBuf {
     home.join(".config").join("umux")
 }
 
+/// Pure: the Windows config directory under a given `%APPDATA%` value
+/// (v1.0 Phase 9 / #33) — `...\AppData\Roaming\umux`, where a Windows app is
+/// expected to keep its per-user state.
+fn windows_config_dir(appdata: &std::path::Path) -> PathBuf {
+    appdata.join("umux")
+}
+
 /// The per-user config directory shared by every umux config file.
-/// Platform-correct since v1.0 Phase 8 / #32:
+/// Platform-correct since v1.0 Phase 8 / #32 (macOS) and Phase 9 / #33
+/// (Windows):
 ///  - macOS: `$HOME/Library/Application Support/umux` (XDG vars are ignored
 ///    there — the Library path is where Mac users and backup tools look)
+///  - Windows: `%APPDATA%\umux` (Roaming — the per-user, roaming-profile
+///    location; umux never ran on Windows before, so there is no legacy
+///    directory to migrate and migrate_legacy_config no-ops)
 ///  - Linux and everything else: `$XDG_CONFIG_HOME/umux` or `~/.config/umux`
-///  - Windows (`%APPDATA%\umux`) is Phase 9 / #33 scope — until it lands the
-///    XDG branch is the fallback there too.
 fn config_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         std::env::var("HOME")
             .map(|h| macos_config_dir(std::path::Path::new(&h)))
+            .unwrap_or_else(|_| PathBuf::from("."))
+    } else if cfg!(windows) {
+        std::env::var("APPDATA")
+            .map(|a| windows_config_dir(std::path::Path::new(&a)))
             .unwrap_or_else(|_| PathBuf::from("."))
     } else {
         legacy_config_dir()
@@ -638,11 +712,17 @@ fn process_pty_chunk(
 /// Decide which shell binary to launch for a panel.
 ///
 /// An explicit override (from a future WorkspaceStore config) wins; otherwise
-/// we fall back to the user's `$SHELL`, then `/bin/sh` as a last resort.
+/// the default is per-OS (v1.0 Phase 9 / #33): Windows PowerShell on Windows
+/// (the in-box Windows PowerShell 5.1 — always present on Windows 10+, which
+/// pwsh is not), the user's `$SHELL` then `/bin/sh` on Linux/macOS.
 pub fn resolve_shell(shell: Option<&str>) -> String {
-    shell
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
+    if let Some(s) = shell {
+        return s.to_string();
+    }
+    if cfg!(windows) {
+        return "powershell.exe".to_string();
+    }
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
 /// Decide the working directory a new shell starts in (v0.2 Phase 5 / #29).
