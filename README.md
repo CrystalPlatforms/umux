@@ -12,13 +12,13 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 
 ## Features
 
-- **Workspaces** — create, rename, delete, close, and reorder named workspace collections. Each workspace typically maps to one project, and your setup **persists across restarts** (stored at `~/.config/umux/workspaces.json`, or `$XDG_CONFIG_HOME/umux/` when set).
+- **Workspaces** — create, rename, delete, close, and reorder named workspace collections. Each workspace typically maps to one project, and your setup **persists across restarts** (stored under the per-OS config directory — see [Configuration](#configuration)).
 - **Panels** — split a workspace's terminal into **as many resizable panels as you need** (drag the dividers). A sensible minimum size is enforced so no panel can collapse to nothing.
 - **Embedded terminal** — a real terminal surface (colors, cursor movement, alternate screen) so tools like `vim`, `htop`, and `fzf` render correctly. Each panel opens an interactive shell (your `$SHELL` by default).
 - **SSH panels** — open a panel connected to a remote machine over SSH, using your local agent and keys. Remote panels look and behave exactly like local ones.
 - **Completion notifications** — when an AI CLI tool signals that a long-running task is done, umux fires a native desktop notification. Notifications can be toggled on/off app-wide.
 - **Agent status** *(planned v0.2.0)* — each panel shows a live status indicator (working / waiting for you / idle), so you can see at a glance which AI agent needs attention.
-- **Settings & toggles** *(planned v0.2.0)* — turn optional features (agent status, notifications, analytics) on or off; your choices persist across restarts.
+- **Settings & toggles** *(planned v0.2.0)* — turn optional features (agent status, notifications) on or off; your choices persist across restarts.
 - **Session restore** *(planned v0.2.0)* — reopening umux brings back your workspaces, panels, layout, working directories, and shells.
 - **Keyboard-first** — switch workspaces, split/close panels, and more without leaving the keyboard.
 
@@ -256,7 +256,7 @@ umux is a two-process Tauri app. The **Rust backend** (`src-tauri/src/`) owns ev
 - **`osc_parser`** — a stateful byte-stream parser that recognizes completion sequences (across chunk boundaries) and passes all other bytes through untouched. Normal terminal output is **byte-identical** whether or not the parser is active.
 - **`ssh_manager`** — PTY-backed shells over SSH, reusing the same output-stream abstraction so local and remote panels are indistinguishable to the frontend.
 - **`notification_service`** — turns parsed OSC events into desktop notifications (debounced, mute-aware).
-- **`workspace_store`** — reads/writes workspace definitions to `~/.config/umux`; a corrupted config falls back to defaults rather than crashing.
+- **`workspace_store`** — reads/writes workspace definitions to the per-OS config directory; a corrupted config falls back to defaults rather than crashing.
 
 The **React + TypeScript frontend** (`src/`) renders the terminal and workspace UI and talks to the backend through Tauri commands and event channels.
 
@@ -270,10 +270,16 @@ Workspace definitions (names, order, panel layout, working directories, SSH targ
 Linux:   $XDG_CONFIG_HOME/umux/workspaces.json
          ~/.config/umux/workspaces.json   (default, when XDG_CONFIG_HOME is unset)
 Windows: %APPDATA%\umux\workspaces.json   (from v1.0.0)
-macOS:   ~/Library/Application Support/umux/workspaces.json   (from v1.0.0)
+macOS:   ~/Library/Application Support/umux/workspaces.json
 ```
 
+On macOS the config directory is `~/Library/Application Support/umux`; on first launch after the change, umux automatically moves `workspaces.json` and `settings.json` from the old `~/.config/umux` location, so nothing is lost.
+
 If the file is missing, umux starts fresh. If it is corrupt, umux falls back to default workspaces and shows a warning rather than failing to launch.
+
+### Privacy & analytics
+
+umux reports a **single anonymous event** — `app_open` at startup — to [Aptabase](https://aptabase.com), so development is guided by how many people actually installed and use the app (Aptabase counts unique users per event). **Nothing else is ever sent**: no terminal content, commands, workspace names, file paths, or any other user data — the one event carries no payload at all. There is no Settings switch for this (a deliberate product decision: the signal is only useful while always on); to opt out entirely, set `"analyticsEnabled": false` in `settings.json` (same directory as `workspaces.json`) — umux then never initializes the analytics SDK, so no network call is made.
 
 ---
 

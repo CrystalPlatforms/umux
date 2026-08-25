@@ -24,6 +24,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 portable-pty = "0.8"
+tauri-plugin-aptabase = "1.0.0"
 
 [dev-dependencies]
 tempfile = "3"

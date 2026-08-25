@@ -82,7 +82,7 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 41. As a developer, I want to turn the status indicators off in Settings, so that the UI stays minimal if I do not want them.
 
 ### Settings & Feature Toggles — v0.2.0
-42. As a user, I want a Settings screen with on/off switches for optional features (agent status, notifications, analytics), so that umux adapts to how I work.
+42. As a user, I want a Settings screen with on/off switches for optional features (agent status, notifications), so that umux adapts to how I work.
 43. As a user, I want my settings to persist across restarts, so that I do not reconfigure umux every launch.
 
 ### Session Restore — v0.2.0
@@ -93,7 +93,7 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 46. As a developer, I want closing a panel that has a running process to always ask for confirmation, and closing an idle panel to never ask, so that the behavior is predictable and I never lose agent work by accident.
 
 ### Privacy-friendly Analytics — v0.2.0
-47. As the maintainer, I want anonymized usage events via Aptabase (free tier, official Tauri SDK, users can opt out), so that real usage is measured instead of guessed from downloads.
+47. As the maintainer, I want a single anonymized event via Aptabase (app open only — install/usage counting; free tier, official Tauri SDK; no Settings switch — always on, with a kill-switch flag in settings.json for a full opt-out), so that real usage is measured instead of guessed from downloads.
 
 ---
 
@@ -138,7 +138,7 @@ umux is a single desktop application with its own embedded terminal surface, rat
 
 10. **SshConnectDialog** — UI for entering or selecting an SSH target and opening a remote panel.
 
-11. **SettingsScreen** — Settings UI with feature toggles (agent status, notifications, analytics), persisted through WorkspaceStore.
+11. **SettingsScreen** — Settings UI with feature toggles (agent status, notifications), persisted through WorkspaceStore.
 
 12. **AgentStatusIndicator** — Per-panel status indicator (working / waiting / idle) driven by OSC-derived events.
 

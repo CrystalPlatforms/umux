@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_service;
@@ -388,17 +389,81 @@ fn apple_notification_script(summary: &str, body: &str) -> String {
     )
 }
 
-/// The per-user config directory shared by every umux config file:
-/// `$XDG_CONFIG_HOME/umux` or `~/.config/umux` when XDG is unset.
-/// (A per-OS relocation — `~/Library/Application Support/umux` on macOS,
-/// `%APPDATA%\umux` on Windows — is v1.0 Phase 8/9 scope; both files move
-/// together when that lands.)
+/// Pure: the macOS config directory under a given home directory
+/// (v1.0 Phase 8 / #32). `~/Library/Application Support/umux` — where a Mac
+/// app is expected to keep its state.
+fn macos_config_dir(home: &std::path::Path) -> PathBuf {
+    home.join("Library").join("Application Support").join("umux")
+}
+
+/// Pure: the XDG (Linux) config directory under a given home directory —
+/// the unchanged v0.1 location.
+fn xdg_config_dir(home: &std::path::Path) -> PathBuf {
+    home.join(".config").join("umux")
+}
+
+/// The per-user config directory shared by every umux config file.
+/// Platform-correct since v1.0 Phase 8 / #32:
+///  - macOS: `$HOME/Library/Application Support/umux` (XDG vars are ignored
+///    there — the Library path is where Mac users and backup tools look)
+///  - Linux and everything else: `$XDG_CONFIG_HOME/umux` or `~/.config/umux`
+///  - Windows (`%APPDATA%\umux`) is Phase 9 / #33 scope — until it lands the
+///    XDG branch is the fallback there too.
 fn config_dir() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|_| PathBuf::from("."));
-    base.join("umux")
+    if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .map(|h| macos_config_dir(std::path::Path::new(&h)))
+            .unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        legacy_config_dir()
+    }
+}
+
+/// Where v0.1 wrote config on every platform — the pre-#32 config_dir. After
+/// #32 only macOS reads from a different place, so this is the migration
+/// SOURCE there; on Linux it is still config_dir() itself and migrating is
+/// a no-op.
+fn legacy_config_dir() -> PathBuf {
+    match std::env::var("XDG_CONFIG_HOME") {
+        Ok(xdg) if !xdg.is_empty() => PathBuf::from(xdg).join("umux"),
+        _ => std::env::var("HOME")
+            .map(|h| xdg_config_dir(std::path::Path::new(&h)))
+            .unwrap_or_else(|_| PathBuf::from(".")),
+    }
+}
+
+/// One-time config relocation for the macOS path change (v1.0 Phase 8 /
+/// #32): move the config files a v0.1 dev build left in `~/.config/umux`
+/// into the platform-correct directory, so an upgrading user keeps their
+/// workspaces and settings. Runs BEFORE anything reads config (the settings
+/// seed in run() is the first reader). Logged best-effort — at this point
+/// no logger is installed yet, so failures continue silently, which is the
+/// same guarantee as v0.1's fallback: worst case the user starts with
+/// defaults, never a crash.
+///
+/// Safety rails: only the two known file names move, nothing is ever
+/// overwritten (a file already at the destination leaves the source alone),
+/// and same-path calls (Linux) return immediately.
+fn migrate_legacy_config(new_dir: &std::path::Path, legacy_dir: &std::path::Path) {
+    if new_dir == legacy_dir {
+        return; // same location (Linux): nothing to relocate
+    }
+    for name in ["workspaces.json", "settings.json"] {
+        let from = legacy_dir.join(name);
+        let to = new_dir.join(name);
+        if !from.is_file() || to.exists() {
+            continue;
+        }
+        let result = std::fs::create_dir_all(new_dir).and_then(|_| std::fs::rename(&from, &to));
+        match result {
+            Ok(()) => log::info!(
+                "[config] migrated {name} from {} to {}",
+                legacy_dir.display(),
+                new_dir.display()
+            ),
+            Err(e) => log::warn!("[config] could not migrate {name}: {e} (continuing)"),
+        }
+    }
 }
 
 /// Where the workspace config file lives: `<config_dir>/workspaces.json`.
@@ -562,6 +627,24 @@ pub fn resolve_cwd(cwd: Option<&str>) -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // tauri-plugin-aptabase 1.0.0 starts its flush loop with a bare
+    // `tokio::spawn` from its setup hook, which needs an ambient Tokio
+    // context on the main thread — without this guard the app PANICS at
+    // startup before any window appears ("there is no reactor running").
+    // Tauri keeps a global Tokio runtime but never *enters* it on the main
+    // thread, so enter it here for the whole run(); the plugin's task then
+    // lives on the same runtime as everything else. The guard drops when
+    // run() returns (app exit).
+    let rt_handle = match tauri::async_runtime::handle() {
+        tauri::async_runtime::RuntimeHandle::Tokio(h) => h,
+    };
+    let _rt_guard = rt_handle.enter();
+
+    // v1.0 Phase 8 / #32: relocate config from the legacy location BEFORE
+    // anything reads it (the settings seed below is the first reader).
+    // No-op on Linux (same directory) and on a fresh Mac (nothing to move).
+    migrate_legacy_config(&config_dir(), &legacy_config_dir());
+
     // Seed the app-wide notification flag from the persisted settings (v0.2
     // Phase 3 / #27): the AtomicBool is the runtime gate every panel's
     // notification thread reads; settings.json is its persisted form, so a
@@ -569,8 +652,12 @@ pub fn run() {
     let settings_store = SettingsStore::new(settings_path());
     let initial_settings = settings_store.load();
     let mute: MuteFlag = Arc::new(AtomicBool::new(!initial_settings.notifications_enabled));
+    // v0.2 Phase 6 / #30: the analytics gate seeds from the same persisted
+    // settings, BEFORE the Tauri builder runs — when false, the plugin below
+    // is never registered, so the SDK makes no network call at all.
+    let analytics_enabled = initial_settings.analytics_enabled;
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Mutex::new(PtyService::new()))
         .manage(Mutex::new(SshManager::new()))
         .manage(WorkspaceStore::new(config_path()))
@@ -593,14 +680,36 @@ pub fn run() {
             notifications_muted,
             load_settings,
             save_settings,
-        ])
-        .setup(|app| {
+        ]);
+
+    // #30 AC2: "when off, the SDK is never initialized (no network call)" —
+    // this registration is the only place the plugin comes to life, and it
+    // happens only on an enabled startup decision. (The plugin flushes its
+    // queue on app exit by itself, so no exit hook is needed here.)
+    let builder = if analytics_enabled {
+        builder.plugin(analytics::aptabase_plugin())
+    } else {
+        builder
+    };
+
+    builder
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+            // v0.2 Phase 6 / #30 — the ONLY event umux reports: one
+            // aggregate app_open, so Aptabase can count installs/active
+            // users. Guarded by the same decision that registered the
+            // plugin (a true flag always implies the SDK exists above).
+            if analytics_enabled {
+                use tauri_plugin_aptabase::EventTracker;
+                if let Err(e) = app.handle().track_event(analytics::APP_OPEN_EVENT, None) {
+                    log::warn!("[analytics] track_event failed: {e}");
+                }
             }
             Ok(())
         })
@@ -855,5 +964,107 @@ mod tests {
         // dot — the completion event still travels to the renderer, so the
         // panel flips to needs-attention even with notifications silenced.
         assert_eq!(events.len(), 1, "completion signal still routed while muted");
+    }
+
+    // --- v1.0 Phase 8 / #32: per-OS config directory + migration ----------
+
+    // T-P1 (AC2 — macOS config lives under Application Support, not ~/.config):
+    //   Input:  home "/Users/adam"
+    //   Output: /Users/adam/Library/Application Support/umux — the path a Mac
+    //           app is expected to use, independent of XDG env vars.
+    #[test]
+    fn macos_config_dir_is_application_support() {
+        assert_eq!(
+            macos_config_dir(std::path::Path::new("/Users/adam")),
+            PathBuf::from("/Users/adam/Library/Application Support/umux")
+        );
+    }
+
+    // T-P2 (Linux unchanged — the XDG default shape survives the split):
+    //   Input:  home "/home/adam"
+    //   Output: /home/adam/.config/umux — exactly the v0.1 location.
+    #[test]
+    fn xdg_config_dir_is_dot_config() {
+        assert_eq!(
+            xdg_config_dir(std::path::Path::new("/home/adam")),
+            PathBuf::from("/home/adam/.config/umux")
+        );
+    }
+
+    // T-P3 (regression guard, #32 HITL: the first build shipped
+    //   legacy_config_dir with `~/.config/umux/umux` — xdg_config_dir already
+    //   carries the trailing "umux", and an extra join silently broke BOTH
+    //   the Linux config path and the macOS migration source). The helper
+    //   must carry exactly one umux segment; nothing may nest it deeper.
+    #[test]
+    fn xdg_config_dir_carries_exactly_one_umux_segment() {
+        let dir = xdg_config_dir(std::path::Path::new("/home/adam"));
+        assert!(dir.ends_with("umux"), "ends in the umux segment: {dir:?}");
+        assert!(
+            !dir.ends_with("umux/umux"),
+            "double-joined umux segment (the #32 regression): {dir:?}"
+        );
+    }
+
+    // T-M1 (an upgrading Mac user keeps their config):
+    //   Input:  legacy dir holding both config files, new dir absent.
+    //   Output: both files live in the new dir and are gone from the legacy
+    //           one — the move, not a copy.
+    #[test]
+    fn migrate_moves_both_files_into_new_dir() {
+        let legacy = tempfile::tempdir().unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("workspaces.json"), "{}").unwrap();
+        std::fs::write(legacy.path().join("settings.json"), "{}").unwrap();
+
+        migrate_legacy_config(fresh.path(), legacy.path());
+
+        assert!(fresh.path().join("workspaces.json").is_file());
+        assert!(fresh.path().join("settings.json").is_file());
+        assert!(!legacy.path().join("workspaces.json").exists());
+        assert!(!legacy.path().join("settings.json").exists());
+    }
+
+    // T-M2 (never overwrite — the user's existing config wins):
+    //   Input:  destination already has workspaces.json; legacy also has one.
+    //   Output: the destination file is untouched and the legacy file stays
+    //           put — a re-run of the migration can never clobber anything.
+    #[test]
+    fn migrate_never_overwrites_existing_destination() {
+        let legacy = tempfile::tempdir().unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("workspaces.json"), "legacy").unwrap();
+        std::fs::write(fresh.path().join("workspaces.json"), "current").unwrap();
+
+        migrate_legacy_config(fresh.path(), legacy.path());
+
+        assert_eq!(
+            std::fs::read_to_string(fresh.path().join("workspaces.json")).unwrap(),
+            "current",
+            "existing destination file is kept verbatim"
+        );
+        assert!(
+            legacy.path().join("workspaces.json").is_file(),
+            "legacy file is left in place rather than deleted"
+        );
+    }
+
+    // T-M3 (no-op cases — a fresh or Linux install must not even create dirs):
+    //   Input:  (a) same dir for both arguments (Linux), (b) no legacy files.
+    //   Output: nothing moves, nothing crashes, and the new directory is NOT
+    //           created when there was nothing to move — no empty-dir spam.
+    #[test]
+    fn migrate_is_noop_without_legacy_files_or_with_same_dir() {
+        let legacy = tempfile::tempdir().unwrap();
+        let untouched = tempfile::tempdir().unwrap();
+        let never_created = untouched.path().join("does-not-exist");
+
+        // No legacy files: silent no-op, destination untouched.
+        migrate_legacy_config(&never_created, legacy.path());
+        assert!(!never_created.exists(), "no empty dir created when nothing moved");
+
+        // Same path (Linux): returns before touching the filesystem.
+        migrate_legacy_config(legacy.path(), legacy.path());
+        assert!(legacy.path().is_dir(), "same-dir call left everything alone");
     }
 }
