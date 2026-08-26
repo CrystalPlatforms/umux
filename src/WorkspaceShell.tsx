@@ -620,6 +620,10 @@ export function WorkspaceShell() {
     if (cmd == null) return
     const activeId = state.activeId
     switch (cmd) {
+      case 'open-settings':
+        // Cmd+, (#39 follow-up): the macOS preferences convention.
+        setSettingsOpen(true)
+        break
       case 'new-workspace':
         persist(createWorkspace(state, defaultWorkspaceName(state)))
         break
@@ -1149,8 +1153,10 @@ export function WorkspaceShell() {
   }
 
   return (
-    <div className="shell">
-      {collapsed ? (
+    // is-sidebar-collapsed (#39 follow-up): carried on the shell so the tab
+    // bar can reserve room for the expand toggle seated before the tabs.
+    <div className={collapsed ? 'shell is-sidebar-collapsed' : 'shell'}>
+      {collapsed && (
         <button
           className="sidebar-expand"
           aria-label="Expand sidebar"
@@ -1159,14 +1165,19 @@ export function WorkspaceShell() {
         >
           <SidebarExpandIcon />
         </button>
-      ) : (
-        <aside
-          className="sidebar"
-          onContextMenu={(e) => openMenu(e, false)}
-          onMouseDown={(e) => {
-            if (isMenuPress(e)) openMenu(e, false)
-          }}
-        >
+      )}
+      {/* #39: the sidebar is ALWAYS mounted — collapsing animates its width to
+          zero (is-collapsed) instead of unmounting, so the slide is possible. */}
+      <aside
+        className={collapsed ? 'sidebar is-collapsed' : 'sidebar'}
+        onContextMenu={(e) => openMenu(e, false)}
+        onMouseDown={(e) => {
+          if (isMenuPress(e)) openMenu(e, false)
+        }}
+      >
+        {/* Fixed-width inner column (#39): the sidebar animates its width;
+            this wrapper holds 240px so contents never reflow mid-slide. */}
+        <div className="sidebar-inner">
           <div
             className="sidebar-header"
             onContextMenu={(e) => openMenu(e, true)}
@@ -1340,8 +1351,8 @@ export function WorkspaceShell() {
             <li className="empty-hint">No workspaces yet.</li>
           )}
         </ul>
-        </aside>
-      )}
+        </div>
+      </aside>
 
       <main className="main">
         {fallbackMessage && (

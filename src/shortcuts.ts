@@ -6,11 +6,12 @@
 // dispatches the command; everything else falls through to the terminal
 // untouched.
 //
-// Conflict avoidance (AC3): every shortcut requires BOTH Ctrl and Shift on a
-// letter, so plain Ctrl+letter combos the shell claims (Ctrl+C/D/Z/L/W on
-// some shells, ...) never match here and reach the PTY. Focus in a text
-// field (workspace rename / create) suppresses all shortcuts so typing names
-// does not trigger actions.
+// Conflict avoidance (AC3): every letter shortcut requires BOTH Ctrl and
+// Shift, so plain Ctrl+letter combos the shell claims (Ctrl+C/D/Z/L/W on
+// some shells, ...) never match here and reach the PTY. The one exception is
+// Cmd+, (open-settings): the macOS preferences convention, Meta-only. Focus
+// in a text field (workspace rename / create) suppresses all shortcuts so
+// typing names does not trigger actions.
 
 export type Command =
   | 'new-workspace'
@@ -20,6 +21,7 @@ export type Command =
   | 'split-horizontal'
   | 'split-vertical'
   | 'close-panel'
+  | 'open-settings'
 
 /// Shape of the keyboard event matchShortcut consumes. `activeTag` is the
 /// uppercased tagName of the focused element (or 'BODY' / null when nothing
@@ -54,6 +56,10 @@ const ARROWS: Record<string, Command> = {
 export function matchShortcut(e: ShortcutEvent): Command | null {
   // Typing a workspace name must never trigger a shortcut.
   if (e.activeTag === 'INPUT' || e.activeTag === 'TEXTAREA') return null
+  // Cmd+, opens Settings (#39 follow-up) — the macOS preferences convention.
+  // Meta ONLY: Ctrl+, and a plain comma stay free for the terminal.
+  if (e.key === ',' && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey)
+    return 'open-settings'
   // Ctrl+Shift is the required modifier pair; Alt/Meta combos are left alone.
   if (!(e.ctrlKey && e.shiftKey) || e.altKey || e.metaKey) return null
   return ARROWS[e.key] ?? TABLE[e.key.toLowerCase()] ?? null

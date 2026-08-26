@@ -326,26 +326,34 @@ describe('WorkspaceShell', () => {
     expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeInTheDocument()
   })
 
-  it('collapses the sidebar and expands it again from the corner toggle', async () => {
+  it('collapses the sidebar (stays mounted, is-collapsed) and expands it again from the corner toggle', async () => {
+    // #39 follow-up: collapsing ANIMATES the sidebar to zero width instead of
+    // unmounting it — the <aside> stays in the DOM wearing .is-collapsed, and
+    // CSS clips it away (overflow hidden + visibility).
     render(<WorkspaceShell />)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
 
-    // Sidebar is up: wordmark and the new-workspace action are visible.
+    // Sidebar is up: wordmark visible, no collapse marker.
     expect(screen.getByText('umux')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /new workspace/i })).toBeInTheDocument()
+    expect(document.querySelector('.sidebar')).not.toHaveClass('is-collapsed')
 
     fireEvent.click(screen.getByRole('button', { name: /collapse sidebar/i }))
 
-    // Collapsed: the sidebar contents are gone, only the expand toggle remains.
-    expect(screen.queryByText('umux')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /new workspace/i })).not.toBeInTheDocument()
+    // Collapsed: the aside REMAINS (animating shut) with the marker class;
+    // the shell carries the collapsed marker too (it reserves room for the
+    // expand toggle in the tab bar); the floating toggle appears alongside.
+    expect(document.querySelector('.sidebar')).toBeInTheDocument()
+    expect(document.querySelector('.sidebar')).toHaveClass('is-collapsed')
+    expect(document.querySelector('.shell')).toHaveClass('is-sidebar-collapsed')
     expect(screen.getByRole('button', { name: /expand sidebar/i })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /expand sidebar/i }))
 
     // Back to expanded.
+    expect(document.querySelector('.sidebar')).not.toHaveClass('is-collapsed')
+    expect(document.querySelector('.shell')).not.toHaveClass('is-sidebar-collapsed')
+    expect(screen.queryByRole('button', { name: /expand sidebar/i })).toBeNull()
     expect(screen.getByText('umux')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /new workspace/i })).toBeInTheDocument()
   })
 
   // --- Phase 7 / Issue #8: close, reopen, delete, reorder -------------------
@@ -690,6 +698,21 @@ describe('WorkspaceShell', () => {
         return Promise.resolve(undefined)
       })
     }
+
+    // #39 follow-up — Cmd+, opens Settings (the macOS preferences
+    // convention), from anywhere: no workspace needed, no focus requirement.
+    it('opens the Settings dialog on Cmd+, (Meta+Comma)', async () => {
+      seedOne()
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+      expect(screen.queryByRole('dialog', { name: /settings/i })).toBeNull()
+      fireEvent.keyDown(window, { key: ',', metaKey: true })
+
+      expect(
+        await screen.findByRole('dialog', { name: /settings/i }),
+      ).toBeInTheDocument()
+    })
 
     // Helper: wait for mount, split horizontally, return the two surface
     // wrappers (the .surface divs that carry data-panel-id).

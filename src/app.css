@@ -38,6 +38,25 @@
   --radius: 8px;
   --radius-sm: 5px;
 
+  /* Press feedback (#39): button-like controls compress to this scale on
+     :active; reduced motion sets it to 1 (no movement, color feedback only). */
+  --press-scale: 0.97;
+
+  /* Uniform control sizes (#39 follow-up): one token per control kind, so
+     same-looking controls can never drift to different sizes. */
+  --control-size: 26px; /* standard icon buttons (chrome controls) */
+  --control-height: 30px; /* text buttons */
+  --close-size: 20px; /* compact × affordances (tab / panel close) */
+
+  /* One chrome band (#39 follow-up): the sidebar header and the tab bar share
+     this row height, so their bottom separators sit at the same y — reading
+     as a single continuous line across the window. */
+  --chrome-row: 50px;
+
+  /* Display-size tracking (#39): large text wants negative letter-spacing;
+     body/small sizes stay at the default (near 0). */
+  --tracking-display: -0.02em;
+
   /* Typography scale — every font-size in the UI comes from here. */
   --text-xs: 12px;
   --text-sm: 13px;
@@ -82,11 +101,36 @@ body {
 
 .sidebar {
   width: 240px;
-  flex: 0 0 240px;
-  display: flex;
-  flex-direction: column;
+  flex: 0 0 auto;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-soft);
+  /* Collapse/expand (#39): the sidebar slides shut (width animation); the
+     contents are clipped, never reflowed. */
+  overflow: hidden;
+  transition: width 0.25s ease, border-color 0.25s ease;
+}
+
+/* Collapsed (#39): visibility flips at the END of the slide (0s .25s delay)
+   so the contents stay readable while it shuts, and returns INSTANTLY on
+   expand — the base rule carries no visibility transition. Once hidden, the
+   sidebar also leaves the a11y tree and tab order. */
+.sidebar.is-collapsed {
+  width: 0;
+  border-right-color: transparent;
+  visibility: hidden;
+  transition:
+    width 0.25s ease,
+    border-color 0.25s ease,
+    visibility 0s linear 0.25s;
+}
+
+/* Fixed-width inner column: the sidebar's WIDTH animates, but this column
+   holds 240px so text and rows never reflow mid-slide. */
+.sidebar-inner {
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+  height: 100%;
 }
 
 /* ---- Sidebar header ------------------------------------------------------ */
@@ -95,7 +139,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 14px 10px;
+  height: var(--chrome-row);
+  padding: 0 14px;
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -118,14 +163,16 @@ body {
 
 .sidebar-expand {
   position: absolute;
-  top: 10px;
-  left: 10px;
+  /* Seated in the chrome band (#39 follow-up): vertically centered on the
+     tab row, at the bar's left padding — derived from the shared tokens. */
+  top: calc((var(--chrome-row) - var(--control-size)) / 2);
+  left: 8px;
   z-index: 50;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: var(--control-size);
+  height: var(--control-size);
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
@@ -133,7 +180,11 @@ body {
   color: var(--on-accent);
   cursor: pointer;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
-  transition: filter 0.12s ease;
+  transition: filter 0.12s ease, transform 0.1s ease-out;
+}
+
+.sidebar-expand:active {
+  transform: scale(var(--press-scale));
 }
 
 .sidebar-expand:hover {
@@ -151,15 +202,15 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: var(--control-size);
+  height: var(--control-size);
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.1s ease-out;
 }
 
 .icon-btn:hover {
@@ -169,6 +220,7 @@ body {
 
 .icon-btn:active {
   background: var(--bg-sidebar-active);
+  transform: scale(var(--press-scale));
 }
 
 .icon-btn svg {
@@ -182,15 +234,15 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: var(--control-size);
+  height: var(--control-size);
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.1s ease-out;
 }
 
 .mute-button:hover {
@@ -200,6 +252,7 @@ body {
 
 .mute-button:active {
   background: var(--bg-sidebar-active);
+  transform: scale(var(--press-scale));
 }
 
 .mute-button svg {
@@ -244,7 +297,7 @@ body {
 }
 
 .btn-primary {
-  height: 30px;
+  height: var(--control-height);
   padding: 0 12px;
   border: none;
   border-radius: var(--radius-sm);
@@ -253,7 +306,11 @@ body {
   font-weight: 600;
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: filter 0.12s ease;
+  transition: filter 0.12s ease, transform 0.1s ease-out;
+}
+
+.btn-primary:active {
+  transform: scale(var(--press-scale));
 }
 
 .btn-primary:hover {
@@ -292,6 +349,10 @@ body {
 .workspace-row:hover {
   background: var(--bg-sidebar-hover);
   color: var(--text);
+}
+
+.workspace-row:active {
+  background: var(--bg-sidebar-active);
 }
 
 .workspace-row.is-active {
@@ -369,17 +430,28 @@ body {
 
 .tab-bar {
   display: flex;
-  align-items: stretch;
+  /* Tabs rest ON the separator line (folder shape); the extra band height
+     becomes breathing room above them (#39 follow-up). */
+  align-items: flex-end;
   gap: 2px;
   flex: 0 0 auto;
-  padding: 6px 8px 0;
+  height: var(--chrome-row);
+  padding: 0 8px;
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-soft);
   overflow-x: auto;
+  transition: padding-left 0.25s ease;
   /* Tab titles are UI chrome, not document text: never selectable, so a
      right-click (menu) or double-click (rename) never highlights them. */
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* Collapsed sidebar (#39 follow-up): the expand toggle sits in the tab row,
+   BEFORE the tabs — the bar reserves room so the first tab starts after it,
+   never underneath the toggle. */
+.shell.is-sidebar-collapsed .tab-bar {
+  padding-left: 46px; /* 8 (bar padding) + 26 (toggle) + 12 (gap) */
 }
 
 .tab {
@@ -404,6 +476,10 @@ body {
   color: var(--text);
 }
 
+.tab:active {
+  background: var(--bg-sidebar-active);
+}
+
 .tab.is-active {
   background: var(--bg-sidebar-active);
   border-color: var(--border-soft);
@@ -423,8 +499,8 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: var(--close-size);
+  height: var(--close-size);
   padding: 0;
   border: none;
   border-radius: 4px;
@@ -437,6 +513,10 @@ body {
 .tab-close:hover {
   background: rgba(0, 0, 0, 0.45);
   color: var(--text);
+}
+
+.tab-close:active {
+  background: rgba(0, 0, 0, 0.65);
 }
 
 .tab-close:disabled {
@@ -455,8 +535,11 @@ body {
 }
 
 .tab-add {
-  align-self: center;
+  /* Centered against the tabs (which sit at the bar's bottom edge), not
+     against the taller band (#39 follow-up). */
+  align-self: flex-end;
   margin-left: 2px;
+  margin-bottom: 2px;
 }
 
 /* Pin glyph on a pinned terminal tab (#37 follow-up) — sits before the
@@ -516,6 +599,7 @@ body {
   margin: 0;
   font-size: var(--text-xl);
   font-weight: 600;
+  letter-spacing: var(--tracking-display);
   color: var(--text);
 }
 
@@ -595,8 +679,8 @@ body {
   position: absolute;
   top: 4px;
   right: 4px;
-  width: 20px;
-  height: 20px;
+  width: var(--close-size);
+  height: var(--close-size);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -607,6 +691,11 @@ body {
   color: var(--text-faint);
   cursor: pointer;
   z-index: 2;
+  transition: transform 0.1s ease-out;
+}
+
+.panel-close:active {
+  transform: scale(var(--press-scale));
 }
 
 .panel-close:hover {
@@ -640,6 +729,21 @@ body {
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   font-size: var(--text-sm);
   user-select: none;
+  /* Enter anchored at the click point (#39): the menu grows out of the
+     gesture that summoned it, not from its own center. */
+  transform-origin: top left;
+  animation: menu-enter 0.15s ease-out;
+}
+
+@keyframes menu-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .menu-item {
@@ -660,6 +764,10 @@ body {
 
 .menu-item:hover {
   background: var(--bg-sidebar-hover);
+}
+
+.menu-item:active {
+  background: var(--bg-sidebar-active);
 }
 
 .menu-item:disabled {
@@ -713,14 +821,18 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: var(--control-size);
+  height: var(--control-size);
   padding: 0;
   background: transparent;
   border: none;
   color: var(--text-dim);
   cursor: pointer;
   border-radius: var(--radius-sm);
+  transition: transform 0.1s ease-out;
+}
+.fallback-dismiss:active {
+  transform: scale(var(--press-scale));
 }
 .fallback-dismiss:hover {
   background: var(--bg-sidebar-hover);
@@ -814,6 +926,40 @@ body {
   }
 }
 
+/* Reduced motion (#39): the working dot stops pulsing but stays lit in its
+   working color — status without movement. Press compression collapses to
+   the identity scale (no movement); color/background feedback is untouched. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --press-scale: 1;
+  }
+
+  .agent-status--working .agent-dot {
+    animation: none;
+  }
+
+  .context-menu {
+    animation: none;
+  }
+
+  .modal-overlay {
+    animation: none;
+  }
+
+  .modal-card {
+    animation: none;
+  }
+
+  .sidebar,
+  .sidebar.is-collapsed {
+    transition: none;
+  }
+
+  .tab-bar {
+    transition: none;
+  }
+}
+
 /* ---- Settings + confirm dialogs (v0.2 Phase 3 / #27, Phase 4 / #28) ------ */
 
 .modal-overlay {
@@ -824,6 +970,29 @@ body {
   align-items: center;
   justify-content: center;
   background: rgba(6, 8, 12, 0.62);
+  animation: overlay-enter 0.18s ease-out;
+}
+
+/* The dialog materializes in place (#39): scrim fades, card scales up from
+   slightly smaller — a surface arriving, not blinking in. */
+@keyframes overlay-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .modal-card {
@@ -834,6 +1003,7 @@ body {
   border-radius: var(--radius);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
   font-size: var(--text-md);
+  animation: card-enter 0.18s ease-out;
 }
 
 .modal-card__header {
@@ -939,7 +1109,7 @@ body {
 
 /* Confirm-dialog buttons (v0.2 Phase 4 / #28) — siblings of .btn-primary. */
 .btn-secondary {
-  height: 30px;
+  height: var(--control-height);
   padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -947,7 +1117,11 @@ body {
   color: var(--text);
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background 0.12s ease, transform 0.1s ease-out;
+}
+
+.btn-secondary:active {
+  transform: scale(var(--press-scale));
 }
 
 .btn-secondary:hover {
@@ -955,7 +1129,7 @@ body {
 }
 
 .btn-danger {
-  height: 30px;
+  height: var(--control-height);
   padding: 0 12px;
   border: 1px solid var(--danger-line);
   border-radius: var(--radius-sm);
@@ -964,7 +1138,11 @@ body {
   font-weight: 600;
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: filter 0.12s ease;
+  transition: filter 0.12s ease, transform 0.1s ease-out;
+}
+
+.btn-danger:active {
+  transform: scale(var(--press-scale));
 }
 
 .btn-danger:hover {

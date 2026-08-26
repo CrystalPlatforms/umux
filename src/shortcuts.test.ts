@@ -83,4 +83,22 @@ describe('matchShortcut', () => {
   it('returns null for an unrecognized Ctrl+Shift key', () => {
     expect(matchShortcut(ev('x', { ctrlKey: true, shiftKey: true }))).toBeNull()
   })
+
+  // --- Settings shortcut (#39 follow-up): Cmd+, opens Settings (macOS) -----
+
+  it('maps Cmd+, (Meta+Comma) to open-settings', () => {
+    expect(matchShortcut(ev(',', { metaKey: true }))).toBe('open-settings')
+  })
+
+  it('does not claim Ctrl+, / plain comma / other Cmd combos', () => {
+    // Ctrl+, stays free for the terminal; a bare comma is typing.
+    expect(matchShortcut(ev(',', { ctrlKey: true }))).toBeNull()
+    expect(matchShortcut(ev(','))).toBeNull()
+    // Meta with anything else keeps falling through.
+    expect(matchShortcut(ev('n', { metaKey: true }))).toBeNull()
+  })
+
+  it('returns null for Cmd+, while editing text', () => {
+    expect(matchShortcut(ev(',', { metaKey: true, activeTag: 'INPUT' }))).toBeNull()
+  })
 })
