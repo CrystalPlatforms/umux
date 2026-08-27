@@ -310,6 +310,6 @@ ready-to-post X/Twitter launch thread in English, and a dev.to article draft tel
 
 - [ ] Release v1.0.0 published with all five artifacts from CI
 - [ ] Landing page serves the v1.0.0 downloads
-- [ ] Adam has the promotion kit (checklist + X thread draft + dev.to draft) in hand
-- [ ] Baseline metrics recorded (stars, downloads, Aptabase active usage)
+- [x] Adam has the promotion kit (checklist + X thread draft + dev.to draft) in hand
+- [x] Baseline metrics recorded (stars, downloads, Aptabase active usage)
 - [ ] HITL: Adam posts the launch thread and the dev.to article goes live

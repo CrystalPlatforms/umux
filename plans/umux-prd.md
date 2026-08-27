@@ -4,7 +4,7 @@
 **Type:** Open-source desktop application
 **Platform:** Linux (Ubuntu/Wayland) + Windows + macOS
 **Stack:** Tauri v2 (Rust backend) + React + TypeScript (frontend)
-**Status:** v0.2.0 shipped; v1.0.0 in progress — see Roadmap
+**Status:** v1.0.1 shipped 2026-08-27 (the v1.0.0 milestone content; landing page #35 in progress) — see Roadmap
 
 ---
 
