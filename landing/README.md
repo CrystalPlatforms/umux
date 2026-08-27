@@ -12,20 +12,22 @@ cd landing && python3 -m http.server 8080
 Otwórz http://localhost:8080. Zobaczysz placeholder „real file pending"
 zamiast GIF-a/screenshotów — normalne, dopóki nie wrzucisz plików (niżej).
 
-## 2. Wrzuć swoje materiały (tylko kopiowanie plików!)
+## 2. Materiały graficzne (już na stronie)
 
-Wrzuć pliki do `landing/assets/` **pod tymi dokładnie nazwami** — HTML nie
-wymaga wtedy żadnych zmian (placeholders znikną same):
+Media żyją w `landing/assets/` — kopie plików z `public-assets/` pod tymi
+samymi nazwami. **Podmiana = skopiowanie nowego pliku pod tą samą nazwą**
+(HTML bez zmian):
 
-| Plik | Co wrzucasz |
+| Plik | Gdzie się pokazuje |
 |---|---|
-| `assets/demo.gif` | demo GIF 20–30 s (cel: ≤ 8 MB) |
-| `assets/screenshot-linux.png` | zrzut z Linuxa (Wayland) |
-| `assets/screenshot-macos.png` | zrzut z macOS |
-| `assets/screenshot-windows.png` | zrzut z Windows |
+| `assets/umux-first.png` | duży obraz w hero (główne okno: workspaces, taby, panele) |
+| `assets/umux-agent.png` | karta „Agent status & notifications" |
+| `assets/umux-session.png` | karta „Session restore" |
+| `assets/umux-logo.png` | logo w nagłówku |
+| `assets/umux-favicon.ico` | ikona karty przeglądarki |
 
-Już wrzucone: `assets/umux-logo.png` (nagłówek) i `assets/umux-favicon.ico`
-(ikona karty przeglądarki) — skopiowane z `public-assets/` 2026-08-27.
+Jeśli obrazek nie istnieje, w jego miejscu pojawia się ładny placeholder
+(mechanizm `onerror`) — nigdy „rozbity" obrazek.
 
 **Zachowania interaktywne** (mały skrypt inline, zero zewnętrznych bibliotek):
 - „Download for Linux" rozwija listę plików; po wybraniu formatu wyskakuje
@@ -53,14 +55,18 @@ Jeśli GIF wyjdzie cięższy niż 8 MB: `ffmpeg -i demo.gif -vf "fps=12,scale=12
 
 Kolejne commity do `main` publikują stronę automatycznie (nic nie robiś).
 
-## 4. Statystyki GoatCounter (opcjonalne)
+## 4. Statystyki GoatCounter (AKTYWNE — kod `crystalstudio`)
 
-1. Załóż darmowe konto na https://goatcounter.com (do 100 tys. wejść/mies.).
-2. Dodaj stronę `umux.pages.dev` — dostaniesz **kod witryny** (słowo przed `.goatcounter.com`).
-3. W `landing/index.html`, tuż nad `</body>`, odkomentuj blok `<!-- GoatCounter … -->`
-   i podmień `YOUR-SITE-CODE` na swój kod. Zapis, commit — strona zaktualizuje się sama.
+Skrypt licznika jest już wpisany w `landing/index.html` (nad `</body>`) i
+aktywny od 2026-08-27. Panel statystyk: **https://crystalstudio.goatcounter.com**.
 
-Bez tego kroku strona w ogóle nie wysyła żadnych danych (zero skryptów, zero cookies).
+Do zrobienia w panelu (jednorazowo):
+1. **Settings → Data collection → domains**: wpisz `umux.pages.dev`
+   (a po podpięciu domeny — też ją), żeby nie liczyły się wejścia z localhost.
+2. Test: otwórz stronę, wróć do panelu — pierwsze wejście widać w ~1 min.
+
+Uwagi: zero cookies (bez banerów RODO); osoby z adblockiem nie są liczone;
+darmowy plan wymaga niekomercyjnego użytku (do 100 tys. wejść/mies.).
 
 ## 5. Nowa wersja aplikacji = podmiana numeru
 
@@ -83,7 +89,7 @@ Test Ci przypomni, jeśli któraś nazwa się rozjedzie z tym, co produkuje CI
 
 ## 6. Checklist HITL (przed publikacją promocji)
 
-- [ ] Materiały wrzucone do `assets/` (GIF + 3 screenshoty)
+- [ ] Materiały na stronie (hero + 2 karty z obrazkami — gotowe 2026-08-27)
 - [ ] Strona zdeployowana na `umux.pages.dev`
 - [ ] Otwórz stronę **na telefonie**: hero widać bez scrollowania, docelowo
       **2 tapy** prowadzą do pobierania (tap „Download for…" → potwierdzenie)

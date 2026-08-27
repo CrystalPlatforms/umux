@@ -23,7 +23,7 @@
       font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    .top, .hero, .screens, .features, .first-run, footer {
+    .top, .hero, .features, .first-run, footer {
       max-width: 1080px;
       margin: 0 auto;
       padding: 0 20px;
@@ -109,7 +109,7 @@
     }
     .dropdown .menu a:hover { background: var(--bg); }
     .demo-frame { margin: 36px auto 0; max-width: 900px; }
-    .demo-frame img, .screens img {
+    .demo-frame img {
       display: block;
       width: 100%;
       max-width: 100%;
@@ -117,9 +117,17 @@
       border-radius: 12px;
       background: var(--surface);
     }
-    .screens { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding-top: 40px; }
     .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding-top: 48px; }
     .feature { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .feature-img {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 12px;
+      background: var(--bg);
+    }
     .feature h2 { font-size: 1.05rem; margin-bottom: 8px; color: var(--accent); }
     .feature p { color: var(--muted); font-size: 0.95rem; }
     .first-run { padding-top: 48px; padding-bottom: 24px; }
@@ -165,7 +173,7 @@
     dialog#after-download a { color: var(--accent); }
     dialog#after-download form { margin-top: 18px; text-align: right; }
     @media (max-width: 720px) {
-      .screens, .features { grid-template-columns: 1fr; }
+      .features { grid-template-columns: 1fr; }
       .hero { padding-top: 32px; }
     }
   </style>
@@ -206,19 +214,10 @@
     </div>
 
     <figure class="demo-frame">
-      <img src="assets/demo.gif" alt="umux in motion — workspaces, tabs and resizable panels"
+      <img src="assets/umux-first.png" alt="umux — workspaces, tabs and resizable panels"
            onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
-      <figcaption class="visually-hidden">umux demo</figcaption>
+      <figcaption class="visually-hidden">umux main window — workspaces, tabs and panels</figcaption>
     </figure>
-  </section>
-
-  <section class="screens">
-    <img src="assets/screenshot-linux.png" alt="umux on Linux (Wayland)"
-         onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
-    <img src="assets/screenshot-macos.png" alt="umux on macOS"
-         onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
-    <img src="assets/screenshot-windows.png" alt="umux on Windows"
-         onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
   </section>
 
   <section class="features">
@@ -227,10 +226,14 @@
       <p>One workspace per project, tabs inside it, and any tab splits into as many resizable panels as you need — with a minimum size enforced so nothing collapses. Workspaces persist across restarts and can be pinned to stay on top.</p>
     </div>
     <div class="feature">
+      <img class="feature-img" loading="lazy" src="assets/umux-agent.png" alt="Agent status indicators in umux panels"
+           onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
       <h2>Agent status &amp; notifications</h2>
       <p>umux reads the standard OSC completion signals emitted by AI CLIs (Claude Code, Codex, Gemini CLI, Aider…) and fires a native desktop notification when a long-running task finishes. Each panel shows a live agent status — working, needs-attention, idle — detected from escape sequences and process names, never from your terminal content.</p>
     </div>
     <div class="feature">
+      <img class="feature-img" loading="lazy" src="assets/umux-session.png" alt="Restored umux session with workspaces and panels"
+           onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
       <h2>Session restore</h2>
       <p>Close the app, come back tomorrow: your workspaces, tabs and panel layouts are restored exactly as you left them.</p>
     </div>
@@ -301,12 +304,9 @@
     })();
   </script>
 
-  <!-- Cookie-free page stats (GoatCounter, free up to 100k views/month).
-       To activate: create an account at https://goatcounter.com, note your
-       site code (the part before .goatcounter.com), replace YOUR-SITE-CODE
-       below with it, and remove this comment block. See landing/README.md.
-  <script data-goatcounter="https://YOUR-SITE-CODE.goatcounter.com/count"
+  <!-- Cookie-free page stats (GoatCounter, free tier: non-commercial use,
+       up to 100k views/month). Account: crystalstudio.goatcounter.com -->
+  <script data-goatcounter="https://crystalstudio.goatcounter.com/count"
           async src="https://gc.zgo.at/count.v1.js"></script>
-  -->
 </body>
 </html>

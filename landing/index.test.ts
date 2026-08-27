@@ -21,8 +21,8 @@ import { JSDOM } from "jsdom";
 //    assert the endpoint shape, not the current numbers.
 //  - Media (demo GIF, screenshots) live under landing/assets/ and ship with
 //    an inline-SVG onerror fallback until real files are dropped in.
-//  - GoatCounter ships as a commented-out snippet (needs Adam's account
-//    code); the page itself loads zero external scripts.
+//  - GoatCounter is ACTIVE (account `crystalstudio`, 2026-08-27) and is the
+//    page's single external script; the UI logic itself stays inline.
 //  - Boundary: intentionally NOT tested — the real Cloudflare deployment
 //    (HITL by Adam), visual appearance, shields.io uptime, and whether the
 //    actual GIF/screenshots exist yet.
@@ -187,28 +187,39 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         }
     });
 
-    it("embeds the demo GIF and screenshots with a graceful placeholder", () => {
-        // Media live under landing/assets/ with fixed names so Adam only ever
-        // copies files in — no HTML edits. Until then, every media element
-        // must degrade to an inline SVG placeholder, never a broken image.
+    it("shows the real product screenshots with a placeholder fallback", () => {
+        // Adam's shots (2026-08-27): umux-first is the big hero image,
+        // umux-agent illustrates the agent-status feature, umux-session the
+        // session-restore one. All live in landing/assets/ under the same
+        // names as public-assets/. A broken image must still degrade to the
+        // inline placeholder, never a broken-icon.
         const doc = parse();
-        const media = [...doc.querySelectorAll("img")].filter((img) =>
-            /assets\/(demo\.gif|screenshot-.+\.png)$/.test(img.getAttribute("src") ?? ""),
-        );
-        const srcs = media.map((img) => img.getAttribute("src"));
-        expect(srcs, "hero demo GIF missing").toContain("assets/demo.gif");
-        for (const platform of ["linux", "macos", "windows"]) {
-            expect(
-                srcs,
-                `screenshot for ${platform} missing`,
-            ).toContain(`assets/screenshot-${platform}.png`);
-        }
+        const hero = doc.querySelector(".demo-frame img");
+        expect(hero?.getAttribute("src")).toBe("assets/umux-first.png");
+
+        const features = [...doc.querySelectorAll(".feature")];
+        const byHeading = (re: RegExp) =>
+            features.find((f) => re.test(f.querySelector("h2")?.textContent ?? ""));
+        expect(
+            byHeading(/agent status/i)?.querySelector("img")?.getAttribute("src"),
+        ).toBe("assets/umux-agent.png");
+        expect(
+            byHeading(/session restore/i)?.querySelector("img")?.getAttribute("src"),
+        ).toBe("assets/umux-session.png");
+
+        const media = [
+            hero,
+            byHeading(/agent status/i)?.querySelector("img"),
+            byHeading(/session restore/i)?.querySelector("img"),
+        ];
         for (const img of media) {
             expect(
-                img.getAttribute("onerror"),
-                `${img.getAttribute("src")} must fall back to the inline placeholder`,
+                img?.getAttribute("onerror"),
+                `${img?.getAttribute("src")} must fall back to the inline placeholder`,
             ).toContain("data:image/svg+xml");
         }
+        // The per-OS screenshot strip is gone — no stale references left.
+        expect(html).not.toMatch(/demo\.gif|screenshot-(linux|macos|windows)\.png/);
     });
 
     it("leads with the one-line pitch and the three v1 feature highlights", () => {
@@ -242,16 +253,19 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         );
     });
 
-    it("loads zero external scripts; GoatCounter ships opt-in", () => {
-        // "Loads fast" AC: nothing is fetched from the network to run the
-        // page — no script may carry a src (the dropdown/dialog UI logic is
-        // one small inline script). Stats stay cookie-free AND off by
-        // default: the GoatCounter snippet ships commented out and is
-        // activated only once Adam's account code is filled in.
+    it("loads exactly one external script: the active GoatCounter counter", () => {
+        // "Loads fast" AC: the page's own UI (dropdown, dialogs) is one small
+        // inline script — the ONLY external script allowed is the GoatCounter
+        // counter, activated 2026-08-27 with Adam's site code `crystalstudio`
+        // (free tier: non-commercial, cookie-free, no consent banner needed).
         const doc = parse();
-        expect(doc.querySelectorAll("script[src]")).toHaveLength(0);
-        expect(html, "commented-out GoatCounter snippet missing").toMatch(
-            /<!--[\s\S]*gc\.zgo\.at[\s\S]*-->/,
+        const external = [...doc.querySelectorAll("script[src]")];
+        expect(external).toHaveLength(1);
+        const counter = external[0];
+        expect(counter.getAttribute("src")).toBe("https://gc.zgo.at/count.v1.js");
+        expect(counter.getAttribute("async"), "counter must not block page load").not.toBeNull();
+        expect(counter.getAttribute("data-goatcounter")).toBe(
+            "https://crystalstudio.goatcounter.com/count",
         );
     });
 
