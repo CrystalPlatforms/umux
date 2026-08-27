@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>umux — terminal workspaces for Linux, Windows & macOS</title>
+  <meta name="description" content="umux is an open-source terminal workspace manager: group terminals into workspaces, split them into panels, and get a desktop notification when your AI CLI finishes a task.">
+  <link rel="icon" href="assets/umux-favicon.ico">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #2a313c;
+      --text: #e6edf3;
+      --muted: #8a929c;
+      --accent: #34d399;
+      --accent-ink: #06281c;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .top, .hero, .screens, .features, .first-run, footer {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 20px;
+    }
+    .header-actions { display: flex; gap: 8px; }
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--muted);
+    }
+    .icon-btn:hover { color: var(--text); }
+    .icon-btn svg { width: 20px; height: 20px; }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 1.25rem;
+      text-decoration: none;
+    }
+    .brand img { height: 28px; width: auto; }
+    .hero { text-align: center; padding-top: 48px; padding-bottom: 24px; }
+    h1 { font-size: clamp(1.8rem, 5vw, 3rem); line-height: 1.15; letter-spacing: -0.02em; }
+    .pitch { color: var(--muted); font-size: 1.1rem; max-width: 42rem; margin: 16px auto 0; }
+    .badges { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
+    .downloads { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 10px 20px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .btn-ghost { background: transparent; font-weight: 400; color: var(--muted); }
+    summary.btn { list-style: none; cursor: pointer; }
+    summary.btn::-webkit-details-marker { display: none; }
+    .dropdown { position: relative; }
+    .dropdown .menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      min-width: 230px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    .dropdown[open] .menu { display: grid; }
+    .dropdown .menu a {
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.95rem;
+      padding: 10px 12px;
+      border-radius: 8px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+    }
+    .dropdown .menu a:hover { background: var(--bg); }
+    .demo-frame { margin: 36px auto 0; max-width: 900px; }
+    .demo-frame img, .screens img {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .screens { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding-top: 40px; }
+    .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding-top: 48px; }
+    .feature { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .feature h2 { font-size: 1.05rem; margin-bottom: 8px; color: var(--accent); }
+    .feature p { color: var(--muted); font-size: 0.95rem; }
+    .first-run { padding-top: 48px; padding-bottom: 24px; }
+    .first-run h2 { font-size: 1.05rem; margin-bottom: 8px; }
+    .first-run p, .first-run li { color: var(--muted); font-size: 0.95rem; }
+    .first-run ul { padding-left: 20px; display: grid; gap: 4px; }
+    .first-run a, footer a { color: var(--accent); text-decoration: none; }
+    footer { text-align: center; color: var(--muted); font-size: 0.9rem; padding-top: 24px; padding-bottom: 40px; }
+    .visually-hidden {
+      position: absolute;
+      width: 1px; height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+    }
+    dialog#after-download {
+      /* margin: auto restores the UA centering wiped by the `* { margin: 0 }`
+         reset below — without it the dialog sticks to the corner. */
+      margin: auto;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 32px 36px;
+      width: min(680px, calc(100% - 40px));
+      max-height: 85vh;
+      overflow-y: auto;
+    }
+    dialog#after-download::backdrop { background: rgba(4, 8, 12, 0.65); }
+    dialog#after-download h2 { font-size: 1.3rem; margin-bottom: 12px; }
+    dialog#after-download p { color: var(--muted); font-size: 1rem; }
+    dialog#after-download code {
+      display: block;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 10px;
+      font-size: 0.85rem;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    dialog#after-download a { color: var(--accent); }
+    dialog#after-download form { margin-top: 18px; text-align: right; }
+    @media (max-width: 720px) {
+      .screens, .features { grid-template-columns: 1fr; }
+      .hero { padding-top: 32px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="https://github.com/CrystalPlatforms/umux"><img src="assets/umux-logo.png" alt="umux logo">umux</a>
+    <div class="header-actions">
+      <a class="icon-btn" href="https://github.com/CrystalPlatforms/umux" aria-label="umux on GitHub" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+      <a class="icon-btn" href="https://crystal-studio.dev" aria-label="Crystal Studio website" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <section class="hero">
+    <h1>Terminal workspaces for Linux, Windows &amp; macOS</h1>
+    <p class="pitch">Group your terminals into named workspaces, split them into as many resizable panels as you need, and get a desktop notification the moment your AI CLI finishes a long-running task.</p>
+    <div class="badges">
+      <img src="https://img.shields.io/github/v/release/CrystalPlatforms/umux?label=release" alt="Latest release" height="20">
+      <img src="https://img.shields.io/github/license/CrystalPlatforms/umux" alt="License: MIT" height="20">
+      <img src="https://img.shields.io/github/downloads/CrystalPlatforms/umux/total" alt="Total downloads" height="20">
+    </div>
+    <div class="downloads">
+      <a class="btn btn-primary" data-platform="macos" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_universal.dmg">Download for macOS</a>
+      <a class="btn btn-primary" data-platform="windows" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_x64-setup.exe">Download for Windows</a>
+      <details class="dropdown">
+        <summary class="btn btn-primary">Download for Linux</summary>
+        <div class="menu">
+          <a data-install="AppImage" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_amd64.AppImage">.AppImage — any distro</a>
+          <a data-install=".deb" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_amd64.deb">.deb — Ubuntu / Debian</a>
+          <a data-install=".rpm" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux-1.0.2-1.x86_64.rpm">.rpm — Fedora / openSUSE</a>
+        </div>
+      </details>
+      <a class="btn btn-ghost" href="https://github.com/CrystalPlatforms/umux/releases/latest">All releases</a>
+    </div>
+
+    <figure class="demo-frame">
+      <img src="assets/demo.gif" alt="umux in motion — workspaces, tabs and resizable panels"
+           onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+      <figcaption class="visually-hidden">umux demo</figcaption>
+    </figure>
+  </section>
+
+  <section class="screens">
+    <img src="assets/screenshot-linux.png" alt="umux on Linux (Wayland)"
+         onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+    <img src="assets/screenshot-macos.png" alt="umux on macOS"
+         onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+    <img src="assets/screenshot-windows.png" alt="umux on Windows"
+         onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+  </section>
+
+  <section class="features">
+    <div class="feature">
+      <h2>Workspaces &amp; panels</h2>
+      <p>One workspace per project, tabs inside it, and any tab splits into as many resizable panels as you need — with a minimum size enforced so nothing collapses. Workspaces persist across restarts and can be pinned to stay on top.</p>
+    </div>
+    <div class="feature">
+      <h2>Agent status &amp; notifications</h2>
+      <p>umux reads the standard OSC completion signals emitted by AI CLIs (Claude Code, Codex, Gemini CLI, Aider…) and fires a native desktop notification when a long-running task finishes. Each panel shows a live agent status — working, needs-attention, idle — detected from escape sequences and process names, never from your terminal content.</p>
+    </div>
+    <div class="feature">
+      <h2>Session restore</h2>
+      <p>Close the app, come back tomorrow: your workspaces, tabs and panel layouts are restored exactly as you left them.</p>
+    </div>
+  </section>
+
+  <section class="first-run">
+    <h2>First run — unsigned builds</h2>
+    <p>umux is free &amp; open source and ships without a paid code-signing certificate, so your system may ask for confirmation once:</p>
+    <ul>
+      <li><strong>macOS:</strong> right-click the app → <em>Open</em>, or System Settings → Privacy &amp; Security → <em>Open Anyway</em>.</li>
+      <li><strong>Windows:</strong> on the SmartScreen prompt choose <em>More info</em> → <em>Run anyway</em>.</li>
+      <li><strong>Linux:</strong> AppImage needs <code>chmod +x</code> once; .deb/.rpm install normally.</li>
+    </ul>
+    <p><a href="https://github.com/CrystalPlatforms/umux#installation">Full installation instructions →</a></p>
+  </section>
+
+  <footer>
+    <p><a href="https://github.com/CrystalPlatforms/umux">github.com/CrystalPlatforms/umux</a> · MIT License · built with Tauri, React &amp; xterm.js</p>
+  </footer>
+
+  <dialog id="after-download">
+    <h2 id="dlg-title"></h2>
+    <div id="dlg-body"></div>
+    <form method="dialog"><button class="btn">Close</button></form>
+  </dialog>
+
+  <script>
+    (function () {
+      var dlg = document.getElementById("after-download");
+      var title = document.getElementById("dlg-title");
+      var body = document.getElementById("dlg-body");
+      function openDialog(t, html) {
+        title.textContent = t;
+        body.innerHTML = html;
+        try {
+          if (typeof dlg.showModal === "function") { dlg.showModal(); return; }
+        } catch (e) { /* fall through to the plain open attribute */ }
+        dlg.setAttribute("open", "");
+      }
+      var thanks =
+        "<p>Your download has started. We wish you'll have many productive sessions in umux, " +
+        "hope you'll become a regular. 😃</p>" +
+        '<p><a href="https://github.com/CrystalPlatforms/umux#installation" target="_blank" rel="noopener">Installation &amp; first-run notes →</a></p>';
+      var install = {
+        "AppImage":
+          "<p>No install needed — make it executable and run:</p>" +
+          "<code>chmod +x umux_1.0.2_amd64.AppImage &amp;&amp; ./umux_1.0.2_amd64.AppImage</code>",
+        ".deb":
+          "<p>Install from the downloaded file:</p>" +
+          "<code>sudo apt install ./umux_1.0.2_amd64.deb</code>",
+        ".rpm":
+          "<p>Install from the downloaded file:</p>" +
+          "<code>sudo dnf install ./umux-1.0.2-1.x86_64.rpm</code> (openSUSE: <code>zypper in</code>)",
+      };
+      document.querySelectorAll("[data-platform]").forEach(function (a) {
+        a.addEventListener("click", function () {
+          openDialog("Thanks for downloading umux! 🎉", thanks);
+        });
+      });
+      document.querySelectorAll("[data-install]").forEach(function (a) {
+        a.addEventListener("click", function () {
+          var key = a.getAttribute("data-install");
+          var extra =
+            '<p>Full guide: <a href="https://github.com/CrystalPlatforms/umux#installation" target="_blank" rel="noopener">README → Installation</a></p>';
+          openDialog("Installing umux on Linux", (install[key] || "") + extra);
+        });
+      });
+    })();
+  </script>
+
+  <!-- Cookie-free page stats (GoatCounter, free up to 100k views/month).
+       To activate: create an account at https://goatcounter.com, note your
+       site code (the part before .goatcounter.com), replace YOUR-SITE-CODE
+       below with it, and remove this comment block. See landing/README.md.
+  <script data-goatcounter="https://YOUR-SITE-CODE.goatcounter.com/count"
+          async src="https://gc.zgo.at/count.v1.js"></script>
+  -->
+</body>
+</html>
