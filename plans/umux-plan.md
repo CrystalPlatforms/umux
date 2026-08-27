@@ -308,7 +308,7 @@ ready-to-post X/Twitter launch thread in English, and a dev.to article draft tel
 
 ### Acceptance criteria
 
-- [ ] Release v1.0.0 published with all five artifacts from CI
+- [x] Release published with all five artifacts from CI (shipped as v1.0.2, 2026-08-27 — AppImage, .deb, .rpm, universal .dmg, NSIS .exe + updater tarball, all three CI jobs green; v1.0.1 kept as Linux+macOS-only)
 - [ ] Landing page serves the v1.0.0 downloads
 - [x] Adam has the promotion kit (checklist + X thread draft + dev.to draft) in hand
 - [x] Baseline metrics recorded (stars, downloads, Aptabase active usage)
