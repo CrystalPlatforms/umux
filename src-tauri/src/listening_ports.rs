@@ -248,7 +248,7 @@ pub fn listening_sockets() -> Vec<(u16, u32)> {
 
 #[cfg(windows)]
 pub fn listening_sockets() -> Vec<(u16, u32)> {
-    run_tool("netstat", ["-ano", "-p", "tcp"])
+    run_tool("netstat", &["-ano", "-p", "tcp"])
         .map(|out| parse_netstat_listen(&out))
         .unwrap_or_default()
 }
@@ -263,7 +263,7 @@ pub fn parent_edges() -> Vec<(u32, u32)> {
 #[cfg(windows)]
 pub fn parent_edges() -> Vec<(u32, u32)> {
     const PS: &str = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation";
-    run_tool("powershell", ["-NoProfile", "-Command", PS])
+    run_tool("powershell", &["-NoProfile", "-Command", PS])
         .map(|out| parse_win_parents(&out))
         .unwrap_or_default()
 }
