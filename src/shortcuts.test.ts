@@ -19,7 +19,7 @@
 //    (that lives in WorkspaceShell and is verified manually).
 
 import { describe, it, expect } from 'vitest'
-import { matchShortcut, type ShortcutEvent } from './shortcuts'
+import { matchShortcut, activeTagOf, type ShortcutEvent } from './shortcuts'
 
 // Helper: build an event with only the bits that matter, defaulting to a
 // non-text focused element (the terminal surface / body).
@@ -50,6 +50,51 @@ describe('matchShortcut', () => {
     expect(matchShortcut(ev('h', cs))).toBe('split-horizontal')
     expect(matchShortcut(ev('v', cs))).toBe('split-vertical')
     expect(matchShortcut(ev('w', cs))).toBe('close-panel')
+  })
+
+  // --- Pane zoom (#40 / story 48): Ctrl+Shift+Z expands the focused panel --
+  // The letter Z was free in the table; plain Ctrl+Z stays with the shell.
+
+  it('maps Ctrl+Shift+Z to toggle-zoom', () => {
+    expect(matchShortcut(ev('z', { ctrlKey: true, shiftKey: true }))).toBe(
+      'toggle-zoom',
+    )
+  })
+
+  // #40 HITL follow-up: WebKit on macOS maps Ctrl+Shift+letter combos to
+  // text-input characters (e.g. ⌃⇧F reports key 'ƒ'), so the letter is also
+  // matched by the PHYSICAL key (`code`, e.g. 'KeyZ') — layout- and
+  // modifier-independent, the way VS Code does it.
+  it('matches the physical key when macOS reports an exotic key', () => {
+    const cs = { ctrlKey: true, shiftKey: true }
+    expect(matchShortcut(ev('ƒ', { ...cs, code: 'KeyZ' }))).toBe('toggle-zoom')
+    expect(matchShortcut(ev('≈', { ...cs, code: 'KeyN' }))).toBe('new-workspace')
+  })
+
+  it('an exotic key without a code still matches nothing', () => {
+    // The code fallback is a second chance, not a bypass: no modifiers, no
+    // match — and an exotic key alone never matches either.
+    expect(matchShortcut(ev('ƒ', { ctrlKey: true, shiftKey: true }))).toBeNull()
+    expect(matchShortcut(ev('z', { code: 'KeyZ' }))).toBeNull()
+    expect(
+      matchShortcut(ev('z', { ctrlKey: true, shiftKey: true, code: 'KeyX' })),
+    ).toBe('toggle-zoom') // the real `key` wins over a mismatched code
+  })
+
+  it('leaves plain Ctrl+Z (shell suspend) untouched', () => {
+    // Both modifiers are required (AC2): without Shift the combo belongs to
+    // the terminal — Ctrl+Z suspends the foreground job.
+    expect(matchShortcut(ev('z', { ctrlKey: true }))).toBeNull()
+    expect(matchShortcut(ev('Z', { ctrlKey: true }))).toBeNull()
+  })
+
+  it('does not claim Ctrl+Shift+Z with Alt or Meta held', () => {
+    expect(
+      matchShortcut(ev('z', { ctrlKey: true, shiftKey: true, altKey: true })),
+    ).toBeNull()
+    expect(
+      matchShortcut(ev('z', { ctrlKey: true, shiftKey: true, metaKey: true })),
+    ).toBeNull()
   })
 
   it('maps Ctrl+Shift+arrows to next/prev workspace', () => {
@@ -100,5 +145,24 @@ describe('matchShortcut', () => {
 
   it('returns null for Cmd+, while editing text', () => {
     expect(matchShortcut(ev(',', { metaKey: true, activeTag: 'INPUT' }))).toBeNull()
+  })
+})
+
+// #40 HITL follow-up: after clicking INTO a terminal, focus sits in xterm's
+// hidden helper textarea — a TEXTAREA in tag name only. Treating it like a
+// text field silenced every shortcut; it IS the terminal, so shortcuts must
+// stay live there.
+describe('activeTagOf', () => {
+  it("treats xterm's helper textarea as the terminal (no suppression)", () => {
+    const ta = document.createElement('textarea')
+    ta.className = 'xterm-helper-textarea'
+    expect(activeTagOf(ta)).toBeNull()
+  })
+
+  it('still suppresses real text fields and passes everything else through', () => {
+    expect(activeTagOf(document.createElement('input'))).toBe('INPUT')
+    expect(activeTagOf(document.createElement('textarea'))).toBe('TEXTAREA')
+    expect(activeTagOf(document.createElement('div'))).toBe('DIV')
+    expect(activeTagOf(null)).toBeNull()
   })
 })

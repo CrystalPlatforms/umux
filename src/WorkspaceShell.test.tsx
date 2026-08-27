@@ -815,6 +815,111 @@ describe('WorkspaceShell', () => {
     })
   })
 
+  // #40 / story 48 — pane zoom. The zoom button and Ctrl+Shift+Z toggle the
+  // SAME state: the focused panel expands to fill the tab (is-zoomed, full
+  // size), covered panels stay mounted but hidden (is-hidden — shells keep
+  // running), dividers disappear. Closing the zoomed panel exits zoom.
+  describe('pane zoom (#40)', () => {
+    // Seed one workspace and split it once: two panes, the second (new) one
+    // focused. Returns the two .surface wrappers (stable DOM nodes).
+    const seedSplit = async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        return Promise.resolve(undefined)
+      })
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
+      await screen.findAllByTestId('terminal-surface')
+      return container.querySelectorAll<HTMLElement>('[data-panel-id]')
+    }
+
+    const pressZoom = () =>
+      fireEvent.keyDown(window, {
+        key: 'z',
+        ctrlKey: true,
+        shiftKey: true,
+        altKey: false,
+        metaKey: false,
+      })
+
+    it('the zoom button expands the focused panel and hides the covered one', async () => {
+      const panes = await seedSplit()
+      expect(panes).toHaveLength(2)
+
+      // Each pane carries its own zoom button; zoom the ACTIVE one (the
+      // second — the new panel a split focuses).
+      const zoomButtons = screen.getAllByRole('button', { name: /zoom panel/i })
+      fireEvent.click(zoomButtons[1])
+
+      const zoomed = panes[1]
+      expect(zoomed.classList.contains('is-zoomed')).toBe(true)
+      // Fills the tab: percent sizing, not a carved rect.
+      expect(zoomed.style.width).toBe('100%')
+      expect(zoomed.style.height).toBe('100%')
+      // The covered pane stays in the DOM but hidden; no divider shows.
+      expect(panes[0].classList.contains('is-hidden')).toBe(true)
+      expect(screen.queryByRole('separator')).toBeNull()
+    })
+
+    it('the same button restores the previous layout', async () => {
+      const panes = await seedSplit()
+      fireEvent.click(screen.getAllByRole('button', { name: /zoom panel/i })[1])
+
+      // The zoomed pane's button now offers the reverse action.
+      fireEvent.click(screen.getByRole('button', { name: /unzoom panel/i }))
+
+      expect(panes[1].classList.contains('is-zoomed')).toBe(false)
+      expect(panes[0].classList.contains('is-hidden')).toBe(false)
+      expect(
+        screen.getByRole('separator', { name: /resize panels/i }),
+      ).toBeInTheDocument()
+    })
+
+    it('Ctrl+Shift+Z toggles the same state as the button', async () => {
+      const panes = await seedSplit()
+
+      pressZoom()
+      expect(panes[1].classList.contains('is-zoomed')).toBe(true)
+
+      pressZoom()
+      expect(panes[1].classList.contains('is-zoomed')).toBe(false)
+      expect(panes[0].classList.contains('is-hidden')).toBe(false)
+    })
+
+    it('keeps the covered surface mounted (same DOM node) while zoomed', async () => {
+      const panes = await seedSplit()
+
+      pressZoom()
+
+      // The covered pane is hidden, NOT unmounted — its shell keeps running.
+      expect(document.contains(panes[0])).toBe(true)
+    })
+
+    it('closing the zoomed panel exits zoom', async () => {
+      await seedSplit()
+      pressZoom()
+
+      // Ctrl+Shift+W closes the FOCUSED panel — which is the zoomed one.
+      fireEvent.keyDown(window, {
+        key: 'w',
+        ctrlKey: true,
+        shiftKey: true,
+        altKey: false,
+        metaKey: false,
+      })
+
+      expect(await screen.findAllByTestId('terminal-surface')).toHaveLength(1)
+      const survivor = document.querySelector<HTMLElement>('[data-panel-id]')
+      expect(survivor?.classList.contains('is-zoomed')).toBe(false)
+      expect(survivor?.classList.contains('is-hidden')).toBe(false)
+    })
+  })
+
   // Phase 16 / Issue #17 — SSH panel wiring.
   //
   // A workspace whose first configured panel carries an `sshTarget` must open

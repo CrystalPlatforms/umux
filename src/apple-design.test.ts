@@ -309,3 +309,36 @@ describe("apple-design: chrome band (app.css)", () => {
     expect(reduced).toMatch(/\.tab-bar\s*\{[^}]*transition:\s*none/);
   });
 });
+
+describe("apple-design: panel chrome (#40)", () => {
+  // The pane's top-right corner stacks: × (4px), zoom (next slot), then the
+  // agent-status chip — the chip used to sit ON the zoom button (HITL: the
+  // arrows were invisible), so its slot is asserted to reserve room for BOTH
+  // chrome buttons. The zoom button itself defines ONLY its position here:
+  // its looks come from .panel-close, so it can never drift from the ×.
+  const statusRule =
+    cssNoReduced.match(/\.surface \.agent-status\s*\{[^}]*\}/)?.[0] ?? null;
+  const zoomRule =
+    cssNoReduced.match(/\.panel-zoom\s*\{[^}]*\}/)?.[0] ?? null;
+
+  it("seats the agent-status chip left of BOTH chrome buttons", () => {
+    expect(statusRule).not.toBeNull();
+    // 4px margin + two full (button + 4px) slots after it.
+    expect(statusRule).toMatch(
+      /right:\s*calc\(4px \+ 2 \* \(var\(--close-size\) \+ 4px\)\)/,
+    );
+  });
+
+  it("styles the zoom button exactly like the close button (position only)", () => {
+    expect(zoomRule).not.toBeNull();
+    const declarations = zoomRule!
+      .replace(/^[^{]*\{/, "")
+      .replace(/\}$/, "")
+      .split(";")
+      .map((d) => d.trim())
+      .filter(Boolean);
+    expect(declarations).toEqual([
+      "right: calc(4px + var(--close-size) + 4px)",
+    ]);
+  });
+});

@@ -43,6 +43,8 @@ import {
   bootState,
   panelIdsOf,
   upsertPanelCwd,
+  toggleZoom,
+  zoomedPanelOf,
 } from './workspaces'
 import { leafIds, type LayoutNode } from './PaneLayout'
 
@@ -275,6 +277,140 @@ describe('workspace state', () => {
       const state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'tab-1', 'p-1'))
 
       expect(closePanel(state, 'nope', 'whatever')).toBe(state)
+    })
+  })
+
+  // --- Pane zoom (#40 / story 48) --------------------------------------------
+  //
+  // Zoom is a pure VIEW state: the focused panel of the ACTIVE tab expands to
+  // fill the tab area; the same toggle restores the exact previous layout.
+  // Assumptions encoded:
+  //  - Zoom state is keyed by TAB id in a runtime-only record (like
+  //    activeTabId/activePanelId — never persisted, empty after bootState).
+  //  - toggleZoom targets the FOCUSED panel of the active tab; an explicit
+  //    panelId (the UI button) zooms that panel instead.
+  //  - A tab with a single panel is a no-op (nothing to cover).
+  //  - The split tree is NEVER touched by zoom — restore is exact because
+  //    nothing was mutated.
+
+  describe('pane zoom', () => {
+    // A split workspace with stable ids: ws-1 / tab-1 hold p-1 | p-2, and the
+    // focused panel after the split is the NEW one (p-2).
+    function splitState(): ReturnType<typeof splitPanel> {
+      const gen = seq('ws-1', 'tab-1', 'p-1', 's-1', 'p-2')
+      const state = createWorkspace(emptyState, 'my-project', gen)
+      return splitPanel(state, 'ws-1', 'horizontal', gen)
+    }
+
+    it('zooms the focused panel of the active tab', () => {
+      const state = splitState()
+
+      const next = toggleZoom(state, 'ws-1')
+
+      expect(zoomedPanelOf(next, 'tab-1')).toBe('p-2')
+    })
+
+    it('zooms an explicitly given panel (the UI button path)', () => {
+      const state = splitState()
+
+      const next = toggleZoom(state, 'ws-1', 'p-1')
+
+      expect(zoomedPanelOf(next, 'tab-1')).toBe('p-1')
+    })
+
+    it('is a no-op on a tab with a single panel', () => {
+      const state = createWorkspace(emptyState, 'my-project', seq('ws-1', 'tab-1', 'p-1'))
+
+      expect(toggleZoom(state, 'ws-1')).toBe(state)
+      expect(toggleZoom(state, 'ws-1', 'p-1')).toBe(state)
+    })
+
+    it('is a no-op for an unknown workspace', () => {
+      const state = splitState()
+
+      expect(toggleZoom(state, 'nope')).toBe(state)
+    })
+
+    it('unzooms on the second toggle and leaves the layout tree untouched', () => {
+      const state = splitState()
+      const treeBefore = layoutOf(state)
+
+      const zoomed = toggleZoom(state, 'ws-1')
+      const restored = toggleZoom(zoomed, 'ws-1')
+
+      expect(zoomedPanelOf(restored, 'tab-1')).toBeNull()
+      // The split tree was never mutated — restore is EXACT (same object).
+      expect(layoutOf(restored)).toBe(treeBefore)
+      expect(restored.workspaces).toBe(state.workspaces)
+    })
+
+    it('keeps zoom per tab: another tab is not zoomed', () => {
+      // genId: tab-2 + its seed leaf p-3 for addTab, then switch focus back.
+      const gen = seq('ws-1', 'tab-1', 'p-1', 's-1', 'p-2', 'tab-2', 'p-3')
+      let state = createWorkspace(emptyState, 'my-project', gen)
+      state = splitPanel(state, 'ws-1', 'horizontal', gen)
+      state = toggleZoom(state, 'ws-1')
+      state = addTab(state, 'ws-1', gen)
+
+      // tab-2 is now active and NOT zoomed; tab-1 still is.
+      expect(zoomedPanelOf(state, 'tab-2')).toBeNull()
+      expect(zoomedPanelOf(state, 'tab-1')).toBe('p-2')
+    })
+
+    it('never reaches the persisted config (round-trip has no zoom keys)', () => {
+      const state = splitState()
+      const configBefore = JSON.stringify(state.workspaces)
+
+      const zoomed = toggleZoom(state, 'ws-1')
+
+      expect(JSON.stringify(zoomed.workspaces)).toBe(configBefore)
+      expect(JSON.stringify(zoomed)).not.toContain('"zoom"')
+    })
+
+    it('boots with no zoom: every tab renders its normal layout', () => {
+      const state = bootState([
+        { id: 'ws-1', name: 'a', panels: [], tabs: [{ id: 'tab-1', layout: { kind: 'leaf', id: 'p-1' }, name: 'Tab 1' }] },
+      ])
+
+      expect(state.zoomedPanelId).toEqual({})
+      expect(zoomedPanelOf(state, 'tab-1')).toBeNull()
+    })
+
+    it('exits zoom when the zoomed panel closes (siblings fill normally)', () => {
+      const state = splitState()
+      const zoomed = toggleZoom(state, 'ws-1')
+
+      const next = closePanel(zoomed, 'ws-1', 'p-2')
+
+      expect(zoomedPanelOf(next, 'tab-1')).toBeNull()
+      expect(layoutOf(next)).toEqual({ kind: 'leaf', id: 'p-1' })
+    })
+
+    it('keeps zoom when a covered panel closes', () => {
+      const state = splitState()
+      const zoomed = toggleZoom(state, 'ws-1')
+
+      const next = closePanel(zoomed, 'ws-1', 'p-1')
+
+      expect(zoomedPanelOf(next, 'tab-1')).toBe('p-2')
+      expect(layoutOf(next)).toEqual({ kind: 'leaf', id: 'p-2' })
+    })
+
+    it('drops the zoom record with the tab (closeTab) and its workspace (deleteWorkspace)', () => {
+      // Two tabs, the first one zoomed; gen yields tab-2 + p-3 for addTab.
+      const gen = seq('ws-1', 'tab-1', 'p-1', 's-1', 'p-2', 'tab-2', 'p-3')
+      let state = createWorkspace(emptyState, 'my-project', gen)
+      state = splitPanel(state, 'ws-1', 'horizontal', gen)
+      state = toggleZoom(state, 'ws-1')
+      state = addTab(state, 'ws-1', gen)
+
+      // Active tab is tab-2 now; close the ZOOMED tab-1 by id.
+      const closed = closeTab(state, 'ws-1', 'tab-1')
+      expect('tab-1' in closed.zoomedPanelId).toBe(false)
+
+      // And deleting the workspace clears its tabs' records too.
+      const deleted = deleteWorkspace(closed, 'ws-1')
+      expect(deleted.zoomedPanelId).toEqual({})
     })
   })
 
@@ -944,6 +1080,7 @@ describe('session snapshot metadata (#29)', () => {
       openIds: ['ws-1'],
       activeTabId: { 'ws-1': 't-1' },
       activePanelId: { 'ws-1': 'p-1' },
+      zoomedPanelId: {},
     }
   }
 
@@ -1038,6 +1175,7 @@ it('upsertPanelCwd with an unchanged cwd returns the same reference', () => {
     activeId: 'ws-1',
     openIds: ['ws-1'],
     activePanelId: { 'ws-1': 'p-1' },
+    zoomedPanelId: {},
   }
 
   expect(upsertPanelCwd(state, 'p-1', '/x')).toBe(state)

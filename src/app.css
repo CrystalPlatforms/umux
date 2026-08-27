@@ -708,6 +708,18 @@ body {
   height: 12px;
 }
 
+/* Per-panel zoom toggle (#40): the same chrome-button treatment as the close
+   button, seated to its LEFT. */
+.panel-zoom {
+  right: calc(4px + var(--close-size) + 4px);
+}
+
+/* Pane zoom overlay (#40): a covered pane stays MOUNTED (its shell keeps
+   running) but does not render — the same contract inactive tabs follow. */
+.surface.is-hidden {
+  display: none;
+}
+
 /* ---- Empty state --------------------------------------------------------- */
 
 .empty-hint {
@@ -876,12 +888,13 @@ body {
   height: 5px;
 }
 
-/* Inside a pane the chip floats at the top-right corner, just left of the
-   close button, on a scrim so it stays readable over terminal content. */
+/* Inside a pane the chip floats at the top-right corner, LEFT of both chrome
+   buttons (× then zoom — #40 HITL: at the old 30px it sat on the zoom button
+   and hid it), on a scrim so it stays readable over terminal content. */
 .surface .agent-status {
   position: absolute;
   top: 4px;
-  right: 30px;
+  right: calc(4px + 2 * (var(--close-size) + 4px));
   padding: 1px 6px;
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.55);

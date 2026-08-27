@@ -88,6 +88,11 @@ export type WorkspaceState = {
   // panel is treated as active (see activePanelOf). The renderer draws a ring
   // on the active panel so it is always obvious where keystrokes will go.
   activePanelId: Record<string, string>
+  // Runtime-only (NOT persisted): the zoomed panel id per TAB id (#40 / story
+  // 48). Absent entry = not zoomed. Zoom is a pure VIEW state — the split
+  // tree and the persisted config are never touched, and a restarted app
+  // boots with this record empty (every tab renders its normal layout).
+  zoomedPanelId: Record<string, string>
 }
 
 export const emptyState: WorkspaceState = {
@@ -96,6 +101,7 @@ export const emptyState: WorkspaceState = {
   openIds: [],
   activeTabId: {},
   activePanelId: {},
+  zoomedPanelId: {},
 }
 
 const defaultGenId = (): string => crypto.randomUUID()
@@ -150,6 +156,8 @@ export function bootState(
     activePanelId: Object.fromEntries(
       workspaces.map((w) => [w.id, w.tabs ? leafIds(w.tabs[0].layout)[0] : '']),
     ),
+    // Zoom never persists (#40): a restarted app always comes up unzoomed.
+    zoomedPanelId: {},
   }
 }
 
@@ -183,6 +191,8 @@ export function createWorkspace(
       ...state.activePanelId,
       [id]: leafIds(tab.layout)[0],
     },
+    // Runtime records of the existing workspaces ride along untouched.
+    zoomedPanelId: state.zoomedPanelId,
   }
 }
 
@@ -265,6 +275,9 @@ export function closeTab(
             [id]: leafIds(nextActiveTab.layout)[0],
           }
         : state.activePanelId,
+    // The tab's runtime records die with it (#40 zoom hygiene, same as the
+    // active-tab/panel records above).
+    zoomedPanelId: removeKey(state.zoomedPanelId, tabId),
   }
 }
 
@@ -402,12 +415,21 @@ export function deleteWorkspace(
   if (!state.workspaces.some((w) => w.id === id)) return state
   const nextActive =
     state.activeId === id ? pickReplacementActive(state, id) : state.activeId
+  // The workspace's tabs go with it — their zoom records must not outlive
+  // them (#40; same hygiene as the active-tab/panel records).
+  const dyingTabs = new Set(
+    state.workspaces.find((w) => w.id === id)?.tabs?.map((t) => t.id) ?? [],
+  )
+  const zoomedPanelId = Object.fromEntries(
+    Object.entries(state.zoomedPanelId).filter(([tid]) => !dyingTabs.has(tid)),
+  )
   return {
     workspaces: state.workspaces.filter((w) => w.id !== id),
     activeId: nextActive,
     openIds: state.openIds.filter((openId) => openId !== id),
     activeTabId: removeKey(state.activeTabId, id),
     activePanelId: removeKey(state.activePanelId, id),
+    zoomedPanelId,
   }
 }
 
@@ -667,6 +689,13 @@ export function closePanel(
     activePanelOf(state, id) === panelId
       ? { ...state.activePanelId, [id]: leafIds(next)[0] }
       : state.activePanelId
+  // Closing the ZOOMED panel exits zoom (#40): the zoom record dies with the
+  // panel it pointed at, and the surviving layout shows intact. A covered
+  // panel closing leaves the zoom untouched.
+  const zoomedPanelId =
+    state.zoomedPanelId[tab.id] === panelId
+      ? removeKey(state.zoomedPanelId, tab.id)
+      : state.zoomedPanelId
   return {
     ...state,
     workspaces: state.workspaces.map((w) =>
@@ -682,6 +711,7 @@ export function closePanel(
         : w,
     ),
     activePanelId,
+    zoomedPanelId,
   }
 }
 
@@ -714,4 +744,48 @@ export function activePanelOf(
   if (panels.length === 0) return null
   const focused = state.activePanelId[id]
   return focused != null && panels.includes(focused) ? focused : panels[0]
+}
+
+/// Toggle zoom for the ACTIVE TAB of workspace `id` (#40 / story 48): the
+/// focused panel — or the explicit `panelId`, the UI-button path — expands to
+/// fill the tab, and the same toggle restores the exact previous layout. Pure
+/// view state: only the runtime record moves; the split tree, the workspace
+/// definitions, and the persisted config are untouched, so restore is exact
+/// by construction. No-op for an unknown workspace, a panel that is not in
+/// the tab's tree, or a tab with a single panel (nothing to cover).
+export function toggleZoom(
+  state: WorkspaceState,
+  id: string,
+  panelId?: string,
+): WorkspaceState {
+  const tab = activeTabOf(state, id)
+  if (tab == null) return state
+  // Already zoomed: the same action restores the previous layout.
+  if (state.zoomedPanelId[tab.id] != null) {
+    return { ...state, zoomedPanelId: removeKey(state.zoomedPanelId, tab.id) }
+  }
+  const target = panelId ?? activePanelOf(state, id)
+  const leaves = leafIds(tab.layout)
+  if (target == null || !leaves.includes(target) || leaves.length < 2) {
+    return state
+  }
+  return {
+    ...state,
+    zoomedPanelId: { ...state.zoomedPanelId, [tab.id]: target },
+  }
+}
+
+/// The zoomed panel of tab `tabId`, validated against the tab's tree — a
+/// stale record (its panel is no longer a leaf) reads as NOT zoomed. Null
+/// for an unknown tab id or a tab that is not zoomed.
+export function zoomedPanelOf(
+  state: WorkspaceState,
+  tabId: string,
+): string | null {
+  const tab = state.workspaces
+    .flatMap((w) => w.tabs ?? [])
+    .find((t) => t.id === tabId)
+  if (tab == null) return null
+  const zoomed = state.zoomedPanelId[tabId]
+  return zoomed != null && leafIds(tab.layout).includes(zoomed) ? zoomed : null
 }

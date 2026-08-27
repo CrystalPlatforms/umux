@@ -42,12 +42,14 @@ import {
   bootState,
   panelIdsOf,
   upsertPanelCwd,
+  toggleZoom,
+  zoomedPanelOf,
   type Panel,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
 import { boxes, leafIds, type LayoutNode, type Orientation, type Container } from './PaneLayout'
-import { matchShortcut } from './shortcuts'
+import { matchShortcut, activeTagOf } from './shortcuts'
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
 import { AgentStatusMachine, type AgentStatus } from './agentStatus'
@@ -154,6 +156,30 @@ function SplitVerticalIcon({ className }: IconProps) {
   )
 }
 
+function ZoomIcon({ className }: IconProps) {
+  // Corners pulling apart — expand the pane to fill the tab (#40).
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M15 3h6v6" />
+      <path d="M9 21H3v-6" />
+      <path d="M21 3l-7 7" />
+      <path d="M3 21l7-7" />
+    </svg>
+  )
+}
+
+function UnzoomIcon({ className }: IconProps) {
+  // Corners folding back in — restore the previous layout (#40).
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 14h6v6" />
+      <path d="M20 10h-6V4" />
+      <path d="M14 10l7-7" />
+      <path d="M3 21l7-7" />
+    </svg>
+  )
+}
+
 function SettingsIcon({ className }: IconProps) {
   // Gear — opens the Settings screen (v0.2 Phase 3 / #27).
   return (
@@ -217,6 +243,11 @@ type PanelSurfacesProps = {
   // shape stored one entry for the workspace's only panel).
   firstLeafId: string
   panels: Panel[] | undefined
+  // Zoom view state (#40 / story 48): the tab's zoomed panel id, or null when
+  // the tab renders its normal layout. Pure overlay — the tree still feeds
+  // `boxes`; the zoomed pane just renders full-size over the hidden rest.
+  zoomedPanelId: string | null
+  onToggleZoom: (panelId: string) => void
   onResize: (splitId: string, ratio: number, container: Container) => void
   onResizeEnd: () => void
   onClose: (panelId: string) => void
@@ -242,7 +273,7 @@ type PanelSurfacesProps = {
   statusEnabled: boolean
 }
 
-function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, panels, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled }: PanelSurfacesProps) {
+function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, panels, zoomedPanelId, onToggleZoom, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled }: PanelSurfacesProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
 
@@ -312,12 +343,30 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
         // button — position names (left/right) stop working with N panels.
         const short = p.id.slice(0, 4)
         const meta = metaFor(p.id)
+        // Zoom overlay (#40): the zoomed pane renders percent-sized over the
+        // whole tab; covered panes stay MOUNTED but hidden (display:none —
+        // the same contract inactive tabs follow, so their shells and PTY
+        // streams keep running; the reveal re-fits via ResizeObserver).
+        const zoomed = zoomedPanelId === p.id
+        const covered = zoomedPanelId != null && !zoomed
+        const classes = [
+          'surface',
+          activePanelId === p.id ? 'is-active' : '',
+          zoomed ? 'is-zoomed' : '',
+          covered ? 'is-hidden' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
         return (
           <div
             key={p.id}
-            className={`surface ${activePanelId === p.id ? 'is-active' : ''}`}
+            className={classes}
             data-panel-id={p.id}
-            style={{ left: p.rect.x, top: p.rect.y, width: p.rect.width, height: p.rect.height }}
+            style={
+              zoomed
+                ? { left: 0, top: 0, width: '100%', height: '100%' }
+                : { left: p.rect.x, top: p.rect.y, width: p.rect.width, height: p.rect.height }
+            }
             onClick={() => onFocusPanel(p.id)}
           >
             <TerminalSurface
@@ -333,20 +382,26 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
             {statusEnabled && (
               <AgentStatusIndicator status={statuses[p.id] ?? 'idle'} />
             )}
+            <PanelZoomButton
+              zoomed={zoomed}
+              short={short}
+              onToggle={() => onToggleZoom(p.id)}
+            />
             <PanelCloseButton onClose={() => onClose(p.id)} short={short} />
           </div>
         )
       })}
-      {dividers.map((d) => (
-        <div
-          key={d.id}
-          className={`divider divider-${d.orientation}`}
-          style={{ left: d.rect.x, top: d.rect.y, width: d.rect.width, height: d.rect.height }}
-          role="separator"
-          aria-label="Resize panels"
-          onPointerDown={startDrag(d)}
-        />
-      ))}
+      {zoomedPanelId == null &&
+        dividers.map((d) => (
+          <div
+            key={d.id}
+            className={`divider divider-${d.orientation}`}
+            style={{ left: d.rect.x, top: d.rect.y, width: d.rect.width, height: d.rect.height }}
+            role="separator"
+            aria-label="Resize panels"
+            onPointerDown={startDrag(d)}
+          />
+        ))}
     </div>
   )
 }
@@ -365,6 +420,27 @@ function PanelCloseButton({ onClose, short }: PanelCloseButtonProps) {
       }}
     >
       <CloseIcon />
+    </button>
+  )
+}
+
+type PanelZoomButtonProps = { zoomed: boolean; short: string; onToggle: () => void }
+
+/// The per-pane zoom toggle (#40 / story 48): expands THIS panel to fill the
+/// tab and — zoomed — offers the reverse. Toggles the exact same state the
+/// Ctrl+Shift+Z shortcut does.
+function PanelZoomButton({ zoomed, short, onToggle }: PanelZoomButtonProps) {
+  return (
+    <button
+      className="panel-close panel-zoom"
+      aria-label={zoomed ? `Unzoom panel ${short}` : `Zoom panel ${short}`}
+      title={zoomed ? 'Unzoom panel' : 'Zoom panel'}
+      onClick={(e) => {
+        e.stopPropagation()
+        onToggle()
+      }}
+    >
+      {zoomed ? <UnzoomIcon /> : <ZoomIcon />}
     </button>
   )
 }
@@ -652,6 +728,11 @@ export function WorkspaceShell() {
         if (panel != null) requestClosePanel(activeId, panel)
         break
       }
+      case 'toggle-zoom':
+        // #40 / story 48: zoom is pure runtime view state — setState, NOT
+        // persist (no config write, nothing to save).
+        if (activeId != null) setState(toggleZoom(stateRef.current, activeId))
+        break
     }
   }
 
@@ -659,11 +740,14 @@ export function WorkspaceShell() {
     const onKey = (e: KeyboardEvent) => {
       const cmd = matchShortcut({
         key: e.key,
+        code: e.code,
         ctrlKey: e.ctrlKey,
         altKey: e.altKey,
         shiftKey: e.shiftKey,
         metaKey: e.metaKey,
-        activeTag: document.activeElement?.tagName ?? null,
+        // activeTagOf: xterm's helper textarea IS the terminal — shortcuts
+        // must keep working with focus inside a panel (#40 HITL).
+        activeTag: activeTagOf(document.activeElement),
       })
       if (cmd == null) return
       e.preventDefault()
@@ -846,6 +930,15 @@ export function WorkspaceShell() {
     if (activePanelOf(stateRef.current, id) !== panelId) {
       setState(focusPanel(stateRef.current, id, panelId))
     }
+  }
+
+  // Zoom a panel from its own chrome button (#40): the button zooms the panel
+  // it sits on, so focus lands there FIRST and the toggle names the panel
+  // explicitly (the shortcut path targets the focused panel instead). One
+  // composed update — focus then toggle — over the freshest state.
+  const toggleWorkspaceZoom = (id: string, panelId: string) => {
+    const focused = focusPanel(stateRef.current, id, panelId)
+    setState(toggleZoom(focused, id, panelId))
   }
 
   // --- Safe panel closing (v0.2 Phase 4 / #28) -----------------------------
@@ -1502,6 +1595,8 @@ export function WorkspaceShell() {
                           tab.id === activeTab?.id ? activePanelOf(state, ws.id) : null
                         }
                         firstLeafId={leafIds(tab.layout)[0] ?? ''}
+                        zoomedPanelId={zoomedPanelOf(state, tab.id)}
+                        onToggleZoom={(panelId) => toggleWorkspaceZoom(ws.id, panelId)}
                         // Session-restore toggle off (#27 HITL follow-up):
                         // strip the saved cwds so every shell starts in the
                         // default directory. sshTarget survives — a

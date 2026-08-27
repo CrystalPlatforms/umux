@@ -4,7 +4,7 @@
 **Type:** Open-source desktop application
 **Platform:** Linux (Ubuntu/Wayland) + Windows + macOS
 **Stack:** Tauri v2 (Rust backend) + React + TypeScript (frontend)
-**Status:** v0.1 shipped (Linux only); v0.2 and v1.0 planned — see Roadmap
+**Status:** v0.2.0 shipped; v1.0.0 in progress — see Roadmap
 
 ---
 
@@ -95,6 +95,29 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 ### Privacy-friendly Analytics — v0.2.0
 47. As the maintainer, I want a single anonymized event via Aptabase (app open only — install/usage counting; free tier, official Tauri SDK; no Settings switch — always on, with a kill-switch flag in settings.json for a full opt-out), so that real usage is measured instead of guessed from downloads.
 
+### Pane Zoom — v1.0.0
+48. As a developer, I want to zoom the focused panel to fill its tab and, with the same shortcut, return to the exact previous layout (other panels keep running untouched), so that I can read one agent's output closely without disturbing the rest.
+
+### Sidebar Metadata — v1.0.0
+49. As a developer, I want each tab row in the sidebar to show the git branch of that tab's working directory (read-only display), so that I always know which branch each terminal is on at a glance.
+50. As a developer, I want each tab to surface the ports its shells are listening on (shown in a hover tooltip, not permanently), so that I can find a dev server without hunting through panels.
+
+### Scriptability (CLI + Socket API) — v1.1
+51. As a developer, I want a `umux` CLI that ships with the app, so that I can drive umux from scripts, shells, and tool hooks.
+52. As a developer, I want `umux notify "text"` to raise a desktop notification, so that tools without OSC support (or explicit hooks) can alert me.
+53. As a developer, I want `umux list` / `umux status` to print workspaces, tabs, panels, and agent states as JSON, so that scripts and agents can inspect the current setup.
+54. As a developer, I want control commands (`umux new-workspace`, `umux new-tab`, `umux split`, `umux send`), so that external tooling can build and drive layouts.
+55. As an AI agent, I want the same surface exposed over a local socket API, so that I can orchestrate umux programmatically without parsing CLI text.
+
+*(Note: v1.1 ships the full surface — notify + inspect + control — from its first release. Requires the umux app to be running; headless/daemon operation remains v2.0.)*
+
+### Agent UX & Convenience — v1.2
+56. As a developer, I want a finished or waiting panel to carry a visible marker (ring around the panel, badge on its tab and workspace row) that clears only when I view that panel, so that I never hunt tab-by-tab for who finished.
+57. As a developer, I want a shortcut that jumps to the most recent unviewed finished/waiting panel, so that one keypress takes me where attention is needed.
+58. As a user, I want a command palette (Cmd/Ctrl+Shift+P) listing all app actions, so that I can reach any function without memorizing shortcuts.
+59. As a user, I want to view and rebind keyboard shortcuts in Settings, so that I can replace defaults I find awkward — without editing config files.
+60. As a developer running Claude Code teams, I want each teammate/subagent to open as its own native pane (via the v1.1 API), so that agent teams are visible and steerable instead of hidden background processes.
+
 ---
 
 ## Implementation Decisions
@@ -142,6 +165,8 @@ umux is a single desktop application with its own embedded terminal surface, rat
 
 12. **AgentStatusIndicator** — Per-panel status indicator (working / waiting / idle) driven by OSC-derived events.
 
+**Planned post-v1.0:** **CliGateway** *(planned v1.1, name TBD)* — local socket server + `umux` CLI binary exposing notify/inspect/control over the running app; same surface as the socket API. Detailed design at /carve time.
+
 ### Key data flows
 - **Keystrokes:** xterm.js → CommandBridge → `PtyService.write` → PTY.
 - **Output:** PTY → PtyService output stream → OscParser (inspect) → CommandBridge event → xterm.js; in parallel, OscParser notification events → NotificationService → desktop.
@@ -150,6 +175,7 @@ umux is a single desktop application with its own embedded terminal surface, rat
 ### Technology-specific constraints
 - Supported platforms: **Linux (developed and tested on Ubuntu/Wayland), Windows 10+, and macOS 11+** (universal binary: Apple Silicon + Intel). X11 sessions on Linux are not tested and not officially supported.
 - Completion detection relies on AI CLI tools emitting OSC 9;9 / OSC 99 / OSC 777 sequences (Claude Code needs `preferredNotifChannel: "iterm2"` — it emits them automatically only in Ghostty/Kitty/iTerm2; see README). No output pattern matching, ever. Clarified 2026-08-25: the per-panel status model MAY additionally detect an AI CLI's PRESENCE by reading the panel's foreground process name from the OS process table (a closed known-CLI list, never terminal content) — completion itself stays OSC-only.
+- Screen-content agent-state classification (herdr-style working/blocked/idle/done read from pane output) is explicitly rejected — agent state derives from OSC events and the known-CLI process-presence check only (decided 2026-08-26).
 - Builds are **unsigned** (no paid certificates, zero-cost policy). First-run warnings (macOS Gatekeeper, Windows SmartScreen) are documented in the README rather than paid away.
 - CI (GitHub Actions, on release publish) builds all three platforms: `.deb` + `.AppImage` (Linux), NSIS `-setup.exe` (Windows), universal `.dmg` (macOS).
 
@@ -176,20 +202,24 @@ Each user story above maps to one or more acceptance checks. Most are verified b
 ### Acceptance thresholds (per release)
 - **v0.1 (shipped):** Adam can, on his own Ubuntu (Wayland) machine: create workspaces, split into two resizable panels, run shells and an SSH session, receive a desktop notification when Claude Code finishes generating, and reopen the app with his workspaces intact.
 - **v0.2.0:** Adam can, on Ubuntu: split into 3+ panels, see accurate agent status indicators, toggle features in Settings, and reopen the app with his full layout, working directories, and shells restored; closing a busy panel always asks, closing an idle one never does.
-- **v1.0.0:** Adam can install and use umux on his Windows machine and his Mac (per-OS shell and config directory working, notifications firing); CI attaches `.exe`, `.dmg`, and Linux artifacts to the release; the landing page on Cloudflare Pages is live.
+- **v1.0.0:** Adam can install and use umux on his Windows machine and his Mac (per-OS shell and config directory working, notifications firing); CI attaches `.exe`, `.dmg`, and Linux artifacts to the release; the landing page on Cloudflare Pages is live; the focused panel zooms to fill the tab and back with one shortcut; tab rows show the branch and hovering shows listening ports.
+- **v1.1:** From a plain terminal, Adam can run `umux notify` and see a desktop notification, `umux list` prints workspaces/tabs/panels as JSON, and `umux new-tab`/`split`/`send` change the running app; a Claude Code hook wired to `umux notify` works.
+- **v1.2:** A finished agent's panel/tab shows a marker that clears only after Adam views it; one shortcut jumps to the most recent unread; the command palette opens; a shortcut can be rebound in Settings; a Claude Code teams session opens teammates as separate panes.
 
 ---
 
 ## Roadmap
 
-- **v0.2.0 — features (Linux first):** unlimited panels (PaneLayout rewritten for N panels), agent status per panel, Settings screen with feature toggles, session restore (layout/panels/working dirs/shells), consistent close confirmations, Aptabase analytics (opt-out).
-- **v1.0.0 — full cross-platform launch:** Windows (NSIS `.exe`) and macOS (universal `.dmg`) builds via GitHub Actions, per-OS shells and config directories, unsigned-first-run docs, landing page on Cloudflare Pages (`*.pages.dev`, zero cost), start of promotion (X/Twitter + dev.to, English; Adam produces the media himself, ≤1 h/week; YouTube deferred).
-- **v2.0 — later:** plugin system with a browsable marketplace, and an optional background server so sessions survive app close (full herdr-style persistence).
+- **v0.2.0 — features (Linux first):** unlimited panels (PaneLayout rewritten for N panels), agent status per panel, Settings screen with feature toggles, session restore (layout/panels/working dirs/shells), consistent close confirmations, Aptabase analytics (opt-out). *(shipped)*
+- **v1.0.0 — full cross-platform launch:** Windows (NSIS `.exe`) and macOS (universal `.dmg`) builds via GitHub Actions, per-OS shells and config directories, unsigned-first-run docs, landing page on Cloudflare Pages (`*.pages.dev`, zero cost); pane zoom; sidebar metadata (git branch on tab rows, listening ports as a hover tooltip). Promotion (Show HN, Reddit, X/Twitter, dev.to; English) starts only after the landing page is live, with marketing content produced using content skills (Adam, ≤1 h/week; YouTube deferred).
+- **v1.1 — scriptability:** complete `umux` CLI (notify, list/status, control) plus a local socket API exposing the same surface — full scope from the first release. Requires the app to be running (no daemon yet).
+- **v1.2 — agent UX & convenience:** unread markers (panel rings + tab/workspace badges, cleared on view) with a jump-to-unread shortcut, command palette, GUI shortcut editor in Settings, teammates/subagents as native panes (built on the v1.1 API).
+- **v2.0 — later:** plugin system with a browsable marketplace, an optional background server so sessions survive app close (full herdr-style persistence), and a built-in scriptable browser pane.
 
 ## Out of Scope
 
-- Browser integration of any kind.
-- Git integration (status, diffs, commits, etc.) inside the application.
+- Browser integration before v2.0 (a scriptable browser pane is planned for v2.0 — see Roadmap).
+- Git integration (status, diffs, commits, branch management) inside the application. Read-only display of the current branch name and of listening ports in the sidebar is allowed and planned for v1.0.0 (clarified 2026-08-26).
 - Support for the X11 display server (untested; Wayland is the reference Linux session).
 - Custom theming / advanced appearance customization beyond a sensible default.
 - Synchronization of workspaces across machines.
@@ -201,6 +231,6 @@ Each user story above maps to one or more acceptance checks. Most are verified b
 
 ## Further Notes
 
-- umux is open-source and hosted publicly on GitHub. There is no commercial revenue model and no hard deadline; post-launch success is measured by GitHub stars, release downloads, and anonymized Aptabase usage, on top of Adam testing locally.
+- umux is open-source and hosted publicly on GitHub. There is no commercial revenue model and no hard deadline; post-launch success is measured by GitHub activity (stars, issues and PRs from outside contributors), release downloads, and anonymized Aptabase usage, on top of Adam testing locally.
 - Adam is the product owner and does not write code; implementation is performed by Claude Code, with Adam reviewing output and testing locally. Explanations should therefore be step-by-step and beginner-friendly.
 - Planning artifacts live in `./plans/`. This PRD is followed by an implementation plan (`umux-plan.md`, produced via `/carve`) and then decomposed into GitHub issues (via `/dispatch`).

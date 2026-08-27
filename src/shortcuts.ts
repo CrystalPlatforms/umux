@@ -21,13 +21,19 @@ export type Command =
   | 'split-horizontal'
   | 'split-vertical'
   | 'close-panel'
+  | 'toggle-zoom'
   | 'open-settings'
 
 /// Shape of the keyboard event matchShortcut consumes. `activeTag` is the
 /// uppercased tagName of the focused element (or 'BODY' / null when nothing
-/// focusable is active) — used to suppress shortcuts while editing text.
+/// focusable is active) — used to suppress shortcuts while editing text (see
+/// activeTagOf for how that tag is derived). `code` is the PHYSICAL key
+/// (e.g. 'KeyZ'): on macOS WebKit reports Ctrl+Shift+letter as text-input
+/// characters (⌃⇧F → key 'ƒ'), so the letter is matched by code as a
+/// fallback — layout- and modifier-independent.
 export type ShortcutEvent = {
   key: string
+  code?: string
   ctrlKey: boolean
   altKey: boolean
   shiftKey: boolean
@@ -44,6 +50,7 @@ const TABLE: Record<string, Command> = {
   h: 'split-horizontal',
   v: 'split-vertical',
   w: 'close-panel',
+  z: 'toggle-zoom',
 }
 
 // Arrow keys carry a Shift-state-independent name, so they live in their own
@@ -51,6 +58,26 @@ const TABLE: Record<string, Command> = {
 const ARROWS: Record<string, Command> = {
   ArrowRight: 'next-workspace',
   ArrowLeft: 'prev-workspace',
+}
+
+/// The letter of a physical key code ('KeyZ' -> 'z'), or null for anything
+/// else (arrows keep their named `key`; digits/Intl keys match no shortcut).
+function codeLetter(code: string | undefined): string | null {
+  const m = code?.match(/^Key([A-Z])$/)
+  return m != null ? m[1].toLowerCase() : null
+}
+
+/// The `activeTag` matchShortcut should see for a focused element: real text
+/// fields (INPUT/TEXTAREA) suppress shortcuts — EXCEPT xterm's hidden helper
+/// textarea, which is how the terminal itself holds focus. Treating it like a
+/// text field silenced every shortcut the moment a panel was clicked into
+/// (#40 HITL: "the keyboard shortcut does not work").
+export function activeTagOf(el: Element | null): string | null {
+  if (el == null) return null
+  if (el.tagName === 'TEXTAREA' && el.classList.contains('xterm-helper-textarea')) {
+    return null
+  }
+  return el.tagName
 }
 
 export function matchShortcut(e: ShortcutEvent): Command | null {
@@ -62,5 +89,11 @@ export function matchShortcut(e: ShortcutEvent): Command | null {
     return 'open-settings'
   // Ctrl+Shift is the required modifier pair; Alt/Meta combos are left alone.
   if (!(e.ctrlKey && e.shiftKey) || e.altKey || e.metaKey) return null
-  return ARROWS[e.key] ?? TABLE[e.key.toLowerCase()] ?? null
+  if (ARROWS[e.key] != null) return ARROWS[e.key]
+  // The reported `key` wins; the physical `code` is the macOS fallback for
+  // the exotic text-input characters ⌃⇧ combos produce there.
+  const byKey = TABLE[e.key.toLowerCase()]
+  if (byKey != null) return byKey
+  const letter = codeLetter(e.code)
+  return letter != null ? TABLE[letter] ?? null : null
 }
