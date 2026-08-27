@@ -57,6 +57,7 @@ import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
+import { branchDirsByTab, branchQueryDirs } from './tabBranch'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -473,6 +474,45 @@ export function WorkspaceShell() {
   // effects hold first-render closures; they must read current values).
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+
+  // --- Tab branch labels (v1.0 Phase 14 / #41) ------------------------------
+  //
+  // PULL-only refresh (no timers, no filesystem watching): when workspace
+  // STATE changes via a UI event — tab set change, focused-panel change,
+  // configured directory change — recompute which directory speaks for each
+  // tab and resolve that batch in ONE invoke. Answers cache by DIRECTORY
+  // (two tabs on the same repo share an entry), and an unchanged directory
+  // signature skips the round-trip entirely. A failed call only logs: a
+  // missing label beats a broken sidebar (the row stays clean).
+  const [branchLabels, setBranchLabels] = useState<Record<string, string>>({})
+  const dirsSigRef = useRef('')
+  useEffect(() => {
+    const dirs = branchQueryDirs(state, settingsRef.current.sessionRestoreEnabled)
+    // JSON (never a joined string): Windows paths may contain spaces, so any
+    // single-character separator could collide two different dir sets.
+    const sig = JSON.stringify(dirs)
+    if (sig === dirsSigRef.current) return
+    dirsSigRef.current = sig
+    if (dirs.length === 0) return
+    void invoke<Array<{ dir: string; branch: string | null }>>('git_branches', { dirs })
+      .then((answers) => {
+        // Boundary check: anything but the expected array takes the same
+        // logged-skip path as a rejected invoke — never a render crash.
+        if (!Array.isArray(answers)) {
+          throw new Error('malformed git_branches payload')
+        }
+        setBranchLabels((prev) => {
+          let next = prev
+          for (const a of answers) {
+            if (a?.branch != null && next[a.dir] !== a.branch) {
+              next = { ...next, [a.dir]: a.branch }
+            }
+          }
+          return next
+        })
+      })
+      .catch((e) => console.error('git_branches failed:', e))
+  }, [state, settings])
   // Config fallback warning (Phase 18 / #19, AC3). Set when the backend emits
   // `config_fallback` (corrupt/unreadable config -> defaults), so the downgrade
   // is surfaced instead of silent. Dismissible; cleared on dismiss.
@@ -950,10 +990,24 @@ export function WorkspaceShell() {
   // backend-handle map is filled by each surface's onOpened report.
   type PtyEntry = { kind: 'local' | 'ssh'; id: number }
   const ptyIdsRef = useRef<Map<string, PtyEntry>>(new Map())
+  // Trailing debounce so a burst of openings (boot with several tabs, a split)
+  // collapses into ONE snapshot — event-driven (fires on shells REPORTING
+  // open), never a poll. This is also what makes branch labels (#41) appear
+  // promptly: brand-new panels have no recorded workingDirectory until a
+  // snapshot lands; without this they'd wait for the next 20 s periodic tick.
+  const openSnapshotTimer = useRef<number | null>(null)
   const notePanelOpened = useCallback(
     (panelId: string, ptyId: number, remote: boolean) => {
       ptyIdsRef.current.set(panelId, { kind: remote ? 'ssh' : 'local', id: ptyId })
+      if (openSnapshotTimer.current != null) {
+        window.clearTimeout(openSnapshotTimer.current)
+      }
+      openSnapshotTimer.current = window.setTimeout(() => {
+        openSnapshotTimer.current = null
+        void snapshotAndPersist()
+      }, 150)
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   )
 
@@ -1101,6 +1155,11 @@ export function WorkspaceShell() {
   // drag, not one per pointer-move. stateRef always holds the latest state.
   const stateRef = useRef(state)
   stateRef.current = state
+
+  // Which directory each tab's branch label comes from (focused panel of the
+  // active tab, first panel otherwise; null entries yield no label). Same
+  // session-restore rule PanelSurfaces applies to the cwd prop.
+  const tabBranchDirs = branchDirsByTab(state, settings.sessionRestoreEnabled)
 
   // --- Per-panel agent status (v0.2 Phase 2 / #26) -------------------------
   //
@@ -1547,7 +1606,30 @@ export function WorkspaceShell() {
                             onBlur={() => commitTabRename(ws.id, tab.id)}
                           />
                         ) : (
-                          <span className="tab-name">{label}</span>
+                          <>
+                            <span className="tab-name">{label}</span>
+                            {/* Git branches (#41, HITL rework 2026-08-27):
+                                ONE per panel of this tab — a split shows as
+                                many as its splits — and the FOCUSED panel's
+                                branch is bold (.tab-branch.is-focused), never
+                                larger. Entries without a repository render
+                                nothing: no placeholder, ever. */}
+                            {(tabBranchDirs[tab.id] ?? []).map((entry) => {
+                              const branch =
+                                entry.dir != null ? branchLabels[entry.dir] : undefined
+                              if (branch == null || branch === '') return null
+                              return (
+                                <span
+                                  key={entry.panelId}
+                                  className={
+                                    entry.focused ? 'tab-branch is-focused' : 'tab-branch'
+                                  }
+                                >
+                                  {branch}
+                                </span>
+                              )
+                            })}
+                          </>
                         )}
                         <button
                           className="tab-close"

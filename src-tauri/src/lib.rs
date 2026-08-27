@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod git_branch;
 pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_service;
@@ -237,6 +238,36 @@ fn panel_processes(
             PanelProcessAnswer { panel_id: q.panel_id, process }
         })
         .collect())
+}
+
+// --- Sidebar tab metadata: git branch (v1.0 Phase 14 / #41) -------------------
+//
+// One read-only batch query answers the branch label for every tab row at
+// once: input is the list of DIRECTORIES to resolve (each tab's focused
+// panel's starting workingDirectory, computed by the frontend), output echoes
+// each directory back with its resolved label — a branch name or a short
+// detached-HEAD sha, or None when no repository is present (the UI then shows
+// nothing; this command can never fail). Parsing happens straight from `.git`
+// in git_branch::resolve_branch — no `git` binary is spawned (plan decision,
+// 2026-08-26). Refresh is PULL-ONLY on frontend UI events (tab set change /
+// focus change / configured directory change) — there is deliberately no
+// timer and no filesystem watching.
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitBranchAnswer {
+    dir: String,
+    branch: Option<String>,
+}
+
+#[tauri::command]
+fn git_branches(dirs: Vec<String>) -> Vec<GitBranchAnswer> {
+    dirs.into_iter()
+        .map(|dir| GitBranchAnswer {
+            branch: git_branch::resolve_branch(std::path::Path::new(&dir)),
+            dir,
+        })
+        .collect()
 }
 
 // --- SSH panels (Phase 16 / Issue #17) ----------------------------------------
@@ -783,6 +814,7 @@ pub fn run() {
             pty_is_busy,
             panel_cwds,
             panel_processes,
+            git_branches,
             ssh_open,
             ssh_write,
             ssh_resize,

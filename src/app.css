@@ -493,6 +493,21 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Git branch suffixes on a tab row (#41): one per panel of the tab, quieter
+   than the name, never truncated themselves — the name takes the ellipsis
+   hit first. The FOCUSED panel's branch is bold but NOT larger (#41 HITL,
+   Adam: "pogrubiony ale nie większy"). */
+.tab-branch {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  letter-spacing: 0.01em;
+}
+
+.tab-branch.is-focused {
+  font-weight: 700;
+}
+
 /* Close affordance inside a tab — smaller and quieter than .icon-btn so the
    label stays the focus. */
 .tab-close {
