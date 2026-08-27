@@ -36,3 +36,8 @@ vite.config.d.ts
 !.vscode/extensions.json
 .idea
 .DS_Store
+
+# Local tooling / accidental package-manager files (repo uses npm)
+.claude/
+pnpm-lock.yaml
+pnpm-workspace.yaml
