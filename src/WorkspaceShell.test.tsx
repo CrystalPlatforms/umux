@@ -1786,4 +1786,177 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       await screen.findByRole('menuitem', { name: /^unpin tab$/i }),
     ).toBeInTheDocument()
   })
+
+  // --- Listening-ports tooltip (v1.0 Phase 15 / #42) ------------------------
+  //
+  // Hover-pull contract: the backend is asked ONLY when a tab row is hovered
+  // (never on a timer — zero queries while idle), exactly ONE query per
+  // hover carrying that tab's LOCAL panel handles, and the answer renders as
+  // an explicit tooltip so "nothing listens" is never ambiguous. Surfaces
+  // report handle 42 via the mock; seeded workspaces migrate to one tab with
+  // one local panel each.
+  describe('listening-ports tooltip (#42)', () => {
+    const portCalls = () =>
+      invokeMock.mock.calls.filter((c) => c[0] === 'tab_ports')
+
+    it('makes NO tab_ports query while nothing is hovered', async () => {
+      seedTwo()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+      // Give every timer/load effect time to run: the count must stay zero.
+      await act(() => new Promise((r) => setTimeout(r, 30)))
+      expect(portCalls()).toHaveLength(0)
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    })
+
+    it('hovering a tab asks ONCE for its local panels and shows the ports', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string; ptyIds: number[] }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              { id: 'ws-1', name: 'alpha' },
+              { id: 'ws-2', name: 'beta' },
+            ],
+          })
+        if (cmd === 'tab_ports') {
+          const q = args?.tabs?.[0]
+          return Promise.resolve([{ tabId: q?.tabId ?? '', ports: [8000, 5173] }])
+        }
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      const tab = within(panel).getAllByRole('tab')[0]
+
+      fireEvent.mouseEnter(tab)
+
+      const tip = await screen.findByRole('tooltip')
+      // Rendered ascending (the canonical order — the backend also sorts;
+      // the union step re-asserts it no matter what arrives).
+      expect(tip.textContent).toBe('5173 · 8000')
+      // Exactly ONE pull for THIS tab's own local handle set.
+      await waitFor(() => expect(portCalls()).toHaveLength(1))
+      const payload = portCalls()[0]?.[1] as {
+        tabs: Array<{ ptyIds: number[] }>
+      }
+      expect(payload.tabs[0].ptyIds).toEqual([42])
+
+      // Leaving the row dismisses the tooltip again.
+      fireEvent.mouseLeave(tab)
+      await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument())
+    })
+
+    it('hovering a quiet tab shows the explicit no-listeners state', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'tab_ports')
+          return Promise.resolve([{ tabId: args?.tabs?.[0]?.tabId ?? '', ports: [] }])
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+
+      fireEvent.mouseEnter(within(panel).getAllByRole('tab')[0])
+
+      await waitFor(() =>
+        expect(screen.getByRole('tooltip').textContent).toBe('No listening ports'),
+      )
+    })
+
+    // HITL 2026-08-27 round 2: the workspace ROW carries the same tooltip,
+    // aggregating EVERY tab of that workspace into one sorted union.
+    it('hovering a workspace row asks once with ALL its tabs and shows the union', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'tab_ports')
+          return Promise.resolve(
+            (args?.tabs ?? []).map((t, i) => ({ tabId: t.tabId, ports: i === 0 ? [8000] : [5173] })),
+          )
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+      await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+
+      fireEvent.mouseEnter(screen.getByTestId('workspace-row-ws-1'))
+
+      const wsTip = await screen.findByRole('tooltip')
+      await waitFor(() => expect(wsTip.textContent).toBe('5173 · 8000'))
+      // Round 3: workspace tooltips jut into the TERMINAL area at the
+      // sidebar's right wall, aligned with the row — never below it.
+      // (jsdom rects are all-zero, so the row's right edge is 0.)
+      expect(wsTip).toHaveStyle({ left: '6px', top: '0px' })
+      expect(portCalls()).toHaveLength(1)
+      const payload = portCalls()[0]?.[1] as { tabs: Array<{ ptyIds: number[] }> }
+      expect(payload.tabs).toHaveLength(2)
+      for (const q of payload.tabs) expect(q.ptyIds).toEqual([42])
+    })
+
+    // HITL 2026-08-27 round 2: the tooltip must be ENTERABLE — moving the
+    // pointer from the row onto the tooltip keeps it open (a grace period
+    // bridges the gap), and it only really closes once the pointer leaves
+    // the tooltip itself.
+    it('stays open when the pointer moves onto the tooltip, closes after leaving it', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'tab_ports')
+          return Promise.resolve([{ tabId: args?.tabs?.[0]?.tabId ?? '', ports: [8000] }])
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      const tab = within(panel).getAllByRole('tab')[0]
+      fireEvent.mouseEnter(tab)
+      const tip = await screen.findByRole('tooltip')
+
+      // Row → tooltip: leaving the row must NOT immediately kill the tip.
+      fireEvent.mouseLeave(tab)
+      expect(screen.getByRole('tooltip')).toBe(tip)
+      // Past the grace window, hovering the tooltip still holds it open.
+      fireEvent.mouseEnter(tip)
+      await act(() => new Promise((r) => setTimeout(r, 250)))
+      expect(screen.getByRole('tooltip')).toBe(tip)
+
+      // Leaving the tooltip for good dismisses it.
+      fireEvent.mouseLeave(tip)
+      await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument())
+    })
+
+    // HITL 2026-08-27 round 2: a port is a click target that copies its
+    // localhost URL (the same navigator.clipboard path the terminal copy
+    // shortcut uses).
+    it('clicking a port copies its http://localhost URL', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+      })
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'tab_ports')
+          return Promise.resolve([{ tabId: args?.tabs?.[0]?.tabId ?? '', ports: [8000] }])
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      fireEvent.mouseEnter(within(panel).getAllByRole('tab')[0])
+      await screen.findByRole('tooltip')
+
+      fireEvent.click(within(screen.getByRole('tooltip')).getByRole('button', { name: '8000' }))
+
+      expect(writeText).toHaveBeenCalledWith('http://localhost:8000')
+    })
+  })
 })

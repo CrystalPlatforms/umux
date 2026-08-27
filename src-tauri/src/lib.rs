@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod git_branch;
+pub mod listening_ports;
 pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_service;
@@ -268,6 +269,59 @@ fn git_branches(dirs: Vec<String>) -> Vec<GitBranchAnswer> {
             dir,
         })
         .collect()
+}
+
+// --- Sidebar tab metadata: listening ports (v1.0 Phase 15 / #42) --------------
+//
+// One batch query answers "which TCP ports does this TAB listen on?" for
+// every hovered tab at once: input is the tab id plus its LOCAL panel PTY
+// handles (the frontend knows the local/ssh split — SSH panels are skipped,
+// same reasoning as panel_processes: the local process is always just the
+// ssh client and says nothing about remote listeners). The backend maps each
+// handle to its shell pid, snapshots the OS socket tables + process tree ONCE
+// per invoke, and matches each tab's trees against that one snapshot (so a
+// multi-tab hover can never mix two different moments). Refresh is PULL-ONLY
+// on tab hover — no timer, no background work while nothing is hovered.
+// Ports are ascending + deduplicated by number; an empty list means the UI's
+// explicit "No listening ports" state. Total failure policy: a vanished shell
+// or unreadable socket table yields empty ports, never an invoke error.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TabPortsQuery {
+    tab_id: String,
+    pty_ids: Vec<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TabPortsAnswer {
+    tab_id: String,
+    ports: Vec<u16>,
+}
+
+#[tauri::command]
+fn tab_ports(
+    state: State<'_, Mutex<PtyService>>,
+    tabs: Vec<TabPortsQuery>,
+) -> Result<Vec<TabPortsAnswer>, String> {
+    let svc = state.lock().map_err(|e| e.to_string())?;
+    let listeners = listening_ports::listening_sockets();
+    let edges = listening_ports::parent_edges();
+    Ok(tabs
+        .into_iter()
+        .map(|tab| {
+            let roots: Vec<u32> = tab
+                .pty_ids
+                .iter()
+                .filter_map(|id| svc.child_pid(&PtyHandle { id: *id }))
+                .collect();
+            TabPortsAnswer {
+                ports: listening_ports::aggregate_ports(&listeners, &edges, &roots),
+                tab_id: tab.tab_id,
+            }
+        })
+        .collect())
 }
 
 // --- SSH panels (Phase 16 / Issue #17) ----------------------------------------
@@ -815,6 +869,7 @@ pub fn run() {
             panel_cwds,
             panel_processes,
             git_branches,
+            tab_ports,
             ssh_open,
             ssh_write,
             ssh_resize,

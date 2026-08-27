@@ -13,7 +13,7 @@
 // UI glue verified by Adam on Ubuntu/Wayland; the testable core lives in
 // ./workspaces (pure state) and the Rust WorkspaceStore (persistence).
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -58,6 +58,7 @@ import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
 import { branchDirsByTab, branchQueryDirs } from './tabBranch'
+import { formatPorts, localPtyIds, unionPorts } from './tabPorts'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -513,6 +514,87 @@ export function WorkspaceShell() {
       })
       .catch((e) => console.error('git_branches failed:', e))
   }, [state, settings])
+
+  // --- Listening-ports tooltip (v1.0 Phase 15 / #42; round 2 same day) -----
+  //
+  // PULL-only on hover of a TAB row (one tab's ports) or a WORKSPACE row in
+  // the sidebar (the UNION of all its tabs' ports — one batch invoke, the
+  // backend already takes many tabs). No timer, no query while nothing is
+  // hovered. The result replaces the native title on tab rows — two
+  // competing tooltips would be noise. The tooltip is ENTERABLE (round 2):
+  // leaving the row starts a short grace close, and moving onto the tooltip
+  // cancels it, so the ports stay reachable — and each port is a button that
+  // copies its http://localhost URL (same navigator.clipboard path the
+  // terminal copy shortcut uses). A failed/stale answer just doesn't render:
+  // a tooltip is metadata, never a modal error. A row with no live LOCAL
+  // shells answers instantly without a round-trip.
+  const [portsTip, setPortsTip] = useState<{
+    left: number
+    top: number
+    key: string
+    ports: number[] | null
+  } | null>(null)
+  const portsSeq = useRef(0)
+  const portsCloseTimer = useRef<number | null>(null)
+  const holdPortsTip = () => {
+    if (portsCloseTimer.current != null) {
+      window.clearTimeout(portsCloseTimer.current)
+      portsCloseTimer.current = null
+    }
+  }
+  const openPortsTip = (
+    e: ReactMouseEvent,
+    key: string,
+    groups: Array<{ id: string; layout: LayoutNode }>,
+    // 'below' suits tab rows (bar across the top); workspace rows sit in
+    // the sidebar, so their tooltip anchors at the row's TOP and juts RIGHT
+    // into the terminal area at the sidebar's wall (round 3, HITL).
+    side: 'below' | 'right' = 'below',
+  ) => {
+    holdPortsTip() // hopping straight to another row must not eat the tip
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const request = ++portsSeq.current
+    const anchor =
+      side === 'right'
+        ? { left: rect.right + 6, top: rect.top }
+        : { left: rect.left, top: rect.bottom + 6 }
+    setPortsTip({ ...anchor, key, ports: null })
+    const queries = groups
+      .map((t) => ({ tabId: t.id, ptyIds: localPtyIds(leafIds(t.layout), ptyIdsRef.current) }))
+      .filter((q) => q.ptyIds.length > 0)
+    if (queries.length === 0) {
+      setPortsTip((tip) => (tip && tip.key === key ? { ...tip, ports: [] } : tip))
+      return
+    }
+    void invoke<Array<{ tabId: string; ports: number[] }>>('tab_ports', {
+      tabs: queries,
+    })
+      .then((answers) => {
+        if (request !== portsSeq.current) return // superseded / closed
+        if (!Array.isArray(answers)) throw new Error('malformed tab_ports payload')
+        const ports = unionPorts(
+          answers.map((a) => (Array.isArray(a?.ports) ? a.ports : [])),
+        )
+        setPortsTip((tip) => (tip && tip.key === key ? { ...tip, ports } : tip))
+      })
+      .catch((err) => console.error('tab_ports failed:', err))
+  }
+  const closePortsTip = () => {
+    // Grace window: enough time to cross the gap row→tooltip; entering the
+    // tooltip cancels this, leaving the tooltip schedules it again.
+    holdPortsTip()
+    portsCloseTimer.current = window.setTimeout(() => {
+      portsCloseTimer.current = null
+      portsSeq.current += 1
+      setPortsTip(null)
+    }, 150)
+  }
+  const copyPort = (port: number) => {
+    void navigator.clipboard
+      ?.writeText(`http://localhost:${port}`)
+      .catch((err) => console.error('copy port failed:', err))
+  }
+
   // Config fallback warning (Phase 18 / #19, AC3). Set when the backend emits
   // `config_fallback` (corrupt/unreadable config -> defaults), so the downgrade
   // is surfaced instead of silent. Dismissible; cleared on dismiss.
@@ -1419,6 +1501,11 @@ export function WorkspaceShell() {
               }}
               onClick={() => setState(openWorkspace(state, ws.id))}
               onContextMenu={(e) => openMenu(e, false, ws.id)}
+              // Same hover-pulled ports tooltip as tab rows (#42, round 2):
+              // the workspace aggregates EVERY tab it holds into one union,
+              // anchored to the sidebar's right wall (round 3).
+              onMouseEnter={(e) => openPortsTip(e, `ws:${ws.id}`, ws.tabs ?? [], 'right')}
+              onMouseLeave={closePortsTip}
               onMouseDown={(e) => {
                 if (isMenuPress(e)) openMenu(e, false, ws.id)
               }}
@@ -1567,7 +1654,11 @@ export function WorkspaceShell() {
                         aria-selected={tabActive}
                         data-testid={`tab-${ws.id}-${tab.id}`}
                         className={`tab ${tabActive ? 'is-active' : ''}`}
-                        title={`${ws.name} · ${label}`}
+                        // Listening ports (#42): the custom hover tooltip
+                        // replaced the native title here — showing BOTH
+                        // would be two competing tooltips over one row.
+                        onMouseEnter={(e) => openPortsTip(e, tab.id, [tab])}
+                        onMouseLeave={closePortsTip}
                         onClick={() => setState(switchTab(state, ws.id, tab.id))}
                         onDoubleClick={(e) => {
                           e.stopPropagation()
@@ -1909,6 +2000,37 @@ export function WorkspaceShell() {
                 Close
               </button>
             </>
+          )}
+        </div>
+      )}
+      {/* Listening-ports tooltip (#42): appears under the hovered row once
+          its ONE pull answers; the explicit text makes "nothing listens"
+          unambiguous. Round 2: the tooltip is enterable (entering it
+          cancels the grace-close) and each port is a button copying its
+          localhost URL. */}
+      {portsTip && portsTip.ports !== null && (
+        <div
+          className="tab-ports-tip"
+          role="tooltip"
+          style={{ left: portsTip.left, top: portsTip.top }}
+          onMouseEnter={holdPortsTip}
+          onMouseLeave={closePortsTip}
+        >
+          {portsTip.ports.length === 0 ? (
+            formatPorts(portsTip.ports)
+          ) : (
+            portsTip.ports.map((port, i) => (
+              <Fragment key={port}>
+                {i > 0 && ' · '}
+                <button
+                  className="tab-ports-tip-port"
+                  title={`Copy http://localhost:${port}`}
+                  onClick={() => copyPort(port)}
+                >
+                  {port}
+                </button>
+              </Fragment>
+            ))
           )}
         </div>
       )}
