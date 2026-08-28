@@ -9,8 +9,10 @@
 //  - Sidebar: top half of a workspace row = before it; bottom half = after
 //    it (its parent's sibling slot). Group rows split top/bottom 25% with a
 //    middle INTO zone (highlight, no line). Below every row = top level,
-//    appended. A dragged GROUP never lands inside a group — its candidate
-//    regions are top-level only.
+//    appended. Nesting (#51): a dragged GROUP files into any group EXCEPT
+//    its own subtree — the caller passes the dragged subtree's ids as
+//    `forbiddenIds`; landings on/inside those rows come back `rejected`
+//    (no line, no target) so the cursor can say "not allowed".
 //  - "After X" resolves to beforeId = X's next sibling (null when X is the
 //    last sibling), and the line draws at X's bottom edge.
 //  - Tabs: left half = before, right half = after (next tab; the last
@@ -31,10 +33,10 @@ const ws = (id: string, top: number, bottom: number, parentId: string | null = n
   top,
   bottom,
 })
-const group = (id: string, top: number, bottom: number): SidebarRegion => ({
+const group = (id: string, top: number, bottom: number, parentId: string | null = null): SidebarRegion => ({
   id,
   kind: 'group',
-  parentId: null,
+  parentId,
   top,
   bottom,
 })
@@ -56,6 +58,7 @@ describe('computeSidebarDrop', () => {
       beforeId: 'ws-2',
       intoGroupId: null,
       lineTop: 0,
+      rejected: false,
     })
   })
 
@@ -68,6 +71,7 @@ describe('computeSidebarDrop', () => {
       beforeId: 'g-1',
       intoGroupId: null,
       lineTop: 30,
+      rejected: false,
     })
   })
 
@@ -89,6 +93,7 @@ describe('computeSidebarDrop', () => {
       beforeId: null,
       intoGroupId: 'g-1',
       lineTop: null,
+      rejected: false,
     })
   })
 
@@ -112,40 +117,74 @@ describe('computeSidebarDrop', () => {
       beforeId: null,
       intoGroupId: null,
       lineTop: 90,
+      rejected: false,
     })
   })
 
-  it('a dragged GROUP never files into a group: middle of another group splits', () => {
-    // Drag g-1 over a second group's middle — must reorder, not nest.
+  it('a dragged GROUP files into an unrelated group (#51)', () => {
     const twoGroups: SidebarRegion[] = [
       group('g-1', 0, 30),
       group('g-2', 30, 60),
       ws('ws-9', 60, 90, 'g-2'),
     ]
 
-    const drop = computeSidebarDrop(45, 'g-1', twoGroups)
+    // Drag g-1 (forbidden = itself) over g-2's middle zone — it NESTS.
+    const drop = computeSidebarDrop(45, 'g-1', twoGroups, new Set(['g-1']))
 
-    expect(drop.intoGroupId).toBeNull()
-    expect(drop.parentId).toBeNull()
-    // Middle of g-2 splits at its center: y=45 is below mid (45 inclusive
-    // is not below) -> after g-2 -> before ws-9... but ws-9 is INSIDE g-2,
-    // and a group drag skips child regions entirely: after g-2 = append.
-    expect(drop.beforeId).toBeNull()
+    expect(drop).toEqual({
+      parentId: null,
+      beforeId: null,
+      intoGroupId: 'g-2',
+      lineTop: null,
+      rejected: false,
+    })
   })
 
-  it('a dragged GROUP only rests the line at top-level boundaries', () => {
+  it('a dragged GROUP may reorder inside another group\'s children (#51)', () => {
     const twoGroups: SidebarRegion[] = [
       group('g-1', 0, 30),
       group('g-2', 30, 60),
       ws('ws-9', 60, 90, 'g-2'),
     ]
 
-    // y=75 sits inside g-2's child region — a group drag skips it, so the
-    // decision falls to "below every top-level candidate" = append at top.
-    const drop = computeSidebarDrop(75, 'g-1', twoGroups)
+    // y=75 sits inside g-2's child region — a legal internal reorder slot
+    // for the dragged group (after ws-9 = appended at the end of g-2).
+    const drop = computeSidebarDrop(75, 'g-1', twoGroups, new Set(['g-1']))
 
-    expect(drop.parentId).toBeNull()
+    expect(drop.parentId).toBe('g-2')
     expect(drop.beforeId).toBeNull()
+    expect(drop.rejected).toBe(false)
+  })
+
+  it('a landing on/inside the dragged group\'s OWN subtree is REJECTED (#51)', () => {
+    // g-2 nested inside g-1 (g-1 → g-2 → ws-9), dragged g-1's forbidden set
+    // covers itself, its child group and its child workspace.
+    const nested: SidebarRegion[] = [
+      group('g-1', 0, 30),
+      group('g-2', 30, 60, 'g-1'),
+      ws('ws-9', 60, 90, 'g-2'),
+      group('g-3', 90, 120),
+    ]
+    const forbidden = new Set(['g-1', 'g-2', 'ws-9'])
+
+    // Middle zone of the dragged group's own child → rejected.
+    const intoChild = computeSidebarDrop(45, 'g-1', nested, forbidden)
+    expect(intoChild.rejected).toBe(true)
+    expect(intoChild.intoGroupId).toBeNull()
+    expect(intoChild.lineTop).toBeNull()
+
+    // Pointer resting ON the dragged row itself → rejected too.
+    const ontoSelf = computeSidebarDrop(15, 'g-1', nested, forbidden)
+    expect(ontoSelf.rejected).toBe(true)
+
+    // Pointer over the forbidden grandchild row → rejected, no line.
+    const ontoDescendant = computeSidebarDrop(75, 'g-1', nested, forbidden)
+    expect(ontoDescendant.rejected).toBe(true)
+
+    // The unrelated group g-3 stays fully available, edges included.
+    const ontoOther = computeSidebarDrop(105, 'g-1', nested, forbidden)
+    expect(ontoOther.rejected).toBe(false)
+    expect(ontoOther.intoGroupId).toBe('g-3')
   })
 
   it('an empty list answers a top-level append with no line', () => {
@@ -156,6 +195,7 @@ describe('computeSidebarDrop', () => {
       beforeId: null,
       intoGroupId: null,
       lineTop: null,
+      rejected: false,
     })
   })
 })

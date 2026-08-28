@@ -9,14 +9,16 @@
 // Sidebar model (tree-aware, same semantics as moveNode):
 //   - top half of a WORKSPACE row      -> insert BEFORE it (its parent)
 //   - bottom half of a WORKSPACE row   -> insert AFTER it (its parent)
-//   - top 25% of a GROUP row           -> insert BEFORE it (top level)
-//   - bottom 25% of a GROUP row        -> insert AFTER it (top level)
+//   - top 25% of a GROUP row           -> insert BEFORE it (its parent)
+//   - bottom 25% of a GROUP row        -> insert AFTER it (its parent)
 //   - middle of a GROUP row            -> INTO the group, appended at the end
 //                                         (highlighted row instead of a line)
 //   - below the last row               -> top level, appended
-// A GROUP being dragged can never land inside a group: its middle-zone over
-// another group falls back to before/after, and child regions are skipped
-// entirely (the line only rests at top-level boundaries).
+// Nesting (#51): a dragged GROUP may file into another group — except into
+// its OWN subtree. The caller passes the dragged subtree's node ids as
+// `forbiddenIds`; any landing inside them (or over those rows) is REJECTED —
+// `rejected: true`, no line, no highlight — so the cursor can say "not
+// allowed" and the release commits nothing.
 //
 // Tab bar model (one workspace's bar, #45 semantics):
 //   - left half of a tab -> insert before it
@@ -24,8 +26,9 @@
 //                           tab's right half appends at the end)
 
 /// One draggable region of the sidebar, measured at drag activation. `top`
-/// /`bottom` are viewport Y coordinates; `parentId` is the workspace's group
-/// (null = top level; groups always sit at top level).
+/// /`bottom` are viewport Y coordinates; `parentId` is the row's parent
+/// group (null = top level) — the workspace's `groupId`, or the group's own
+/// `parentId` since #51.
 export type SidebarRegion = {
   id: string
   kind: 'workspace' | 'group'
@@ -39,11 +42,15 @@ export type SidebarRegion = {
 /// the end of the parent), `intoGroupId` is set when the pointer rests on a
 /// group's middle zone (the row highlights instead of drawing a line), and
 /// `lineTop` is the viewport Y for the live insertion line (null = no line).
+/// `rejected` (#51) marks a landing moveNode would refuse (into the dragged
+/// group's own subtree): the UI shows the not-allowed cursor and the release
+/// commits nothing.
 export type SidebarDrop = {
   parentId: string | null
   beforeId: string | null
   intoGroupId: string | null
   lineTop: number | null
+  rejected: boolean
 }
 
 /// One tab of a tab bar, measured at drag activation. `left`/`right` are
@@ -63,24 +70,31 @@ export type TabDrop = {
 
 /// Decide where a sidebar drag landing at viewport Y `y` would land. The
 /// regions must describe the visible rows in any order; they are sorted by
-/// position here.
+/// position here. `forbiddenIds` (#51) are the node ids a landing must
+/// refuse — the dragged GROUP's own subtree (itself, its descendant groups,
+/// and every workspace under them); a landing inside them comes back
+/// `rejected`. Workspaces pass an empty set (nothing is forbidden).
 export function computeSidebarDrop(
   y: number,
-  draggedId: string,
+  // Kept in the signature for the callers/tests' sake — the forbidden set
+  // (which already contains the dragged id) does the deciding.
+  _draggedId: string,
   regions: SidebarRegion[],
+  forbiddenIds: ReadonlySet<string> = new Set(),
 ): SidebarDrop {
   const sorted = [...regions].sort((a, b) => a.top - b.top)
-  // A dragged GROUP only ever reorders at top level: skip the children of
-  // groups so the line never promises a landing moveNode would reject.
-  const dragged = sorted.find((r) => r.id === draggedId)
-  const candidates =
-    dragged?.kind === 'group' ? sorted.filter((r) => r.parentId == null) : sorted
+  // A landing inside the dragged group's own subtree is forbidden: skip
+  // those rows entirely so no line ever promises a moveNode would reject,
+  // and surface the INTO-group zone as `rejected` instead (the cursor must
+  // be able to say "not allowed" over the group's middle zone).
+  const candidates = sorted.filter((r) => !forbiddenIds.has(r.id))
 
   const before = (r: SidebarRegion): SidebarDrop => ({
     parentId: r.parentId,
     beforeId: r.id,
     intoGroupId: null,
     lineTop: r.top,
+    rejected: false,
   })
   const after = (r: SidebarRegion): SidebarDrop => {
     // Insert after `r` = before its next sibling (append at the parent's end
@@ -96,26 +110,41 @@ export function computeSidebarDrop(
       beforeId: next?.id ?? null,
       intoGroupId: null,
       lineTop: r.bottom,
+      rejected: false,
     }
   }
+  const rejectedDrop = (): SidebarDrop => ({
+    parentId: null,
+    beforeId: null,
+    intoGroupId: null,
+    lineTop: null,
+    rejected: true,
+  })
+
+  // The pointer resting ON a forbidden row — the dragged group itself or any
+  // row of its own subtree (#51) — is rejected outright: the cursor says
+  // "not allowed" and no line pretends a landing the tree would refuse.
+  const hovered = sorted.find((r) => y >= r.top && y <= r.bottom)
+  if (hovered != null && forbiddenIds.has(hovered.id)) return rejectedDrop()
 
   for (const r of candidates) {
     if (y < r.top) return before(r)
     if (y <= r.bottom) {
       const mid = (r.top + r.bottom) / 2
       if (r.kind === 'group') {
-        // A dragged group cannot FILE into a group: split the middle zone.
-        if (dragged?.kind === 'group') {
-          return y < mid ? before(r) : after(r)
-        }
         const quarter = (r.bottom - r.top) / 4
         if (y < r.top + quarter) return before(r)
         if (y > r.bottom - quarter) return after(r)
+        // The middle zone FILES into the group — unless the group is inside
+        // the dragged group's own subtree (#51: no dropping a group into
+        // itself or its descendants).
+        if (forbiddenIds.has(r.id)) return rejectedDrop()
         return {
           parentId: null,
           beforeId: null,
           intoGroupId: r.id,
           lineTop: null,
+          rejected: false,
         }
       }
       return y < mid ? before(r) : after(r)
@@ -130,6 +159,7 @@ export function computeSidebarDrop(
     beforeId: null,
     intoGroupId: null,
     lineTop: last?.bottom ?? null,
+    rejected: false,
   }
 }
 

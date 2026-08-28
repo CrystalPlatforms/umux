@@ -80,10 +80,12 @@ pub struct Workspace {
 }
 
 /// A group node of the sidebar tree (#48): a named container workspaces can
-/// be filed into (#49). `collapsed`/`pinned` are forward-compat slots from
-/// the groups plan (collapse = Phase 4, pin = Phase 6) — `Option` + `default`
-/// + `skip_serializing_if` so early configs neither need nor gain the keys.
-/// Shape-identical to the TS `Group` in workspaces.ts.
+/// be filed into (#49). `collapsed` (#50)/`pinned` (#52) live on the model —
+/// `Option` + `default` + `skip_serializing_if` so early configs neither
+/// need nor gain the keys. `parent_id` (#51) nests groups inside groups
+/// without a depth limit; None = top level, same key hygiene as the
+/// workspace's `group_id`. Shape-identical to the TS `Group` in
+/// workspaces.ts.
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Group {
@@ -93,6 +95,8 @@ pub struct Group {
     pub collapsed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
@@ -677,6 +681,7 @@ mod tests {
                 name: "projekty".into(),
                 collapsed: None,
                 pinned: None,
+                parent_id: None,
             }],
             order: vec!["ws-2".into(), "g-1".into(), "ws-1".into()],
         }
@@ -803,5 +808,89 @@ mod tests {
             !ws2_text.contains("groupId"),
             "ungrouped workspace gained a groupId key: {ws2_text}"
         );
+    }
+
+    // T-G6 (#51 nesting — the deep tree survives the FILESYSTEM):
+    //   Input:  a workspace filed into g-inner, which is nested inside
+    //           g-outer (parentId chain), persisted via save().
+    //   Output: load() reads back identical data — the parentId on the group,
+    //           the groupId on the workspace and the order all survive.
+    #[test]
+    fn save_then_load_round_trips_nested_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path().join("config.json"));
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: None,
+                pinned: None,
+                group_id: Some("g-inner".into()),
+                tabs: vec![],
+            }],
+            groups: vec![
+                Group {
+                    id: "g-outer".into(),
+                    name: "zewnetrzna".into(),
+                    collapsed: None,
+                    pinned: None,
+                    parent_id: None,
+                },
+                Group {
+                    id: "g-inner".into(),
+                    name: "wewnetrzna".into(),
+                    collapsed: Some(true),
+                    pinned: Some(true),
+                    parent_id: Some("g-outer".into()),
+                },
+            ],
+            order: vec!["g-outer".into(), "g-inner".into(), "ws-1".into()],
+        };
+
+        store.save(&data).unwrap();
+        let back = store.load();
+
+        assert_eq!(back, data);
+        assert_eq!(back.groups[1].parent_id.as_deref(), Some("g-outer"));
+        assert_eq!(back.groups[1].collapsed, Some(true));
+        assert_eq!(back.groups[1].pinned, Some(true));
+    }
+
+    // T-G7 (#51 wire format + backward compat): the nested group speaks
+    // camelCase `parentId` on the wire, and a PRE-NESTING group object (no
+    // parentId key at all) still parses with parent_id None.
+    #[test]
+    fn nested_group_serializes_camel_case_and_old_configs_load() {
+        let data = WorkspaceData {
+            workspaces: vec![],
+            groups: vec![Group {
+                id: "g-inner".into(),
+                name: "wewnetrzna".into(),
+                collapsed: None,
+                pinned: None,
+                parent_id: Some("g-outer".into()),
+            }],
+            order: vec!["g-outer".into(), "g-inner".into()],
+        };
+
+        let text = serialize_config(&data);
+        assert!(
+            text.contains(r#""parentId":"g-outer""#),
+            "expected camelCase parentId on the wire, got: {text}"
+        );
+        assert!(
+            !text.contains("\"parent_id\""),
+            "snake_case parent_id leaked into wire JSON: {text}"
+        );
+        assert_eq!(parse_config(&text), data);
+
+        // A group written before nesting existed carries no parentId key.
+        let old = parse_config(
+            r#"{"workspaces":[],"groups":[{"id":"g-1","name":"stara"}],"order":["g-1"]}"#,
+        );
+        assert_eq!(old.groups[0].parent_id, None);
+        assert_eq!(old.groups[0].collapsed, None);
+        assert_eq!(old.groups[0].pinned, None);
     }
 }

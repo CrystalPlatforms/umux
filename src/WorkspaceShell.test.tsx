@@ -2334,7 +2334,7 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       ).toBeInTheDocument()
     })
 
-    it('Delete group is DISABLED while the group is non-empty (#48)', async () => {
+    it('Delete group is ENABLED for a non-empty group and asks through the shared confirmation (#51)', async () => {
       seedGrouped() // g-1 holds ws-1
       render(<WorkspaceShell />)
       await waitFor(() =>
@@ -2343,8 +2343,21 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
 
       fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
       const del = await screen.findByRole('menuitem', { name: /delete group/i })
-      expect(del).toBeDisabled()
-      expect(del.getAttribute('title')).toBe('Group is not empty')
+      expect(del).toBeEnabled()
+
+      fireEvent.click(del)
+      // The confirmation names the affected workspace count (no busy panels
+      // to check here — nothing reported a handle — so no warning).
+      const dialog = await screen.findByRole('alertdialog')
+      expect(dialog).toBeInTheDocument()
+      expect(dialog.textContent).toContain('projekty')
+      expect(dialog.textContent).toContain('1 workspace')
+      expect(dialog.textContent).not.toContain('running process')
+
+      // Cancel keeps the tree intact.
+      fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+      expect(screen.getByTestId('group-row-g-1')).toBeInTheDocument()
     })
 
     it('an EMPTY group deletes outright from the same menu (#48)', async () => {
@@ -2556,5 +2569,237 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
         ),
       )
     })
+  })
+})
+
+// --- Workspace groups Phases 4-6 (#50/#51/#52) ------------------------------
+//
+// Assumptions encoded:
+//  - Clicking a group row toggles collapse IN THE TREE (#50): children hide,
+//    and the flag persists via save_workspaces — expanding drops the key.
+//  - Hovering a collapsed group during a drag expands it after ~600ms (#51).
+//  - Delete group on a non-empty group opens the SHARED confirmation with
+//    the affected-workspace count and a live-process warning (#51); confirm
+//    deletes the whole subtree.
+//  - Unpack group dissolves the group — children return to top level (#51).
+//  - The group menu carries Pin/Unpin (#52); a pinned group leads its level
+//    and persists the flag.
+describe('workspace groups: collapse, badge, nesting actions, pin (#50/#51/#52)', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha', groupId: 'g-1' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+          groups: [{ id: 'g-1', name: 'projekty' }],
+          order: ['ws-2', 'g-1', 'ws-1'],
+        })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  const lastSave = () => {
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+    return calls[calls.length - 1][1] as {
+      groups: Array<Record<string, unknown>>
+      order: string[]
+    }
+  }
+
+  const rowOrder = () =>
+    [...document.querySelectorAll('.workspace-row')].map((el) =>
+      el.getAttribute('data-testid'),
+    )
+
+  it('click toggles collapse in place; the flag lives in the tree and persists (#50)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('workspace-row-ws-1')).toBeInTheDocument()
+
+    // First click COLLAPSES: the child row hides, the config gains the flag.
+    fireEvent.click(screen.getByTestId('group-row-g-1'))
+    expect(screen.queryByTestId('workspace-row-ws-1')).toBeNull()
+    await waitFor(() =>
+      expect(lastSave().groups).toEqual([expect.objectContaining({ collapsed: true })]),
+    )
+
+    // Second click EXPANDS: the child is back and the key DROPS.
+    fireEvent.click(screen.getByTestId('group-row-g-1'))
+    expect(await screen.findByTestId('workspace-row-ws-1')).toBeInTheDocument()
+    await waitFor(() => {
+      const saved = lastSave().groups[0]
+      expect('collapsed' in saved).toBe(false)
+    })
+  })
+
+  it('a collapsed group shows no badge while no agent is working (#50)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('group-row-g-1'))
+
+    expect(screen.queryByTestId('group-badge-g-1')).toBeNull()
+  })
+
+  it('Delete group confirms with the workspace count AND the live-process warning, then deletes the subtree (#51)', async () => {
+    // The surface reports a backend handle -> the panel counts as local and
+    // the busy check runs against it.
+    surfacesReportHandles = true
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha', groupId: 'g-1' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+          groups: [{ id: 'g-1', name: 'projekty' }],
+          order: ['ws-2', 'g-1', 'ws-1'],
+        })
+      if (cmd === 'pty_is_busy') return Promise.resolve(true)
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /delete group/i }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog.textContent).toContain('projekty')
+    expect(dialog.textContent).toContain('1 workspace will be removed')
+    expect(dialog.textContent).toContain('1 panel has a running process')
+
+    fireEvent.click(within(dialog).getByTestId('close-confirm-ok'))
+
+    // The WHOLE subtree is gone: the group AND its workspace.
+    await waitFor(() => {
+      expect(screen.queryByTestId('group-row-g-1')).toBeNull()
+      expect(screen.queryByTestId('workspace-row-ws-1')).toBeNull()
+    })
+    await waitFor(() => {
+      const saved = lastSave()
+      expect(saved.order).toEqual(['ws-2'])
+      expect(saved.groups).toEqual([])
+    })
+  })
+
+  it('Unpack group dissolves the group: the children return to top level (#51)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /unpack group/i }))
+
+    // ws-1 is back at top level, the group row is gone, nothing closed.
+    await waitFor(() => {
+      expect(screen.queryByTestId('group-row-g-1')).toBeNull()
+      expect(screen.getByTestId('workspace-row-ws-1')).toBeInTheDocument()
+    })
+    await waitFor(() => {
+      const saved = lastSave()
+      expect(saved.groups).toEqual([])
+      expect(saved.order).toEqual(['ws-2', 'ws-1'])
+    })
+  })
+
+  it('hovering a collapsed group during a drag expands it after a short delay (#51)', async () => {
+    // Start COLLAPSED so the hover-expand has something to open.
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha', groupId: 'g-1' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+          groups: [{ id: 'g-1', name: 'projekty', collapsed: true }],
+          order: ['ws-2', 'g-1', 'ws-1'],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+    expect(screen.queryByTestId('workspace-row-ws-1')).toBeNull()
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const restore = stubRects({
+        'workspace-row-ws-2': { top: 0, bottom: 30 },
+        'group-row-g-1': { top: 30, bottom: 60 },
+      })
+      // Drag ws-2 and hold the pointer over the group's middle zone.
+      fireEvent.pointerDown(screen.getByTestId('workspace-row-ws-2'), {
+        button: 0,
+        clientX: 10,
+        clientY: 15,
+      })
+      fireEvent.pointerMove(window, { clientX: 10, clientY: 45 })
+
+      // Before the delay: still collapsed.
+      act(() => {
+        vi.advanceTimersByTime(200)
+      })
+      expect(screen.queryByTestId('workspace-row-ws-1')).toBeNull()
+
+      // Past the delay: the group opened itself under the pointer.
+      act(() => {
+        vi.advanceTimersByTime(500)
+      })
+      restore.mockRestore()
+      expect(screen.getByTestId('workspace-row-ws-1')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the group menu offers Pin/Unpin; a pinned group leads its level and persists (#52)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /pin group/i }))
+
+    // The group leads the top level and carries the pin glyph. The render
+    // is depth-first: the group's child stays right below it.
+    await waitFor(() =>
+      expect(rowOrder()).toEqual([
+        'group-row-g-1',
+        'workspace-row-ws-1',
+        'workspace-row-ws-2',
+      ]),
+    )
+    expect(
+      screen.getByTestId('group-row-g-1').querySelector('.row-pin'),
+    ).not.toBeNull()
+    await waitFor(() =>
+      expect(lastSave().groups).toEqual([expect.objectContaining({ pinned: true })]),
+    )
+
+    // The label flips; unpinning drops the key and the glyph. The ROW stays
+    // where unpinning puts it — the head of the unpinned block (the list
+    // never jumps), so only the flag is asserted here.
+    fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /unpin group/i }))
+    await waitFor(() => {
+      const saved = lastSave().groups[0]
+      expect('pinned' in saved).toBe(false)
+    })
+    expect(
+      screen.getByTestId('group-row-g-1').querySelector('.row-pin'),
+    ).toBeNull()
   })
 })

@@ -42,6 +42,12 @@ import {
   isGroupEmpty,
   flattenSidebar,
   setWorkspacePinned,
+  setGroupPinned,
+  toggleCollapse,
+  unpackGroup,
+  deleteGroupSubtree,
+  groupSubtreeIds,
+  activeAgentCount,
   splitPanel,
   resizePanel,
   closePanel,
@@ -744,7 +750,8 @@ describe('workspace state', () => {
   //  - reorder via `beforeId` keeps the relative order of the other
   //    siblings; a `beforeId` that is not a sibling of the target parent
   //    falls back to append;
-  //  - a GROUP may not move into a group (no nesting until Phase 5) — no-op;
+  //  - a GROUP may nest into any group EXCEPT its own subtree (#51) — a cycle
+//    landing is a no-op;
   //  - unknown nodes and unknown target groups are no-ops (same object back).
   describe('moveNode (#49)', () => {
     function twoInGroup() {
@@ -785,13 +792,33 @@ describe('workspace state', () => {
       expect(next.order).toEqual(['g-1', 'ws-2', 'ws-1'])
     })
 
-    it('moving a group into a group is rejected (no nesting yet)', () => {
+    it('a group nests into an unrelated group (#51)', () => {
       let state = twoInGroup()
       state = createGroup(state, 'inne', () => 'g-2')
 
       const next = moveNode(state, 'g-1', { parentId: 'g-2' })
 
-      expect(next).toBe(state)
+      expect(next).not.toBe(state)
+      expect(next.groups.find((g) => g.id === 'g-1')?.parentId).toBe('g-2')
+      // The moved group (with its subtree) renders below g-2, one level deep.
+      expect(displayIds(next)).toEqual(['ws-2', 'g-2', 'g-1', 'ws-1'])
+      expect(flattenSidebar(next).map((e) => e.depth)).toEqual([0, 0, 1, 2])
+    })
+
+    it('moving a group into its OWN SUBTREE is rejected (#51)', () => {
+      // order: [ws-2, g-2, g-1, ws-1] with g-1 inside g-2; dropping g-2 into
+      // its own child (g-1) — or into itself — would orphan a cycle.
+      let state = twoInGroup()
+      state = createGroup(state, 'inne', () => 'g-2')
+      state = moveNode(state, 'g-1', { parentId: 'g-2' })
+
+      expect(moveNode(state, 'g-2', { parentId: 'g-1' })).toBe(state)
+      expect(moveNode(state, 'g-2', { parentId: 'g-2' })).toBe(state)
+      // A DESCENDANT further down is rejected too: g-3 goes INSIDE g-1
+      // (three levels), and g-2 may not move into its grandchild.
+      state = createGroup(state, 'gleboko', () => 'g-3')
+      state = moveNode(state, 'g-3', { parentId: 'g-1' })
+      expect(moveNode(state, 'g-2', { parentId: 'g-3' })).toBe(state)
     })
 
     it('unknown node, unknown target group, self-move and non-sibling beforeId are safe', () => {
@@ -1479,4 +1506,445 @@ it('upsertPanelCwd with an unchanged cwd returns the same reference', () => {
 
   expect(upsertPanelCwd(state, 'p-1', '/x')).toBe(state)
   expect(upsertPanelCwd(state, 'p-1', '/y')).not.toBe(state)
+})
+
+// --- Workspace groups Phase 4-6 (#50/#51/#52) -------------------------------
+//
+// Assumptions encoded:
+//  - toggleCollapse (#50) flips the group's `collapsed` flag IN THE TREE
+//    (persisted, not transient UI state); expanding DROPS the key so the
+//    payload stays byte-identical to a never-collapsed group.
+//  - The badge (activeAgentCount, #50) counts ACTIVE AGENT STATUSES: every
+//    panel in the subtree whose status is `working` OR `needs-attention`
+//    (the agent finished and waits for you — an occupied panel, HITL fix
+//    2026-08-28; a collapsed group must not hide a waiting agent). The
+//    number GROWS with each active agent (Adam's call): two working panels
+//    in one workspace count 2. It clears when the agents exit. Since #51
+//    the sum covers the WHOLE subtree.
+//  - Nesting (#51): groups nest without depth limit; moveNode rejects any
+//    landing inside the moved group's own subtree (cycle); unpackGroup
+//    dissolves the group with every child returning to top level; 
+//    deleteGroupSubtree removes everything inside, activation falls back per
+//    the workspace-delete rules.
+//  - Pin per container (#52): a pinned node leads only among its OWN
+//    siblings; the flag survives moves (pin is local to the new container).
+//  - bootState normalizes nested groups: stale parentIds strip to top level,
+//    parent CYCLES break (every group on/behind a cycle loads at top level).
+describe('workspace groups: collapse + badge (#50)', () => {
+  const seedGrouped = () => {
+    let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+    state = createWorkspace(state, 'beta', () => 'ws-2')
+    state = createGroup(state, 'projekty', () => 'g-1')
+    state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+    return state // order: [ws-2, g-1, ws-1]
+  }
+
+  it('toggleCollapse flips the flag in the tree, per group', () => {
+    let state = seedGrouped()
+    state = createGroup(state, 'inne', () => 'g-2')
+
+    const collapsed = toggleCollapse(state, 'g-1')
+
+    expect(collapsed.groups.find((g) => g.id === 'g-1')?.collapsed).toBe(true)
+    // The OTHER group is untouched (per-group state).
+    expect(collapsed.groups.find((g) => g.id === 'g-2')?.collapsed).toBeUndefined()
+
+    const expanded = toggleCollapse(collapsed, 'g-1')
+    expect(expanded.groups.find((g) => g.id === 'g-1')?.collapsed).toBeUndefined()
+    expect('collapsed' in (expanded.groups.find((g) => g.id === 'g-1') as object)).toBe(false)
+  })
+
+  it('toggleCollapse is a no-op for an unknown id', () => {
+    const state = seedGrouped()
+    expect(toggleCollapse(state, 'g-x')).toBe(state)
+  })
+
+  it('a collapsed group hides its children in flattenSidebar', () => {
+    let state = seedGrouped()
+    state = toggleCollapse(state, 'g-1')
+
+    expect(displayIds(state)).toEqual(['ws-2', 'g-1'])
+    // Expanding reveals the child again, in the shared order.
+    expect(displayIds(toggleCollapse(state, 'g-1'))).toEqual(['ws-2', 'g-1', 'ws-1'])
+  })
+
+  it('collapsed flags survive a bootState round-trip', () => {
+    let state = seedGrouped()
+    state = toggleCollapse(state, 'g-1')
+
+    const booted = bootState(
+      state.workspaces,
+      () => 'fresh',
+      state.groups,
+      state.order,
+    )
+
+    expect(booted.groups.find((g) => g.id === 'g-1')?.collapsed).toBe(true)
+  })
+
+  it('activeAgentCount counts WORKING and NEEDS-ATTENTION panels; a plain idle shell does not count', () => {
+    const state = seedGrouped()
+    const pids = panelIdsOf(state, 'ws-1')
+    expect(pids.length).toBeGreaterThan(0)
+    const statuses = { [pids[0]]: 'working' } as Record<string, ReturnType<typeof Object.keys> extends never ? never : import('./agentStatus').AgentStatus>
+
+    expect(activeAgentCount(state, 'g-1', statuses)).toBe(1)
+
+    // The agent FINISHED and waits for you -> still an occupied panel, the
+    // badge STAYS (HITL fix 2026-08-28: an idle Claude Code sits in NA).
+    expect(activeAgentCount(state, 'g-1', { [pids[0]]: 'needs-attention' })).toBe(1)
+
+    // Agent exited -> plain idle shell -> badge clears.
+    expect(activeAgentCount(state, 'g-1', { [pids[0]]: 'idle' })).toBe(0)
+    expect(activeAgentCount(state, 'g-1', {})).toBe(0)
+  })
+
+  it('activeAgentCount grows with EVERY active panel — two working panels count 2 (Adam)', () => {
+    let state = seedGrouped()
+    state = splitPanel(state, 'ws-1', 'horizontal', () => 's-1')
+    const pids = panelIdsOf(state, 'ws-1')
+    expect(pids.length).toBe(2)
+    const both = Object.fromEntries(pids.map((p) => [p, 'working' as const]))
+
+    expect(activeAgentCount(state, 'g-1', both)).toBe(2)
+
+    // Only ONE of the two panels active -> 1. Plain idle shells never count.
+    expect(activeAgentCount(state, 'g-1', { [pids[0]]: 'working' })).toBe(1)
+    expect(
+      activeAgentCount(state, 'g-1', { [pids[1]]: 'needs-attention' }),
+    ).toBe(1)
+    expect(
+      activeAgentCount(state, 'g-1', { [pids[0]]: 'idle', [pids[1]]: 'idle' }),
+    ).toBe(0)
+  })
+
+  it('activeAgentCount is 0 for a group without workspaces or without agents', () => {
+    let state = seedGrouped()
+    state = createGroup(state, 'puste', () => 'g-2')
+
+    expect(activeAgentCount(state, 'g-2', {})).toBe(0)
+    expect(activeAgentCount(state, 'g-1', {})).toBe(0)
+  })
+})
+
+describe('workspace groups: nesting (#51)', () => {
+  /// g-outer -> g-inner -> ws-1, with ws-2 at top level.
+  const seedNested = () => {
+    let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+    state = createWorkspace(state, 'beta', () => 'ws-2')
+    state = createGroup(state, 'inner', () => 'g-inner')
+    state = createGroup(state, 'outer', () => 'g-outer')
+    state = moveNode(state, 'g-inner', { parentId: 'g-outer' })
+    state = moveNode(state, 'ws-1', { parentId: 'g-inner' })
+    return state
+    // order walks: ws-2, g-outer, g-inner, ws-1
+  }
+
+  it('nests N levels deep; flattenSidebar renders increasing indentation', () => {
+    let state = seedNested()
+    state = createGroup(state, 'deepest', () => 'g-3')
+    state = moveNode(state, 'g-3', { parentId: 'g-inner' })
+
+    const entries = flattenSidebar(state)
+    const byId = entries.map((e) =>
+      e.kind === 'group' ? `g:${e.group.id}` : `w:${e.workspace.id}`,
+    )
+    // g-3 appended at the END of g-inner's children (after ws-1).
+    expect(byId).toEqual(['w:ws-2', 'g:g-outer', 'g:g-inner', 'w:ws-1', 'g:g-3'])
+    expect(entries.map((e) => e.depth)).toEqual([0, 0, 1, 2, 2])
+  })
+
+  it('a group moving to top level drops the parentId key', () => {
+    const state = seedNested()
+
+    const next = moveNode(state, 'g-inner', { parentId: null })
+
+    const moved = next.groups.find((g) => g.id === 'g-inner')!
+    expect('parentId' in moved).toBe(false)
+  })
+
+  it('a nested group keeps its subtree: the workspace follows its parent', () => {
+    let state = seedNested()
+    state = moveNode(state, 'g-inner', { parentId: null })
+
+    // ws-1 still belongs to g-inner; the flatten still renders it under it.
+    expect(state.workspaces.find((w) => w.id === 'ws-1')?.groupId).toBe('g-inner')
+    expect(displayIds(state)).toEqual(['ws-2', 'g-outer', 'g-inner', 'ws-1'])
+  })
+
+  it('a deep nested tree round-trips through bootState', () => {
+    const state = seedNested()
+
+    const booted = bootState(
+      state.workspaces,
+      () => 'fresh',
+      state.groups,
+      state.order,
+    )
+
+    expect(booted.groups.find((g) => g.id === 'g-inner')?.parentId).toBe('g-outer')
+    expect(displayIds(booted)).toEqual(displayIds(state))
+    expect(flattenSidebar(booted).map((e) => e.depth)).toEqual([0, 0, 1, 2])
+  })
+
+  it('bootState strips a STALE parentId (unknown group) to top level', () => {
+    const groups = [
+      { id: 'g-1', name: 'osierocony', parentId: 'g-ghost' },
+      { id: 'g-2', name: 'ok' },
+    ]
+
+    const booted = bootState([], () => 'fresh', groups, ['g-1', 'g-2'])
+
+    const g1 = booted.groups.find((g) => g.id === 'g-1')!
+    expect('parentId' in g1).toBe(false)
+    expect(booted.groups.find((g) => g.id === 'g-2')?.parentId).toBeUndefined()
+  })
+
+  it('bootState BREAKS a parent cycle: every group on/behind it loads at top level', () => {
+    // Hand-edited config: g-1 in g-2, g-2 in g-1, g-3 hangs BEHIND the cycle.
+    const groups = [
+      { id: 'g-1', name: 'a', parentId: 'g-2' },
+      { id: 'g-2', name: 'b', parentId: 'g-1' },
+      { id: 'g-3', name: 'c', parentId: 'g-1' },
+    ]
+
+    const booted = bootState([], () => 'fresh', groups, ['g-1', 'g-2', 'g-3'])
+
+    // Nothing crashes, nothing dangles: every parent chain terminates.
+    for (const g of booted.groups) {
+      const seen = new Set<string>()
+      let cur: string | null | undefined = g.parentId
+      while (cur != null) {
+        expect(seen.has(cur)).toBe(false)
+        seen.add(cur)
+        cur = booted.groups.find((x) => x.id === cur)?.parentId
+      }
+    }
+    expect(booted.groups).toHaveLength(3)
+  })
+})
+
+describe('workspace groups: unpack + destructive delete (#51)', () => {
+  const seedForUnpack = () => {
+    let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+    state = createWorkspace(state, 'beta', () => 'ws-2')
+    state = createWorkspace(state, 'gamma', () => 'ws-3')
+    state = createGroup(state, 'sub', () => 'g-sub')
+    state = createGroup(state, 'main', () => 'g-main')
+    state = moveNode(state, 'g-sub', { parentId: 'g-main' })
+    state = moveNode(state, 'ws-1', { parentId: 'g-main' })
+    state = moveNode(state, 'ws-2', { parentId: 'g-sub' })
+    // order: ws-3, g-main, g-sub, ws-2, ws-1
+    return state
+  }
+
+  it('unpackGroup dissolves the group: every child returns to TOP level, nothing closes', () => {
+    const state = seedForUnpack()
+
+    const next = unpackGroup(state, 'g-main')
+
+    // The group is gone; its children took its top-level slot in order.
+    expect(next.groups.some((g) => g.id === 'g-main')).toBe(false)
+    expect(displayIds(next)).toEqual(['ws-3', 'g-sub', 'ws-2', 'ws-1'])
+    // Every child is now top level: no parentId/groupId keys anywhere.
+    expect(next.groups.find((g) => g.id === 'g-sub')?.parentId).toBeUndefined()
+    expect(next.workspaces.find((w) => w.id === 'ws-1')?.groupId).toBeUndefined()
+    // ws-2 was a child of g-SUB (not of the unpacked g-main): it stays
+    // inside g-sub, which itself came to top level.
+    expect(next.workspaces.find((w) => w.id === 'ws-2')?.groupId).toBe('g-sub')
+    // NOTHING closed: the open set and activation ride along.
+    expect(next.openIds).toEqual(['ws-1', 'ws-2', 'ws-3'])
+    expect(next.activeId).toBe('ws-3')
+  })
+
+  it('unpackGroup keeps DEEPER descendants under their own parents', () => {
+    let state = seedForUnpack()
+    state = createWorkspace(state, 'delta', () => 'ws-4')
+    state = moveNode(state, 'ws-4', { parentId: 'g-sub' })
+
+    const next = unpackGroup(state, 'g-main')
+
+    // g-sub came to top level; ws-4 stayed INSIDE g-sub.
+    expect(next.workspaces.find((w) => w.id === 'ws-4')?.groupId).toBe('g-sub')
+  })
+
+  it('unpackGroup is a no-op for an unknown id', () => {
+    const state = seedForUnpack()
+    expect(unpackGroup(state, 'g-x')).toBe(state)
+  })
+
+  it('deleteGroupSubtree removes the group with EVERYTHING inside it', () => {
+    let state = seedForUnpack()
+    state = createWorkspace(state, 'delta', () => 'ws-4')
+    state = moveNode(state, 'ws-4', { parentId: 'g-sub' })
+    const booted = bootState(state.workspaces, () => 'fresh', state.groups, state.order)
+
+    const next = deleteGroupSubtree(booted, 'g-main')
+
+    expect(next.groups.some((g) => g.id === 'g-main' || g.id === 'g-sub')).toBe(false)
+    expect(next.workspaces.map((w) => w.id)).toEqual(['ws-3'])
+    expect(next.order).toEqual(['ws-3'])
+    // The deleted workspaces' runtime records die with them.
+    expect(next.openIds).toEqual(['ws-3'])
+    expect(next.activeTabId['ws-1']).toBeUndefined()
+    expect(next.activePanelId['ws-2']).toBeUndefined()
+  })
+
+  it('deleteGroupSubtree hands activation to a survivor when the active one was inside', () => {
+    const state = seedForUnpack() // active: ws-3 (top level survivor)
+
+    const next = deleteGroupSubtree(state, 'g-main')
+    expect(next.activeId).toBe('ws-3')
+
+    // Now make a workspace INSIDE the group active and delete the group.
+    let state2 = seedForUnpack()
+    state2 = { ...state2, activeId: 'ws-2' } // ws-2 lives in g-sub
+    const next2 = deleteGroupSubtree(state2, 'g-main')
+    expect(next2.activeId).toBe('ws-1')
+  })
+
+  it('deleteGroupSubtree drops the zoom records of the deleted tabs', () => {
+    let state = seedForUnpack()
+    const tabId = state.workspaces.find((w) => w.id === 'ws-2')?.tabs?.[0]?.id
+    state = { ...state, zoomedPanelId: { ...(tabId ? { [tabId]: 'p-x' } : {}) } }
+
+    const next = deleteGroupSubtree(state, 'g-main')
+
+    if (tabId != null) expect(next.zoomedPanelId[tabId]).toBeUndefined()
+  })
+
+  it('deleteGroupSubtree is a no-op for an unknown id', () => {
+    const state = seedForUnpack()
+    expect(deleteGroupSubtree(state, 'g-x')).toBe(state)
+  })
+
+  it('groupSubtreeIds covers the whole depth, the group itself included', () => {
+    const state = seedForUnpack()
+
+    const ids = groupSubtreeIds(state, 'g-main')
+
+    expect(new Set(ids)).toEqual(new Set(['g-main', 'g-sub', 'ws-1', 'ws-2']))
+  })
+})
+
+describe('workspace groups: badge subtree sum (#51)', () => {
+  it('activeAgentCount sums the WHOLE subtree, not just direct children', () => {
+    let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+    state = createWorkspace(state, 'beta', () => 'ws-2')
+    state = createGroup(state, 'inner', () => 'g-inner')
+    state = createGroup(state, 'outer', () => 'g-outer')
+    state = moveNode(state, 'g-inner', { parentId: 'g-outer' })
+    state = moveNode(state, 'ws-1', { parentId: 'g-inner' })
+
+    const pid = panelIdsOf(state, 'ws-1')[0]
+    const statuses = { [pid]: 'working' } as Record<string, import('./agentStatus').AgentStatus>
+
+    // ws-1 sits TWO levels under g-outer — still counted.
+    expect(activeAgentCount(state, 'g-outer', statuses)).toBe(1)
+    expect(activeAgentCount(state, 'g-inner', statuses)).toBe(1)
+    expect(activeAgentCount(state, 'g-outer', {})).toBe(0)
+  })
+})
+
+describe('workspace groups: pin per container (#52)', () => {
+  const seedLevel = () => {
+    let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+    state = createWorkspace(state, 'beta', () => 'ws-2')
+    state = createGroup(state, 'gora', () => 'g-1')
+    state = createGroup(state, 'dol', () => 'g-2')
+    return state // order: ws-1, ws-2, g-1, g-2
+  }
+
+  it('a pinned group leads its level; unpin drops the key', () => {
+    let state = seedLevel()
+    state = setGroupPinned(state, 'g-2', true)
+
+    // g-2 jumps to the HEAD of the top level: the pinned block leads.
+    expect(displayIds(state)).toEqual(['g-2', 'ws-1', 'ws-2', 'g-1'])
+    expect(state.groups.find((g) => g.id === 'g-2')?.pinned).toBe(true)
+
+    const unpinned = setGroupPinned(state, 'g-2', false)
+    // Unpinning inserts at the HEAD of the unpinned block — where it already
+    // stands, so nobody moves; only the flag drops.
+    expect(displayIds(unpinned)).toEqual(['g-2', 'ws-1', 'ws-2', 'g-1'])
+    expect('pinned' in (unpinned.groups.find((g) => g.id === 'g-2') as object)).toBe(false)
+  })
+
+  it('a pinned group leads INSIDE its parent too (per container)', () => {
+    let state = seedLevel()
+    state = createGroup(state, 'dziecko-a', () => 'g-a')
+    state = createGroup(state, 'dziecko-b', () => 'g-b')
+    state = moveNode(state, 'g-a', { parentId: 'g-1' })
+    state = moveNode(state, 'g-b', { parentId: 'g-1' })
+
+    const next = setGroupPinned(state, 'g-b', true)
+
+    // g-b leads WITHIN g-1's children, not at the top level.
+    expect(displayIds(next)).toEqual(['ws-1', 'ws-2', 'g-1', 'g-b', 'g-a', 'g-2'])
+  })
+
+  it('pinned workspace + pinned group share ONE leading block at their level', () => {
+    let state = seedLevel()
+    state = setWorkspacePinned(state, 'ws-2', true)
+    state = setGroupPinned(state, 'g-2', true)
+
+    // The pinned block leads and keeps relative order (ws-2 pinned first,
+    // g-2 pinned after); the unpinned follow.
+    expect(displayIds(state)).toEqual(['ws-2', 'g-2', 'ws-1', 'g-1'])
+  })
+
+  it('a pinned WORKSPACE leads only within its group; moving keeps the pin local', () => {
+    let state = seedLevel()
+    state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+    state = moveNode(state, 'ws-2', { parentId: 'g-1' })
+    state = setWorkspacePinned(state, 'ws-2', true)
+
+    // ws-2 leads INSIDE g-1 only; the top level keeps its own order.
+    expect(displayIds(state)).toEqual(['g-1', 'ws-2', 'ws-1', 'g-2'])
+
+    // Move ws-2 to top level: the flag travels with it (pin stays local,
+    // never global), and the move lands it like any other move — an append;
+    // nothing re-sorts on a move.
+    const moved = moveNode(state, 'ws-2', { parentId: null })
+    expect(moved.workspaces.find((w) => w.id === 'ws-2')?.pinned).toBe(true)
+    expect(displayIds(moved)).toEqual(['g-1', 'ws-1', 'g-2', 'ws-2'])
+    // A fresh toggle in the NEW container applies the per-container order:
+    // ws-2 leads the top level's pinned block.
+    const repinned = setWorkspacePinned(setWorkspacePinned(moved, 'ws-2', false), 'ws-2', true)
+    expect(displayIds(repinned)).toEqual(['ws-2', 'g-1', 'ws-1', 'g-2'])
+  })
+
+  it('inside a pinned group, its pinned children still lead (#52 composition)', () => {
+    let state = seedLevel()
+    state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+    state = moveNode(state, 'ws-2', { parentId: 'g-1' })
+    state = setWorkspacePinned(state, 'ws-2', true) // ws-2 leads inside g-1
+    state = setGroupPinned(state, 'g-1', true) // g-1 leads the top level
+
+    expect(displayIds(state)).toEqual(['g-1', 'ws-2', 'ws-1', 'g-2'])
+  })
+
+  it('pin state round-trips through bootState', () => {
+    let state = seedLevel()
+    state = setGroupPinned(state, 'g-2', true)
+    state = setWorkspacePinned(state, 'ws-1', true)
+
+    const booted = bootState(
+      state.workspaces,
+      () => 'fresh',
+      state.groups,
+      state.order,
+    )
+
+    expect(booted.groups.find((g) => g.id === 'g-2')?.pinned).toBe(true)
+    expect(booted.workspaces.find((w) => w.id === 'ws-1')?.pinned).toBe(true)
+  })
+
+  it('setGroupPinned is a no-op for an unknown id or an already-matching flag', () => {
+    const state = seedLevel()
+    expect(setGroupPinned(state, 'g-x', true)).toBe(state)
+
+    const pinned = setGroupPinned(state, 'g-1', true)
+    expect(setGroupPinned(pinned, 'g-1', true)).toBe(pinned)
+  })
 })

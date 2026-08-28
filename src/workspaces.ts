@@ -24,6 +24,7 @@ import {
   type Orientation,
   type Container,
 } from './PaneLayout'
+import type { AgentStatus } from './agentStatus'
 
 // Forward-compat slot from Phase 8: per-panel config (cwd / SSH target)
 // associated with the layout tree's leaf ids. Absent = local panel in the
@@ -51,15 +52,17 @@ export type Tab = {
 }
 
 // A group node of the sidebar tree (#48): a named container workspaces can be
-// filed into (#49). `collapsed`/`pinned` are forward-compat slots from the
-// groups plan (collapse = Phase 4, pin = Phase 6): carried on the model from
-// day one, optional, and the persisted payload must not gain the keys just by
-// passing through here — mirrored as Option fields in the Rust store.
+// filed into (#49). `collapsed` (#50)/`pinned` (#52) live on the model,
+// optional, and the persisted payload must not gain the keys just by passing
+// through here — mirrored as Option fields in the Rust store. `parentId`
+// (#51) nests groups inside groups without a depth limit; absent = the group
+// sits at top level, with the same key hygiene as the workspace's `groupId`.
 export type Group = {
   id: string
   name: string
   collapsed?: boolean
   pinned?: boolean
+  parentId?: string
 }
 
 export type Workspace = {
@@ -154,8 +157,12 @@ function removeKey<V>(map: Record<string, V>, key: string): Record<string, V> {
 /// appended (workspaces first, then groups) so nothing silently disappears
 /// from a hand-edited file. A `groupId` pointing at a group the config does
 /// not define is stale and is stripped (the workspace loads at top level).
-/// Every loaded workspace starts open with its first tab and first panel
-/// focused, and the first workspace is active.
+/// The same guard covers NESTED groups (#51): a `parentId` pointing at a
+/// group the config does not define is stripped (the group loads at top
+/// level), and a hand-edited CYCLE (g1 in g2, g2 in g1) is broken — every
+/// group on or behind a cycle loads at top level, so the renderer can walk
+/// parents without a guard. Every loaded workspace starts open with its
+/// first tab and first panel focused, and the first workspace is active.
 export function bootState(
   loaded: Workspace[],
   genId: () => string = defaultGenId,
@@ -190,7 +197,31 @@ export function bootState(
     return base
   }
   const workspaces = loaded.map(migrate)
-  const groups = loadedGroups
+  // Group parent normalization (#51): a stale `parentId` (unknown group)
+  // drops to top level, and a parent CYCLE is broken — a group is "rooted"
+  // when its parent chain terminates at top level; anything still unrooted
+  // after enough passes sits on or behind a cycle and loads at top level.
+  const rawParents = new Map<string, string | null>(
+    loadedGroups.map((g) => [
+      g.id,
+      g.parentId != null && knownGroups.has(g.parentId) ? g.parentId : null,
+    ]),
+  )
+  const rooted = new Set<string>()
+  for (let pass = 0; pass <= loadedGroups.length; pass++) {
+    for (const g of loadedGroups) {
+      if (rooted.has(g.id)) continue
+      const parent = rawParents.get(g.id) ?? null
+      if (parent == null || rooted.has(parent)) rooted.add(g.id)
+    }
+  }
+  const groups = loadedGroups.map((g) => {
+    if (!rooted.has(g.id)) return omitGroupParent(g)
+    // Rooted on a VALID parent: keep it; rooted at top level (or a stale
+    // reference): drop the key so the payload stays clean.
+    const parent = rawParents.get(g.id) ?? null
+    return parent != null ? { ...g, parentId: parent } : omitGroupParent(g)
+  })
   const known = new Set<string>([...workspaces.map((w) => w.id), ...groups.map((g) => g.id)])
   const seen = new Set<string>()
   const order: string[] = []
@@ -305,15 +336,19 @@ export function renameGroup(
   }
 }
 
-/// True when no workspace is filed inside group `id` (#48): only an empty
-/// group may be deleted until Phase 5 brings the destructive subtree delete.
+/// True when group `id` is bare — nothing inside it but itself, at any depth
+/// (#48; subtree-aware since #51): no descendant workspace AND no subgroup.
+/// Only a bare group may delete without a confirmation; anything else goes
+/// through deleteGroupSubtree behind the shared dialog.
 export function isGroupEmpty(state: WorkspaceState, id: string): boolean {
+  if (state.groups.some((g) => g.parentId === id)) return false
   return !state.workspaces.some((w) => w.groupId === id)
 }
 
 /// Delete an EMPTY group (#48): the node leaves `groups` and `order`; its
-/// (nonexistent) children are untouched. A non-empty group or an unknown id
-/// is a no-op — the destructive delete-with-children lands in Phase 5.
+/// (nonexistent) children are untouched. A group holding anything — or an
+/// unknown id — is a no-op; the destructive delete-with-children is
+/// deleteGroupSubtree (#51), which the UI puts behind a confirmation.
 export function deleteGroup(state: WorkspaceState, id: string): WorkspaceState {
   if (!state.groups.some((g) => g.id === id)) return state
   if (!isGroupEmpty(state, id)) return state
@@ -331,22 +366,26 @@ export function deleteGroup(state: WorkspaceState, id: string): WorkspaceState {
 export type MoveTarget = { parentId: string | null; beforeId?: string }
 
 /// The parent group id of a node in `order`, or `null` = top level. Groups
-/// always live at top level until nesting lands (Phase 5).
+/// nest since #51: a group's parent is its own `parentId`, a workspace's is
+/// its `groupId`.
 function parentOf(state: WorkspaceState, nodeId: string): string | null {
-  if (state.groups.some((g) => g.id === nodeId)) return null
+  const group = state.groups.find((g) => g.id === nodeId)
+  if (group != null) return group.parentId ?? null
   return state.workspaces.find((w) => w.id === nodeId)?.groupId ?? null
 }
 
-/// Move a node (workspace or group) within the tree (#49):
+/// Move a node (workspace or group) within the tree (#49; #51 generalizes it):
 ///   - a workspace onto a group -> filed INSIDE it, appended at the end of
 ///     that group's children;
 ///   - a workspace to top-level space -> back at top level;
 ///   - any node with `beforeId` -> inserted before that sibling (reorder);
-///   - a GROUP may only move at top level — moving a group into a group is
-///     nesting and is rejected (no-op) until Phase 5.
-/// Unknown nodes, unknown target groups, and `beforeId` ids that are not
-/// siblings of the target parent are no-ops too. Everything else about the
-/// state (activation, open set, tabs, panels) rides along untouched.
+///   - a GROUP may nest into any group EXCEPT its own subtree — dropping a
+///     group into one of its descendants would orphan it in a cycle and is
+///     rejected (no-op, the drag cursor says "not allowed").
+/// Unknown nodes, unknown target groups, forbidden cycles, and `beforeId`
+/// ids that are not siblings of the target parent are no-ops too. Everything
+/// else about the state (activation, open set, tabs, panels) rides along
+/// untouched.
 export function moveNode(
   state: WorkspaceState,
   nodeId: string,
@@ -355,16 +394,20 @@ export function moveNode(
   const isGroupNode = state.groups.some((g) => g.id === nodeId)
   const ws = state.workspaces.find((w) => w.id === nodeId)
   if (!isGroupNode && ws == null) return state
-  if (isGroupNode && target.parentId != null) return state // no nesting yet
   if (
-    !isGroupNode &&
     target.parentId != null &&
     !state.groups.some((g) => g.id === target.parentId)
   ) {
     return state
   }
+  // Nesting safety (#51): the target must live OUTSIDE the moved group's own
+  // subtree (the subtree includes the group itself, so dropping a group into
+  // itself is rejected by the same guard).
+  if (isGroupNode && target.parentId != null) {
+    if (groupSubtreeIds(state, nodeId).includes(target.parentId)) return state
+  }
   if (target.beforeId === nodeId) return state
-  const parentId = isGroupNode ? null : target.parentId
+  const parentId = target.parentId
   // Remove the node, then re-insert at its new sibling position.
   const without = state.order.filter((id) => id !== nodeId)
   let insertAt: number
@@ -395,7 +438,8 @@ export function moveNode(
   const order = [...without.slice(0, insertAt), nodeId, ...without.slice(insertAt)]
   // A workspace leaving a group DROPS the `groupId` key — the persisted
   // payload stays byte-identical to one that was never grouped (same hygiene
-  // as omitPinned).
+  // as omitPinned). The group twin (#51): the moved GROUP gains / drops its
+  // `parentId` the same way.
   const newParentId = target.parentId
   const workspaces = isGroupNode
     ? state.workspaces
@@ -408,7 +452,16 @@ export function moveNode(
           const { groupId: _dropped, ...rest } = w
           return rest
         })
-  return { ...state, workspaces, order }
+  const groups = isGroupNode
+    ? state.groups.map((g) =>
+        g.id === nodeId
+          ? newParentId != null
+            ? { ...g, parentId: newParentId }
+            : omitGroupParent(g)
+          : g,
+      )
+    : state.groups
+  return { ...state, workspaces, groups, order }
 }
 
 /// "Move to group…" with a FRESH name (#49): creates the group on the fly
@@ -428,28 +481,199 @@ export function moveToNewGroup(
   return moveNode(created, workspaceId, { parentId: gid })
 }
 
+// --- Collapse + subtree + destructive ops (#50/#51) --------------------------
+
+/// Every node id inside group `id`'s SUBTREE, the group itself included:
+/// descendant groups at any depth plus every workspace filed under them.
+/// The membership test behind nesting (#51) — cycle rejection in moveNode,
+/// badge summing (activeAgentCount), destructive delete and the drag's
+/// forbidden set all read it. A `seen` guard keeps a hand-built cyclic state
+/// from looping forever (bootState breaks cycles on load; the ops here never
+/// create one).
+export function groupSubtreeIds(state: WorkspaceState, groupId: string): string[] {
+  const ids: string[] = []
+  const seen = new Set<string>()
+  const stack = [groupId]
+  while (stack.length > 0) {
+    const gid = stack.pop() as string
+    if (seen.has(gid)) continue
+    seen.add(gid)
+    ids.push(gid)
+    for (const g of state.groups) if (g.parentId === gid) stack.push(g.id)
+    for (const w of state.workspaces) if (w.groupId === gid) ids.push(w.id)
+  }
+  return ids
+}
+
+/// Drop the `parentId` key so a top-level group persists byte-identical to
+/// one that was never nested (same hygiene as omitPinned/omitCollapsed).
+function omitGroupParent(group: Group): Group {
+  const { parentId: _dropped, ...rest } = group
+  return rest
+}
+
+/// Toggle group `id` collapsed/expanded IN PLACE (#50). The flag lives in the
+/// tree (persisted), never in transient UI state; expanding DROPS the
+/// `collapsed` key so the payload stays byte-identical to one that was never
+/// collapsed. No-op for an unknown id.
+export function toggleCollapse(
+  state: WorkspaceState,
+  id: string,
+): WorkspaceState {
+  if (!state.groups.some((g) => g.id === id)) return state
+  return {
+    ...state,
+    groups: state.groups.map((g) =>
+      g.id === id ? (g.collapsed === true ? omitCollapsed(g) : { ...g, collapsed: true }) : g,
+    ),
+  }
+}
+
+/// Drop the `collapsed` key on expand — byte-identical to a never-collapsed
+/// group (same hygiene as omitGroupParent).
+function omitCollapsed(group: Group): Group {
+  const { collapsed: _dropped, ...rest } = group
+  return rest
+}
+
+/// Unpack group `id` (#51): DISSOLVE it — every workspace and subgroup it
+/// holds returns to TOP level, nothing closes, and the group node itself
+/// disappears. The children ALREADY sit directly below the group in the
+/// shared order, so dissolving is just re-parenting them (their parent keys
+/// DROP — top level = no key, same hygiene as everywhere) and removing the
+/// group node; nobody moves. Deeper descendants follow their own parents
+/// unchanged. No-op for an unknown id.
+export function unpackGroup(
+  state: WorkspaceState,
+  id: string,
+): WorkspaceState {
+  if (!state.groups.some((g) => g.id === id)) return state
+  return {
+    ...state,
+    groups: state.groups
+      .filter((g) => g.id !== id)
+      .map((g) => (g.parentId === id ? omitGroupParent(g) : g)),
+    workspaces: state.workspaces.map((w) =>
+      w.groupId === id
+        ? (() => {
+            const { groupId: _dropped, ...rest } = w
+            return rest
+          })()
+        : w,
+    ),
+    // The group node leaves the shared order; its (now top-level) children
+    // keep their slots.
+    order: state.order.filter((nodeId) => nodeId !== id),
+  }
+}
+
+/// Delete group `id` WITH everything inside it (#51): the group, every
+/// descendant group at any depth, and every workspace filed under them —
+/// panels, tabs and their shells go away with it. Activation falls back per
+/// the existing workspace-delete rules (next/previous open workspace in
+/// sidebar order) when the active workspace was inside. No-op for an unknown
+/// id.
+export function deleteGroupSubtree(
+  state: WorkspaceState,
+  id: string,
+): WorkspaceState {
+  if (!state.groups.some((g) => g.id === id)) return state
+  const doomedGroups = new Set(groupSubtreeIds(state, id))
+  const doomedWs = new Set(
+    state.workspaces
+      .filter((w) => w.groupId != null && doomedGroups.has(w.groupId))
+      .map((w) => w.id),
+  )
+  const nextActive = doomedWs.has(state.activeId ?? '')
+    ? pickReplacementActive(state, state.activeId as string)
+    : state.activeId
+  // The doomed workspaces' tabs die with them — their zoom records must not
+  // outlive them (same hygiene as deleteWorkspace).
+  const dyingTabs = new Set(
+    state.workspaces
+      .filter((w) => doomedWs.has(w.id))
+      .flatMap((w) => w.tabs?.map((t) => t.id) ?? []),
+  )
+  return {
+    workspaces: state.workspaces.filter((w) => !doomedWs.has(w.id)),
+    groups: state.groups.filter((g) => !doomedGroups.has(g.id)),
+    order: state.order.filter(
+      (nodeId) => !doomedGroups.has(nodeId) && !doomedWs.has(nodeId),
+    ),
+    activeId: nextActive,
+    openIds: state.openIds.filter((openId) => !doomedWs.has(openId)),
+    activeTabId: removeKeys(state.activeTabId, doomedWs),
+    activePanelId: removeKeys(state.activePanelId, doomedWs),
+    zoomedPanelId: Object.fromEntries(
+      Object.entries(state.zoomedPanelId).filter(([tid]) => !dyingTabs.has(tid)),
+    ),
+  }
+}
+
+/// Shallow-copy `map` without EVERY key in `keys` — the multi-id twin of
+/// removeKey.
+function removeKeys<V>(
+  map: Record<string, V>,
+  keys: ReadonlySet<string>,
+): Record<string, V> {
+  return Object.fromEntries(
+    Object.entries(map).filter(([k]) => !keys.has(k)),
+  )
+}
+
+/// How many AGENT STATUSES inside group `id`'s subtree are ACTIVE right now
+/// (#50) — the sidebar's `● N` badge on a collapsed group. Adam's call
+/// (HITL fix 2026-08-28): the number must GROW with every active agent, so
+/// this counts each panel whose status is `working` (the chip's running
+/// dot) or `needs-attention` (the agent finished and WAITS for you — an
+/// occupied panel, not an empty shell; an idle Claude Code sits in NA most
+/// of the time) — across EVERY workspace and tab of the subtree, one point
+/// per panel. Plain idle shells never count, and the badge clears when the
+/// agents exit or are acknowledged. Since #51 the sum covers the WHOLE
+/// subtree, which for flat groups is the same as the direct children
+/// (#50's level). Updates live: statuses is the same Record the chips
+/// render from, so any panel change re-renders the badge.
+export function activeAgentCount(
+  state: WorkspaceState,
+  groupId: string,
+  statuses: Readonly<Record<string, AgentStatus>>,
+): number {
+  let count = 0
+  for (const nodeId of groupSubtreeIds(state, groupId)) {
+    if (nodeId === groupId) continue
+    const ws = state.workspaces.find((w) => w.id === nodeId)
+    if (ws == null) continue
+    for (const pid of panelIdsOf(state, ws.id)) {
+      const st = statuses[pid]
+      if (st === 'working' || st === 'needs-attention') count += 1
+    }
+  }
+  return count
+}
+
 /// One flattened, ordered sidebar entry with its depth (#48) — the shape the
 /// UI renders so indentation is a pure read. Depth is 0 for top-level nodes
-/// and 1 for workspaces filed into a group (nesting, Phase 5, generalizes
-/// this to a walk over parents).
+/// and grows with NESTING (#51): a group's children render right below it,
+/// one level deeper, in their shared order. A COLLAPSED group (#50) renders
+/// alone — its whole subtree stays hidden until it expands again.
 export type SidebarEntry =
   | { kind: 'group'; group: Group; depth: number }
   | { kind: 'workspace'; workspace: Workspace; depth: number }
 
 export function flattenSidebar(state: WorkspaceState): SidebarEntry[] {
-  return state.order.flatMap((nodeId): SidebarEntry[] => {
-    const group = state.groups.find((g) => g.id === nodeId)
-    if (group != null) return [{ kind: 'group', group, depth: 0 }]
-    const workspace = state.workspaces.find((w) => w.id === nodeId)
-    if (workspace == null) return []
-    return [
-      {
-        kind: 'workspace',
-        workspace,
-        depth: workspace.groupId != null ? 1 : 0,
-      },
-    ]
-  })
+  const childrenOf = (parentId: string | null): string[] =>
+    state.order.filter((nodeId) => parentOf(state, nodeId) === parentId)
+  const walk = (parentId: string | null, depth: number): SidebarEntry[] =>
+    childrenOf(parentId).flatMap((nodeId): SidebarEntry[] => {
+      const group = state.groups.find((g) => g.id === nodeId)
+      if (group != null) {
+        const entry: SidebarEntry = { kind: 'group', group, depth }
+        return group.collapsed === true ? [entry] : [entry, ...walk(group.id, depth + 1)]
+      }
+      const workspace = state.workspaces.find((w) => w.id === nodeId)
+      return workspace == null ? [] : [{ kind: 'workspace', workspace, depth }]
+    })
+  return walk(null, 0)
 }
 
 /// The workspace's ACTIVE tab (runtime record with a first-tab fallback, so
@@ -726,13 +950,14 @@ export function openWorkspace(
   return { ...state, activeId: id, openIds }
 }
 
-/// Pin or unpin a workspace (#37; re-homed onto the tree in #48). Pinned
-/// workspaces lead their sibling group in the SHARED sidebar order, so the
-/// toggle reorders `state.order` among the target's siblings (the definitions
-/// array no longer drives display). Pinning appends after the pinned block;
-/// unpinning inserts at the head of the unpinned block — the list never
-/// jumps. Non-sibling nodes keep their absolute slots. No-op for an unknown
-/// id or when the flag already matches.
+/// Pin or unpin a workspace (#37; re-homed onto the tree in #48; per
+/// container since #52). A pinned workspace leads ONLY within its own parent
+/// group — the flag travels with the workspace when it moves, but the
+/// ordering is recomputed among the NEW container's siblings, so pin stays
+/// local. The toggle reorders `state.order` among the target's siblings;
+/// pinning appends after the pinned block, unpinning inserts at the head of
+/// the unpinned block — the list never jumps. Non-sibling nodes keep their
+/// absolute slots. No-op for an unknown id or when the flag already matches.
 export function setWorkspacePinned(
   state: WorkspaceState,
   id: string,
@@ -742,22 +967,64 @@ export function setWorkspacePinned(
   if (target == null) return state
   if ((target.pinned ?? false) === pinned) return state
   const updated = pinned ? { ...target, pinned } : omitPinned(target)
-  // Siblings = nodes sharing the target's parent, in tree order (groups
-  // count as top-level siblings; their pin flag is a Phase 6 concern).
-  const parentId = target.groupId ?? null
-  const isSibling = (nodeId: string): boolean => {
-    if (nodeId === id) return true
-    if (state.groups.some((g) => g.id === nodeId)) return parentId == null
-    const w = state.workspaces.find((x) => x.id === nodeId)
-    return (w?.groupId ?? null) === parentId
+  const withFlag: WorkspaceState = {
+    ...state,
+    workspaces: state.workspaces.map((w) => (w.id === id ? updated : w)),
   }
-  const pinnedOf = (nodeId: string): boolean =>
-    state.workspaces.find((w) => w.id === nodeId)?.pinned === true
+  return { ...withFlag, order: reorderPinned(withFlag, id, pinned) }
+}
+
+/// Pin or unpin a GROUP (#52): a pinned group leads at its OWN level — top
+/// level or inside its parent group — and composes with nesting (inside a
+/// pinned group, its pinned children still lead, each by their own flag).
+/// Same ordering contract as setWorkspacePinned. The flag drops on unpin so
+/// an unpinned group persists byte-identical to one that was never pinned.
+/// No-op for an unknown id or when the flag already matches.
+export function setGroupPinned(
+  state: WorkspaceState,
+  id: string,
+  pinned: boolean,
+): WorkspaceState {
+  const target = state.groups.find((g) => g.id === id)
+  if (target == null) return state
+  if ((target.pinned ?? false) === pinned) return state
+  const withFlag: WorkspaceState = {
+    ...state,
+    groups: state.groups.map((g) =>
+      g.id === id ? (pinned ? { ...g, pinned } : omitGroupPinned(g)) : g,
+    ),
+  }
+  return { ...withFlag, order: reorderPinned(withFlag, id, pinned) }
+}
+
+/// Drop the `pinned` flag on unpin so an unpinned group persists WITHOUT the
+/// key — byte-identical to one that was never pinned (same hygiene as
+/// omitPinned/omitCollapsed).
+function omitGroupPinned(group: Group): Group {
+  const { pinned: _dropped, ...rest } = group
+  return rest
+}
+
+/// The pinned-first reorder shared by setWorkspacePinned and setGroupPinned
+/// (#52): move `id` within its OWN sibling level in `state.order` — to the
+/// end of the pinned block when `pinned`, else to the head of the unpinned
+/// block. A node's pinned-ness reads off BOTH kinds (`isNodePinned`), so
+/// pinned groups and pinned workspaces share the leading block at every
+/// level and keep their relative order within it. `state` must already carry
+/// the toggled flag. Non-siblings keep their absolute slots.
+function reorderPinned(
+  state: WorkspaceState,
+  id: string,
+  pinned: boolean,
+): string[] {
+  const parentId = parentOf(state, id)
+  const isSibling = (nodeId: string): boolean =>
+    parentOf(state, nodeId) === parentId
   const siblings = state.order.filter(isSibling)
   const rest = siblings.filter((nodeId) => nodeId !== id)
   const insertAt = pinned
-    ? rest.filter(pinnedOf).length
-    : rest.findIndex((nodeId) => !pinnedOf(nodeId))
+    ? rest.filter((nodeId) => isNodePinned(state, nodeId)).length
+    : rest.findIndex((nodeId) => !isNodePinned(state, nodeId))
   const index = insertAt === -1 ? rest.length : insertAt
   const sequence = [...rest.slice(0, index), id, ...rest.slice(index)]
   // Write the reordered sibling sequence back into the SAME order slots, so
@@ -770,11 +1037,15 @@ export function setWorkspacePinned(
   sequence.forEach((nodeId, k) => {
     order[slots[k]] = nodeId
   })
-  return {
-    ...state,
-    workspaces: state.workspaces.map((w) => (w.id === id ? updated : w)),
-    order,
-  }
+  return order
+}
+
+/// A node's pin flag, whichever kind it is — the per-level pinned block
+/// mixes pinned groups and pinned workspaces (#52).
+function isNodePinned(state: WorkspaceState, nodeId: string): boolean {
+  const group = state.groups.find((g) => g.id === nodeId)
+  if (group != null) return group.pinned === true
+  return state.workspaces.find((w) => w.id === nodeId)?.pinned === true
 }
 
 /// Drop the `pinned` flag on unpin so an unpinned workspace persists WITHOUT

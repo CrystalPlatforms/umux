@@ -394,12 +394,29 @@ body {
 }
 
 /* Group rows (#48) reuse the workspace row chrome; the folder glyph marks
-   the node kind until badges land (Phase 4). */
+   the node kind. */
 .row-folder {
   width: 12px;
   height: 12px;
   color: var(--accent);
   flex-shrink: 0;
+}
+
+/* Collapsed-group badge (#50): the live `● N` — N workspaces in the group's
+   subtree have at least one active agent. Sits between the name and the row
+   actions, never covering the name (flex shrinks the name instead). */
+.group-badge {
+  flex-shrink: 0;
+  font-size: var(--text-xs, 11px);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* Not-allowed cursor (#51): the pointer rests on a landing the tree refuses
+   (a group dropped into its own subtree). The drop commits nothing. */
+body.is-dragging.is-drop-invalid,
+body.is-dragging.is-drop-invalid * {
+  cursor: not-allowed !important;
 }
 
 /* Drop-target highlight (#49): the group row lights up while a dragged

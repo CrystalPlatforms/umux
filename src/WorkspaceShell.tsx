@@ -30,9 +30,15 @@ import {
   createGroup,
   renameGroup,
   deleteGroup,
+  deleteGroupSubtree,
   isGroupEmpty,
   moveNode,
   moveToNewGroup,
+  toggleCollapse,
+  unpackGroup,
+  setGroupPinned,
+  groupSubtreeIds,
+  activeAgentCount,
   flattenSidebar,
   addTab,
   closeTab,
@@ -159,6 +165,17 @@ function FolderIcon({ className }: IconProps) {
   // Folder — marks a group row (#48) and the "Move to group…" actions (#49).
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+    </svg>
+  )
+}
+
+function FolderFilledIcon({ className }: IconProps) {
+  // Filled folder — the COLLAPSED group's glyph (#50, Adam's fix): the same
+  // folder shape, filled, so a collapsed group reads at a glance even before
+  // the `● N` badge (or the hidden children) says so.
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
     </svg>
   )
@@ -538,6 +555,9 @@ export function WorkspaceShell() {
         label: string
         isGroup: boolean
         regions: SidebarRegion[]
+        // The dragged node's own subtree ids (#51): a landing inside them is
+        // rejected — a group can never file into itself or a descendant.
+        forbidden: ReadonlySet<string>
         listTop: number
         x: number
         y: number
@@ -606,6 +626,8 @@ export function WorkspaceShell() {
       dragRef.current = null
       dragActive.current = false
       document.body.classList.remove('is-dragging')
+      document.body.classList.remove('is-drop-invalid')
+      cancelExpand()
       // The trailing click of this gesture must not activate whatever row
       // ends up under the pointer.
       suppressClickRef.current = true
@@ -615,9 +637,57 @@ export function WorkspaceShell() {
       setTabDrop(null)
     }
 
-    const activateSidebar = (id: string, x: number, y: number): SidebarRegion[] => {
+    // --- Hover-expand + not-allowed cursor (#51) ----------------------------
+    //
+    // Hovering a COLLAPSED group while a drag is live expands it after a
+    // short delay (cmux-style: the drop target opens itself so the row can
+    // be filed deeper without a second gesture). One timer at a time,
+    // re-armed whenever the hovered group changes; the rows are re-measured
+    // after the expand so the live line lands on the NEW layout.
+    let expandTimer: number | null = null
+    let expandTarget: string | null = null
+    const cancelExpand = () => {
+      if (expandTimer != null) window.clearTimeout(expandTimer)
+      expandTimer = null
+      expandTarget = null
+    }
+    const scheduleExpand = (gid: string) => {
+      if (expandTarget === gid) return
+      cancelExpand()
+      expandTarget = gid
+      expandTimer = window.setTimeout(() => {
+        expandTimer = null
+        expandTarget = null
+        persist(toggleCollapse(stateRef.current, gid))
+        requestAnimationFrame(() => {
+          const d = dragRef.current
+          if (d?.kind !== 'sidebar') return
+          d.regions = measureSidebarRegions()
+          dragRef.current = { ...d }
+          setDrag(dragRef.current)
+        })
+      }, 600)
+    }
+
+    const applySidebarDrop = (drop: SidebarDrop) => {
+      sideDropRef.current = drop
+      setSideDrop(drop)
+      // The cursor says "not allowed" over a forbidden landing (#51).
+      document.body.classList.toggle('is-drop-invalid', drop.rejected)
+      // Hovering a COLLAPSED group (its middle zone) opens it after the
+      // delay (#51); leaving it — or any rejected zone — cancels the arm.
+      if (!drop.rejected && drop.intoGroupId != null) {
+        const hovered = stateRef.current.groups.find((g) => g.id === drop.intoGroupId)
+        if (hovered?.collapsed === true) scheduleExpand(hovered.id)
+        else cancelExpand()
+      } else {
+        cancelExpand()
+      }
+    }
+
+    const measureSidebarRegions = (): SidebarRegion[] => {
       const listEl = listRef.current
-      const regions: SidebarRegion[] = listEl
+      return listEl
         ? [...listEl.querySelectorAll<HTMLElement>('.workspace-row')].map((el) => {
             const rect = el.getBoundingClientRect()
             const nodeId = el.dataset.nodeId ?? ''
@@ -625,8 +695,11 @@ export function WorkspaceShell() {
             return {
               id: nodeId,
               kind: isGroup ? 'group' : 'workspace',
+              // The row's parent (#51): a group's OWN parentId, a
+              // workspace's groupId; null = top level.
               parentId: isGroup
-                ? null
+                ? (stateRef.current.groups.find((g) => g.id === nodeId)?.parentId ??
+                  null)
                 : (stateRef.current.workspaces.find((w) => w.id === nodeId)?.groupId ??
                   null),
               top: rect.top,
@@ -634,6 +707,11 @@ export function WorkspaceShell() {
             }
           })
         : []
+    }
+
+    const activateSidebar = (id: string, x: number, y: number): SidebarRegion[] => {
+      const listEl = listRef.current
+      const regions: SidebarRegion[] = measureSidebarRegions()
       const isGroup = !stateRef.current.workspaces.some((w) => w.id === id)
       const label = isGroup
         ? (stateRef.current.groups.find((g) => g.id === id)?.name ?? '')
@@ -644,6 +722,8 @@ export function WorkspaceShell() {
         label,
         isGroup,
         regions,
+        // Nothing inside the dragged group's own subtree is a legal landing.
+        forbidden: new Set(groupSubtreeIds(stateRef.current, id)),
         listTop: listEl?.getBoundingClientRect().top ?? 0,
         x,
         y,
@@ -694,10 +774,13 @@ export function WorkspaceShell() {
         // First line position lands in THIS event — it must not wait for a
         // further move to appear.
         if (cand.kind === 'sidebar') {
-          const regions = activateSidebar(cand.id, e.clientX, e.clientY)
-          const drop = computeSidebarDrop(e.clientY, cand.id, regions)
-          sideDropRef.current = drop
-          setSideDrop(drop)
+          activateSidebar(cand.id, e.clientX, e.clientY)
+          const seeded = dragRef.current
+          if (seeded?.kind === 'sidebar') {
+            applySidebarDrop(
+              computeSidebarDrop(e.clientY, cand.id, seeded.regions, seeded.forbidden),
+            )
+          }
         } else {
           const regions = activateTab(cand.wsId as string, cand.id, e.clientX, e.clientY)
           const drop = computeTabDrop(e.clientX, regions)
@@ -713,9 +796,7 @@ export function WorkspaceShell() {
         ghostRef.current.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 10}px)`
       }
       if (d.kind === 'sidebar') {
-        const drop = computeSidebarDrop(e.clientY, d.id, d.regions)
-        sideDropRef.current = drop
-        setSideDrop(drop)
+        applySidebarDrop(computeSidebarDrop(e.clientY, d.id, d.regions, d.forbidden))
       } else {
         const drop = computeTabDrop(e.clientX, d.regions)
         tabDropRef.current = drop
@@ -735,7 +816,10 @@ export function WorkspaceShell() {
       if (d != null) {
         if (d.kind === 'sidebar') {
           const drop = sideDropRef.current
-          if (drop != null) {
+          // A rejected landing (#51: into the dragged group's own subtree)
+          // commits nothing — moveNode would refuse it anyway, but the drop
+          // decision is the single source of truth for the gesture.
+          if (drop != null && !drop.rejected) {
             const parentId = drop.intoGroupId ?? drop.parentId
             persist(
               moveNode(stateRef.current, d.id, {
@@ -1444,12 +1528,12 @@ export function WorkspaceShell() {
     if (ws != null) startRename(ws)
   }
 
-  // --- Group actions (#48) ---------------------------------------------------
-  // The group twins of the workspace actions: inline rename (pencil icon or
-  // the group menu), direct delete of an EMPTY group, and the menu entry
-  // points. The destructive delete-with-children lands in Phase 5 — until
-  // then deleteGroup no-ops on a non-empty group, and the UI keeps its
-  // Delete action disabled with a hint.
+  // --- Group actions (#48; completed in #51/#52) ------------------------------
+  // Inline rename (pencil icon or the group menu), Pin/Unpin (#52), Unpack
+  // (#51: dissolve — the children return to top level), and the destructive
+  // Delete: a BARE group deletes outright, anything else goes through the
+  // SHARED confirmation dialog (#51) with the affected-workspace count and a
+  // live-process warning.
 
   const startGroupRename = (g: Group) => {
     setEditingGroupId(g.id)
@@ -1474,7 +1558,77 @@ export function WorkspaceShell() {
     const gid = menu?.groupId
     setMenu(null)
     if (gid == null) return
-    persist(deleteGroup(stateRef.current, gid))
+    requestDeleteGroup(gid)
+  }
+
+  /// Unpack from the group menu (#51): dissolve the group — every workspace
+  /// and subgroup it holds returns to top level, nothing closes.
+  const unpackGroupFromMenu = () => {
+    const gid = menu?.groupId
+    setMenu(null)
+    if (gid == null) return
+    persist(unpackGroup(stateRef.current, gid))
+  }
+
+  /// Pin/unpin a group from its context menu (#52): a pinned group leads at
+  /// its own level (setGroupPinned keeps the ordering).
+  const togglePinGroupFromMenu = () => {
+    const gid = menu?.groupId
+    setMenu(null)
+    if (gid == null) return
+    const g = stateRef.current.groups.find((x) => x.id === gid)
+    persist(setGroupPinned(stateRef.current, gid, g?.pinned !== true))
+  }
+
+  /// Ask-or-delete for a group (#51): a BARE group (nothing inside at any
+  /// depth) deletes outright — nothing can be lost. Anything else opens the
+  /// shared confirmation, but only after counting how many of the affected
+  /// workspaces' LOCAL panels have a running process (same pty_is_busy
+  /// batch the workspace close uses) so the dialog can warn.
+  const requestDeleteGroup = (gid: string) => {
+    const group = stateRef.current.groups.find((g) => g.id === gid)
+    if (group == null) return
+    if (isGroupEmpty(stateRef.current, gid)) {
+      persist(deleteGroup(stateRef.current, gid))
+      return
+    }
+    const affected = stateRef.current.workspaces.filter(
+      (w) => w.groupId != null && groupSubtreeIds(stateRef.current, gid).includes(w.groupId),
+    )
+    const locals = affected.flatMap((w) =>
+      panelIdsOf(stateRef.current, w.id)
+        .map((pid) => ptyIdsRef.current.get(pid))
+        .filter((e): e is PtyEntry => e != null && e.kind === 'local'),
+    )
+    if (locals.length === 0) {
+      setPendingDeleteGroup({
+        groupId: gid,
+        name: group.name,
+        workspaceCount: affected.length,
+        busyCount: 0,
+      })
+      return
+    }
+    void Promise.all(
+      locals.map((e) =>
+        invoke<boolean>('pty_is_busy', { id: e.id }).catch(() => false),
+      ),
+    ).then((results) => {
+      setPendingDeleteGroup({
+        groupId: gid,
+        name: group.name,
+        workspaceCount: affected.length,
+        busyCount: results.filter(Boolean).length,
+      })
+    })
+  }
+
+  const confirmDeleteGroup = () => {
+    const pending = pendingDeleteGroup
+    setPendingDeleteGroup(null)
+    if (pending == null) return
+    persist(deleteGroupSubtree(stateRef.current, pending.groupId))
+    void snapshotAndPersist()
   }
 
   // --- Move to group… (#49) ---------------------------------------------------
@@ -1715,6 +1869,16 @@ export function WorkspaceShell() {
     if (pd == null) return
     persist(deleteWorkspace(stateRef.current, pd.id))
   }
+
+  // A GROUP delete waiting on the shared confirmation (#51): how many
+  // workspaces the subtree holds and how many of their panels have live
+  // processes — the same dialog the workspace close/delete renders.
+  const [pendingDeleteGroup, setPendingDeleteGroup] = useState<{
+    groupId: string
+    name: string
+    workspaceCount: number
+    busyCount: number
+  } | null>(null)
 
   // Dragging a divider (story 18) updates state live (cheap, in-memory) while
   // the final ratio is persisted once, on pointer-up — one config write per
@@ -2026,11 +2190,22 @@ export function WorkspaceShell() {
                 key={entry.group.id}
                 data-testid={`group-row-${entry.group.id}`}
                 data-node-id={entry.group.id}
+                data-testid-collapse={entry.group.collapsed === true ? 'collapsed' : undefined}
                 className={`workspace-row group-row ${
                   sideDrop?.intoGroupId === entry.group.id ? 'is-drop-target' : ''
                 } ${drag?.kind === 'sidebar' && drag.id === entry.group.id ? 'is-dragged' : ''}`}
                 style={entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined}
                 onPointerDown={(e) => beginSidebarDrag(e, entry.group.id)}
+                onClick={() => {
+                  // A drag's trailing click must not toggle the group.
+                  if (suppressClickRef.current) {
+                    suppressClickRef.current = false
+                    return
+                  }
+                  // Click toggles collapse IN PLACE (#50) — the flag lives in
+                  // the tree (persisted), never in transient UI state.
+                  persist(toggleCollapse(stateRef.current, entry.group.id))
+                }}
                 onContextMenu={(e) =>
                   openMenu(e, false, undefined, undefined, entry.group.id)
                 }
@@ -2055,8 +2230,36 @@ export function WorkspaceShell() {
                   />
                 ) : (
                   <>
-                    <FolderIcon className="row-folder" />
+                    {/* #52 (Adam's fix): the pin glyph comes BEFORE the
+                        folder — a pinned group reads as "pinned, then what
+                        kind of node" left to right. */}
+                    {entry.group.pinned === true && <PinIcon className="row-pin" />}
+                    {/* The folder state doubles as the collapse indicator
+                        (#50, Adam's fix): FILLED when the group is collapsed,
+                        outline when expanded — same shape, one glance. */}
+                    {entry.group.collapsed === true ? (
+                      <FolderFilledIcon className="row-folder" />
+                    ) : (
+                      <FolderIcon className="row-folder" />
+                    )}
                     <span className="workspace-name">{entry.group.name}</span>
+                    {/* Collapsed-group badge (#50): `● N` — how many
+                        workspaces in the group's subtree have at least one
+                        ACTIVE agent (working, or finished and WAITING for
+                        you), aggregated from the same per-panel statuses the
+                        chips render (OSC untouched). Hidden entirely when
+                        nothing is active. */}
+                    {entry.group.collapsed === true &&
+                      activeAgentCount(stateRef.current, entry.group.id, statuses) >
+                        0 && (
+                        <span
+                          className="group-badge"
+                          data-testid={`group-badge-${entry.group.id}`}
+                        >
+                          ●{' '}
+                          {activeAgentCount(stateRef.current, entry.group.id, statuses)}
+                        </span>
+                      )}
                     <div className="row-actions">
                       <button
                         className="icon-btn"
@@ -2069,22 +2272,18 @@ export function WorkspaceShell() {
                       >
                         <PencilIcon />
                       </button>
-                      {/* Empty groups delete outright (#48) — nothing inside
-                          can be lost; a non-empty group stays until Phase 5's
-                          destructive delete, so the button disables with a
-                          hint instead. */}
+                      {/* Delete group (#51): the destructive subtree delete
+                          lives behind the shared confirmation — a BARE group
+                          (nothing inside) deletes outright, anything else
+                          asks with the affected-workspace count and a
+                          live-process warning. */}
                       <button
                         className="icon-btn"
                         aria-label={`Delete group ${entry.group.name}`}
-                        title={
-                          isGroupEmpty(stateRef.current, entry.group.id)
-                            ? 'Delete group'
-                            : 'Group is not empty'
-                        }
-                        disabled={!isGroupEmpty(stateRef.current, entry.group.id)}
+                        title="Delete group"
                         onClick={(e) => {
                           e.stopPropagation()
-                          persist(deleteGroup(stateRef.current, entry.group.id))
+                          requestDeleteGroup(entry.group.id)
                         }}
                       >
                         <CloseIcon />
@@ -2515,6 +2714,28 @@ export function WorkspaceShell() {
         />
       )}
 
+      {/* Shared destructive confirmation (#51): Delete group removes the
+          group with EVERYTHING inside it. The message names how many
+          workspaces are affected and warns when any has a live process —
+          the same contract #53's batch actions will reuse. */}
+      {pendingDeleteGroup != null && (
+        <CloseConfirmDialog
+          title={`Delete group "${pendingDeleteGroup.name}"?`}
+          message={`Delete "${pendingDeleteGroup.name}" with everything inside it? ${
+            pendingDeleteGroup.workspaceCount
+          } workspace${pendingDeleteGroup.workspaceCount === 1 ? '' : 's'} will be removed. This cannot be undone.${
+            pendingDeleteGroup.busyCount > 0
+              ? ` ${pendingDeleteGroup.busyCount} panel${
+                  pendingDeleteGroup.busyCount === 1 ? ' has' : 's have'
+                } a running process that will be terminated.`
+              : ''
+          }`}
+          confirmLabel="Delete"
+          onConfirm={confirmDeleteGroup}
+          onCancel={() => setPendingDeleteGroup(null)}
+        />
+      )}
+
       {menu && (
         <div
           className="context-menu"
@@ -2709,15 +2930,25 @@ export function WorkspaceShell() {
               </>
             )
           })()}
-          {/* Group row menu (#48): Rename + Delete (empty only — the same
-              rule the row's delete button follows). */}
+          {/* Group row menu (#48; complete since #51/#52): Pin/Unpin, Rename,
+              Unpack (dissolve — children return to top level) and the
+              destructive Delete, which asks through the shared confirmation
+              whenever the group holds anything. */}
           {menu.tabId == null && menu.groupId && (() => {
             const menuGroup = state.groups.find((g) => g.id === menu.groupId)
             if (menuGroup == null) return null
-            const empty = isGroupEmpty(stateRef.current, menuGroup.id)
+            const pinned = menuGroup.pinned === true
             return (
               <>
                 <div className="menu-separator" />
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={togglePinGroupFromMenu}
+                >
+                  <PinIcon />
+                  {pinned ? 'Unpin group' : 'Pin group'}
+                </button>
                 <button
                   className="menu-item"
                   role="menuitem"
@@ -2727,10 +2958,17 @@ export function WorkspaceShell() {
                   Rename group
                 </button>
                 <button
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={unpackGroupFromMenu}
+                >
+                  <FolderIcon />
+                  Unpack group
+                </button>
+                <div className="menu-separator" />
+                <button
                   className="menu-item danger"
                   role="menuitem"
-                  disabled={!empty}
-                  title={empty ? undefined : 'Group is not empty'}
                   onClick={deleteGroupFromMenu}
                 >
                   <CloseIcon />
