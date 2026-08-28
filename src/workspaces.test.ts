@@ -29,6 +29,7 @@ import {
   openWorkspace,
   addTab,
   closeTab,
+  moveTab,
   switchTab,
   renameTab,
   setTabPinned,
@@ -627,6 +628,87 @@ describe('workspace state', () => {
       const next = moveWorkspace(state, 'nope', 1)
 
       expect(next).toBe(state)
+    })
+  })
+
+  // #45 — drag & drop reorder of tabs inside ONE workspace's tab bar.
+  // Assumptions encoded:
+  //  - Only ORDER changes: everything hangs off the tab's id (name, layout
+  //    tree, pinned flag), and the runtime activeTabId record (id-keyed)
+  //    follows the moved tab untouched.
+  //  - Same splice semantics as moveWorkspace: target index is clamped, and
+  //    a drop ON a tab lands the dragged tab at that tab's position.
+  //  - No-op for unknown workspace or tab ids (same object back).
+  describe('moveTab', () => {
+    function twoTabState() {
+      let state = createWorkspace(emptyState, 'alpha', seq('ws-1', 'leaf-1'))
+      state = addTab(state, 'ws-1', seq('tab-1', 'leaf-2'))
+      state = addTab(state, 'ws-1', seq('tab-2', 'leaf-3'))
+      return state
+    }
+
+    it('moves a tab forward within its workspace', () => {
+      const state = twoTabState()
+      const ws = () => state.workspaces.find((w) => w.id === 'ws-1')!
+      const first = ws().tabs![0].id
+
+      const next = moveTab(state, 'ws-1', first, 2)
+
+      expect(next.workspaces.find((w) => w.id === 'ws-1')!.tabs!.map((t) => t.id)).toEqual([
+        ws().tabs![1].id,
+        ws().tabs![2].id,
+        first,
+      ])
+    })
+
+    it('moves a tab backward within its workspace', () => {
+      const state = twoTabState()
+      const tabs = () => state.workspaces.find((w) => w.id === 'ws-1')!.tabs!
+      const last = tabs()[2].id
+
+      const next = moveTab(state, 'ws-1', last, 0)
+
+      expect(next.workspaces.find((w) => w.id === 'ws-1')!.tabs!.map((t) => t.id)).toEqual([
+        last,
+        tabs()[0].id,
+        tabs()[1].id,
+      ])
+    })
+
+    it('keeps the moved tab\'s identity: name, layout, and active-tab record travel with it', () => {
+      const state = twoTabState()
+      const tabs = () => state.workspaces.find((w) => w.id === 'ws-1')!.tabs!
+      const firstId = tabs()[0].id
+      const firstName = tabs()[0].name
+      const firstLayout = tabs()[0].layout
+
+      const next = moveTab(state, 'ws-1', firstId, 2)
+
+      const moved = next.workspaces.find((w) => w.id === 'ws-1')!.tabs![2]
+      expect(moved.id).toBe(firstId)
+      expect(moved.name).toBe(firstName)
+      expect(moved.layout).toBe(firstLayout)
+      // Runtime record is id-keyed — the move leaves activation untouched
+      // (whatever tab was active before the drag is active after it).
+      expect(next.activeTabId['ws-1']).toBe(state.activeTabId['ws-1'])
+    })
+
+    it('clamps an out-of-range index', () => {
+      const state = twoTabState()
+      const first = state.workspaces.find((w) => w.id === 'ws-1')!.tabs![0].id
+
+      const next = moveTab(state, 'ws-1', first, 99)
+
+      const ids = next.workspaces.find((w) => w.id === 'ws-1')!.tabs!.map((t) => t.id)
+      expect(ids[ids.length - 1]).toBe(first)
+    })
+
+    it('is a no-op for an unknown workspace or tab id', () => {
+      const state = twoTabState()
+      const someTab = state.workspaces.find((w) => w.id === 'ws-1')!.tabs![0].id
+
+      expect(moveTab(state, 'nope', someTab, 0)).toBe(state)
+      expect(moveTab(state, 'ws-1', 'nope', 0)).toBe(state)
     })
   })
 

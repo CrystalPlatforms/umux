@@ -744,6 +744,35 @@ fn save_settings(state: State<'_, SettingsStore>, settings: Settings) -> Result<
     state.save(&settings).map_err(|e| e.to_string())
 }
 
+/// Open settings.json with the platform's default handler (Settings footnote
+/// link): the file the toggles persist to, revealed in the user's own editor.
+/// Fire-and-forget spawn — a GUI editor may stay open for hours, so we never
+/// wait on it; a failed SPAWN (opener binary missing) is the only error the
+/// frontend sees, and it logs it without breaking the dialog.
+#[tauri::command]
+fn open_settings_file() -> Result<(), String> {
+    let path = settings_path();
+    #[allow(unused_mut)]
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(&path);
+        c
+    } else if cfg!(target_os = "windows") {
+        // One plain argument into explorer — no shell, no quoting pitfalls;
+        // explorer opens the file with its default association.
+        let mut c = std::process::Command::new("explorer");
+        c.arg(&path);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&path);
+        c
+    };
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("open settings file failed: {e}"))
+}
+
 /// Poll the ssh child's exit code (briefly, after its output stream ended) and
 /// translate a connection-failure exit into a clear, user-readable message.
 /// Returns `None` for a clean exit or a remote-command exit (the connection
@@ -880,6 +909,7 @@ pub fn run() {
             notifications_muted,
             load_settings,
             save_settings,
+            open_settings_file,
         ]);
 
     // #30 AC2: "when off, the SDK is never initialized (no network call)" —

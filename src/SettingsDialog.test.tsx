@@ -35,6 +35,7 @@ describe('SettingsDialog', () => {
     expect(notifications).toHaveAttribute('aria-checked', 'true')
     expect(agentStatus).toHaveAttribute('aria-checked', 'true')
     expect(sessionRestore).toHaveAttribute('aria-checked', 'true')
+    expect(getByTestId('toggle-ports-tooltip')).toHaveAttribute('aria-checked', 'true')
     expect(queryByTestId('toggle-analytics')).toBeNull()
   })
 
@@ -71,6 +72,35 @@ describe('SettingsDialog', () => {
     expect(onChange).toHaveBeenCalledWith({ agentStatusEnabled: true })
   })
 
+  // T2c (#43 — the ports-tooltip toggle follows the same contract, both
+  //   directions: on -> off reports the patch, off reflects aria-checked).
+  it('reports a ports-tooltip flip as a patch with the next value', () => {
+    const onChange = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, portsTooltipEnabled: true }}
+        onChange={onChange}
+        onClose={() => {}}
+      />,
+    )
+
+    fireEvent.click(getByTestId('toggle-ports-tooltip'))
+
+    expect(onChange).toHaveBeenCalledWith({ portsTooltipEnabled: false })
+  })
+
+  it('mirrors portsTooltipEnabled=false in the switch state', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, portsTooltipEnabled: false }}
+        onChange={() => {}}
+        onClose={() => {}}
+      />,
+    )
+
+    expect(getByTestId('toggle-ports-tooltip')).toHaveAttribute('aria-checked', 'false')
+  })
+
   // T3 (analytics is invisible to the user — always on, no switch; the HITL
   //   product decision): the dialog must not mention analytics at all.
   it('does not surface any analytics wording', () => {
@@ -101,5 +131,26 @@ describe('SettingsDialog', () => {
 
     fireEvent.click(second.getByRole('button', { name: /close settings/i }))
     expect(onClose).toHaveBeenCalledTimes(3)
+  })
+
+  // T5 (the footnote's settings.json is a LINK): clicking the settings.json
+  //   button reports upward (the parent runs the Tauri invoke — this
+  //   component stays invoke-free), and the click must NOT close the dialog.
+  it('clicking the settings.json link reports it upward without closing', () => {
+    const onOpen = vi.fn()
+    const onClose = vi.fn()
+    const { getByRole } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={onClose}
+        onOpenSettingsFile={onOpen}
+      />,
+    )
+
+    fireEvent.click(getByRole('button', { name: 'settings.json' }))
+
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    expect(onClose).not.toHaveBeenCalled()
   })
 })

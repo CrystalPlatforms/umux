@@ -53,10 +53,15 @@ export function SettingsDialog({
   settings,
   onChange,
   onClose,
+  onOpenSettingsFile,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
   onClose: () => void
+  // The footnote's settings.json mention is a LINK: clicking it asks the
+  // parent to open the file with the platform's default editor (the Tauri
+  // invoke lives in WorkspaceShell — this component stays invoke-free).
+  onOpenSettingsFile?: () => void
 }) {
   // Escape closes the dialog — the same dismissal key the rename/create
   // inputs use, so the app has one "back out" reflex everywhere.
@@ -122,10 +127,25 @@ export function SettingsDialog({
           testId="toggle-session-restore"
           onToggle={(next) => onChange({ sessionRestoreEnabled: next })}
         />
+        <SettingsToggle
+          label="Listening-ports tooltip"
+          description="Show a tab's listening ports when hovering it (#43)"
+          checked={settings.portsTooltipEnabled}
+          testId="toggle-ports-tooltip"
+          onToggle={(next) => onChange({ portsTooltipEnabled: next })}
+        />
 
         <div className="settings-footnote">
           Changes apply immediately and are saved to{' '}
-          <span className="settings-footnote__path">settings.json</span>.
+          <button
+            type="button"
+            className="settings-footnote__path"
+            title="Open settings.json in your default editor"
+            onClick={onOpenSettingsFile}
+          >
+            settings.json
+          </button>
+          .
         </div>
       </div>
     </div>

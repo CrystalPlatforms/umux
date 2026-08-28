@@ -3,15 +3,17 @@
 // The persisted form lives in the Rust SettingsStore (settings.json); this
 // module only mirrors the wire shape so the frontend and backend agree
 // byte-for-byte (camelCase keys). Defaults match the Rust `Settings::default`:
-// notifications on, agent status on, session restore on, analytics on.
-// Analytics has NO Settings switch (product decision, HITL follow-up) — the
-// field only gains meaning when Phase 6 initializes Aptabase.
+// notifications on, agent status on, session restore on, analytics on,
+// ports tooltip on (#43). Analytics has NO Settings switch (product decision,
+// HITL follow-up) — the field only gains meaning when Phase 6 initializes
+// Aptabase.
 
 export type Settings = {
   notificationsEnabled: boolean
   agentStatusEnabled: boolean
   sessionRestoreEnabled: boolean
   analyticsEnabled: boolean
+  portsTooltipEnabled: boolean
 }
 
 export const defaultSettings: Settings = {
@@ -19,6 +21,7 @@ export const defaultSettings: Settings = {
   agentStatusEnabled: true,
   sessionRestoreEnabled: true,
   analyticsEnabled: true,
+  portsTooltipEnabled: true,
 }
 
 /// Coerce an unknown invoke payload into a complete Settings object: missing
@@ -31,5 +34,6 @@ export function coerceSettings(raw: unknown): Settings {
     agentStatusEnabled: r.agentStatusEnabled ?? defaultSettings.agentStatusEnabled,
     sessionRestoreEnabled: r.sessionRestoreEnabled ?? defaultSettings.sessionRestoreEnabled,
     analyticsEnabled: r.analyticsEnabled ?? defaultSettings.analyticsEnabled,
+    portsTooltipEnabled: r.portsTooltipEnabled ?? defaultSettings.portsTooltipEnabled,
   }
 }

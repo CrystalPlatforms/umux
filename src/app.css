@@ -747,7 +747,10 @@ body {
 
 .context-menu {
   position: fixed;
-  z-index: 1000;
+  /* Above the ports tooltip (#43): the tooltip may show UNDER the menu, so
+     where they could ever touch, the menu paints on top. Still below the
+     modal overlay (1100). */
+  z-index: 1050;
   min-width: 184px;
   padding: 5px;
   background: var(--bg-elevated);
@@ -1133,6 +1136,23 @@ body {
 .settings-footnote__path {
   font-family: var(--font-mono);
   color: var(--text-dim);
+}
+
+/* The footnote's settings.json is a link-style button (opens the file via
+   the backend). Reset the button chrome so it reads as a plain link; buttons
+   do not inherit font sizing, so the footnote's own token repeats here. */
+button.settings-footnote__path {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+button.settings-footnote__path:hover {
+  color: var(--text);
 }
 
 /* Confirm-dialog buttons (v0.2 Phase 4 / #28) — siblings of .btn-primary. */

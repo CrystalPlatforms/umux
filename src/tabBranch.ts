@@ -66,6 +66,30 @@ export function branchQueryDirs(
   ]
 }
 
+/// Merge one `git_branches` answer batch into the label cache (#44). A
+/// branch ADDS or updates its directory's label; a `null` answer REMOVES the
+/// directory's cached label — leaving a repository (`cd ..` out, `.git`
+/// deleted) must make the row's branch disappear, so "no repo" may not be
+/// silently ignored the way it used to be. Answers for directories nothing
+/// asked about are still honored (harmless: the render reads only live
+/// entries), and a malformed entry is skipped rather than poisoning the map.
+export function applyBranchAnswers(
+  prev: Record<string, string>,
+  answers: Array<{ dir: string; branch: string | null }>,
+): Record<string, string> {
+  let next = prev
+  for (const a of answers) {
+    if (a?.dir == null) continue
+    if (a.branch != null) {
+      if (next[a.dir] !== a.branch) next = { ...next, [a.dir]: a.branch }
+    } else if (a.dir in next) {
+      const { [a.dir]: _gone, ...rest } = next
+      next = rest
+    }
+  }
+  return next
+}
+
 // --- internals ---------------------------------------------------------------
 
 function branchEntriesOfTab(

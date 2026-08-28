@@ -1959,4 +1959,126 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       expect(writeText).toHaveBeenCalledWith('http://localhost:8000')
     })
   })
+
+  // #43 — tooltip 2.0: a Settings switch gates the whole feature, and an
+  // open context menu must never share pixels with the tooltip.
+  // Assumptions encoded:
+  //  - With portsTooltipEnabled=false (persisted via load_settings), hover
+  //    fires NO tab_ports query and renders no tooltip.
+  //  - Opening any context menu dismisses a live tooltip immediately; it
+  //    returns only on the next fresh hover.
+  describe('ports tooltip 2.0 (#43)', () => {
+    const portCalls = () =>
+      invokeMock.mock.calls.filter((c) => c[0] === 'tab_ports')
+
+    it('the Settings switch OFF means no query and no tooltip on hover', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'load_settings') return Promise.resolve({ portsTooltipEnabled: false })
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      // Give every load/timer effect time to settle before the negative
+      // assertion (same guard the no-hover test uses).
+      await act(() => new Promise((r) => setTimeout(r, 30)))
+
+      fireEvent.mouseEnter(within(panel).getAllByRole('tab')[0])
+      await act(() => new Promise((r) => setTimeout(r, 30)))
+
+      expect(portCalls()).toHaveLength(0)
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    })
+
+    it('opening the context menu dismisses the live tooltip', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'tab_ports')
+          return Promise.resolve([{ tabId: args?.tabs?.[0]?.tabId ?? '', ports: [8000] }])
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      const tab = within(panel).getAllByRole('tab')[0]
+
+      fireEvent.mouseEnter(tab)
+      await screen.findByRole('tooltip')
+
+      fireEvent.contextMenu(tab)
+
+      await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument())
+    })
+
+    // Round 2 (HITL): re-hovering the row while the menu stays open re-arms
+    // the tooltip — but it must anchor BELOW the menu (menu bottom + gap),
+    // never over its items. jsdom rects are all-zero, so the menu's rect is
+    // mocked to something recognizable.
+    it('re-hovering while the menu is open anchors the tooltip below the menu', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'tab_ports')
+          return Promise.resolve([{ tabId: args?.tabs?.[0]?.tabId ?? '', ports: [8000] }])
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      const tab = within(panel).getAllByRole('tab')[0]
+
+      // Menu first (it dismisses nothing — no tooltip is open yet).
+      fireEvent.contextMenu(tab)
+      const menuEl = screen.getByRole('menu')
+      vi.spyOn(menuEl, 'getBoundingClientRect').mockReturnValue({
+        x: 100,
+        y: 50,
+        left: 100,
+        top: 50,
+        right: 300,
+        bottom: 250,
+        width: 200,
+        height: 200,
+        toJSON: () => ({}),
+      } as DOMRect)
+
+      fireEvent.mouseEnter(tab)
+      const tip = await screen.findByRole('tooltip')
+
+      expect(tip).toHaveStyle({ left: '100px', top: '256px' })
+    })
+  })
+
+  // #45 — drag & drop reorder of tabs within ONE workspace's bar.
+  // Assumptions encoded:
+  //  - Dropping a dragged tab ON another tab lands it at the target's
+  //    position; the bar order in the DOM reflects the new array order.
+  //  - The move persists through save_workspaces like every other edit.
+  describe('tab drag & drop (#45)', () => {
+    it('dropping a tab onto another swaps their positions in the bar', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+      await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+      const tabEls = () => within(panel).getAllByRole('tab')
+      const before = tabEls().map((el) => el.getAttribute('data-testid'))
+
+      fireEvent.dragStart(tabEls()[0])
+      fireEvent.drop(tabEls()[1])
+
+      const after = tabEls().map((el) => el.getAttribute('data-testid'))
+      expect(after).toEqual([before[1], before[0]])
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({ workspaces: expect.any(Array) }),
+      )
+    })
+  })
 })

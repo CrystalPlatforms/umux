@@ -518,6 +518,33 @@ export function moveWorkspace(
   return { ...state, workspaces: next }
 }
 
+/// Reorder workspace `id`'s tabs (#45): drag & drop inside ONE workspace's
+/// tab bar (HITL: no cross-workspace drags). Mirrors moveWorkspace — splice
+/// the tab out, clamp the target index, splice it back. Everything hangs off
+/// the tab's ID (name, panels, pinned flag, the active-tab record), so only
+/// ORDER changes. No-op for unknown workspace/tab ids.
+export function moveTab(
+  state: WorkspaceState,
+  id: string,
+  tabId: string,
+  newIndex: number,
+): WorkspaceState {
+  const ws = state.workspaces.find((w) => w.id === id)
+  if (ws?.tabs == null) return state
+  const fromIndex = ws.tabs.findIndex((t) => t.id === tabId)
+  if (fromIndex === -1) return state
+  const next = [...ws.tabs]
+  const [moved] = next.splice(fromIndex, 1)
+  const clamped = Math.max(0, Math.min(newIndex, next.length))
+  next.splice(clamped, 0, moved)
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) =>
+      w.id === id ? { ...w, tabs: next } : w,
+    ),
+  }
+}
+
 /// The panel ids of workspace `id`, in tab-then-tree order — the stable
 /// identity the renderer keys terminal surfaces by. Covers EVERY tab's
 /// panes (#37 rework), with the legacy top-level `layout` as a fallback for

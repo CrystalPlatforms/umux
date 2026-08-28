@@ -21,7 +21,7 @@ import {
   addTab,
   type WorkspaceState,
 } from './workspaces'
-import { branchDirsByTab, branchQueryDirs } from './tabBranch'
+import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
 
 /// Deterministic id generator over a fixed sequence (tests stay pure).
 function seq(...ids: string[]): () => string {
@@ -189,6 +189,65 @@ describe('tab branch label mapping', () => {
     it('query list drops everything while session restore is off', () => {
       const st = twoPanelState()
       expect(branchQueryDirs(st, false)).toEqual([])
+    })
+  })
+
+  // #44 — merging git_branches answers into the label cache. Assumptions
+  // encoded:
+  //  - A branch answer ADDS/updates its directory's label (same as the old
+  //    inline logic).
+  //  - A NULL answer REMOVES the directory's cached label — the #44 rule:
+  //    leaving a repository must make the branch disappear, so "no repo"
+  //    may not be ignored.
+  //  - Nothing to change returns the SAME object (React state skip).
+  //  - Malformed entries (null dir) are skipped, never poison the map.
+  describe('applyBranchAnswers', () => {
+    it('adds a branch label for its directory', () => {
+      const next = applyBranchAnswers({}, [{ dir: '/repo/ui', branch: 'main' }])
+
+      expect(next).toEqual({ '/repo/ui': 'main' })
+    })
+
+    it('updates a label when the directory moves to another branch', () => {
+      const next = applyBranchAnswers({ '/repo/ui': 'main' }, [
+        { dir: '/repo/ui', branch: 'feature' },
+      ])
+
+      expect(next).toEqual({ '/repo/ui': 'feature' })
+    })
+
+    it('removes a cached label when the answer says the directory has no repository (#44)', () => {
+      const prev = { '/repo/ui': 'main' }
+
+      const next = applyBranchAnswers(prev, [{ dir: '/repo/ui', branch: null }])
+
+      expect(next).toEqual({})
+    })
+
+    it('leaves other directories\' labels untouched while clearing one', () => {
+      const prev = { '/repo/ui': 'main', '/repo/api': 'develop' }
+
+      const next = applyBranchAnswers(prev, [{ dir: '/repo/ui', branch: null }])
+
+      expect(next).toEqual({ '/repo/api': 'develop' })
+    })
+
+    it('returns the same object when nothing changes', () => {
+      const prev = { '/repo/ui': 'main' }
+
+      const same = applyBranchAnswers(prev, [{ dir: '/repo/ui', branch: 'main' }])
+
+      expect(same).toBe(prev)
+    })
+
+    it('skips malformed entries instead of poisoning the cache', () => {
+      const prev = { '/repo/ui': 'main' }
+
+      const next = applyBranchAnswers(prev, [
+        { dir: null as unknown as string, branch: 'x' },
+      ])
+
+      expect(next).toEqual(prev)
     })
   })
 })

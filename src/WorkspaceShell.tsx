@@ -30,6 +30,7 @@ import {
   setWorkspacePinned,
   addTab,
   closeTab,
+  moveTab,
   switchTab,
   renameTab,
   setTabPinned,
@@ -57,7 +58,7 @@ import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
-import { branchDirsByTab, branchQueryDirs } from './tabBranch'
+import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
 import { formatPorts, localPtyIds, unionPorts } from './tabPorts'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
@@ -464,6 +465,10 @@ export function WorkspaceShell() {
   const menuOpenedAtRef = useRef(0)
   const [collapsed, setCollapsed] = useState(false)
   const [draggedId, setDraggedId] = useState<string | null>(null)
+  // The tab currently being dragged (#45) — separate from `draggedId`
+  // (workspaces) so a sidebar drag can never land on a tab bar and vice
+  // versa; moves are same-workspace only.
+  const [draggedTab, setDraggedTab] = useState<{ wsId: string; tabId: string } | null>(null)
   // Feature toggles (v0.2 Phase 3 / #27). Loaded from the Rust SettingsStore
   // on mount; every change is persisted immediately and takes effect live.
   // `muted` is derived from the notifications toggle — the bell button and
@@ -502,15 +507,7 @@ export function WorkspaceShell() {
         if (!Array.isArray(answers)) {
           throw new Error('malformed git_branches payload')
         }
-        setBranchLabels((prev) => {
-          let next = prev
-          for (const a of answers) {
-            if (a?.branch != null && next[a.dir] !== a.branch) {
-              next = { ...next, [a.dir]: a.branch }
-            }
-          }
-          return next
-        })
+        setBranchLabels((prev) => applyBranchAnswers(prev, answers))
       })
       .catch((e) => console.error('git_branches failed:', e))
   }, [state, settings])
@@ -536,6 +533,9 @@ export function WorkspaceShell() {
   } | null>(null)
   const portsSeq = useRef(0)
   const portsCloseTimer = useRef<number | null>(null)
+  // The live context menu element, when one is rendered — the tooltip reads
+  // its rect to anchor BELOW the menu (see openPortsTip).
+  const menuRef = useRef<HTMLDivElement | null>(null)
   const holdPortsTip = () => {
     if (portsCloseTimer.current != null) {
       window.clearTimeout(portsCloseTimer.current)
@@ -551,13 +551,23 @@ export function WorkspaceShell() {
     // into the terminal area at the sidebar's wall (round 3, HITL).
     side: 'below' | 'right' = 'below',
   ) => {
+    // #43: the Settings switch gates the whole feature — hover does nothing
+    // when it is off (no pull, no tooltip).
+    if (!settings.portsTooltipEnabled) return
     holdPortsTip() // hopping straight to another row must not eat the tip
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const request = ++portsSeq.current
+    // #43 round 2 (HITL): openMenu dismisses a live tip, but re-hovering a
+    // row while the menu is still open re-arms one — and that tip may only
+    // live BELOW the menu, never over its items. So while a menu is on
+    // screen, the anchor moves to the menu's bottom edge.
+    const menuRect = menuRef.current?.getBoundingClientRect()
     const anchor =
-      side === 'right'
-        ? { left: rect.right + 6, top: rect.top }
-        : { left: rect.left, top: rect.bottom + 6 }
+      menu != null && menuRect != null
+        ? { left: menuRect.left, top: menuRect.bottom + 6 }
+        : side === 'right'
+          ? { left: rect.right + 6, top: rect.top }
+          : { left: rect.left, top: rect.bottom + 6 }
     setPortsTip({ ...anchor, key, ports: null })
     const queries = groups
       .map((t) => ({ tabId: t.id, ptyIds: localPtyIds(leafIds(t.layout), ptyIdsRef.current) }))
@@ -635,6 +645,22 @@ export function WorkspaceShell() {
         muted: !patch.notificationsEnabled,
       })
     }
+    // #43: switching the ports tooltip OFF while one is on screen closes it
+    // immediately — a live tip must not outlive its toggle.
+    if (patch.portsTooltipEnabled === false) {
+      portsSeq.current += 1
+      holdPortsTip()
+      setPortsTip(null)
+    }
+  }
+
+  // The Settings footnote's settings.json mention is a LINK: clicking it
+  // opens the file with the platform's default editor (backend command).
+  // Fire-and-forget: a failure only logs — the dialog stays usable.
+  const openSettingsFile = () => {
+    void invoke('open_settings_file').catch((e) =>
+      console.error('open_settings_file failed:', e),
+    )
   }
 
   const muted = !settings.notificationsEnabled
@@ -981,6 +1007,13 @@ export function WorkspaceShell() {
   ) => {
     e.preventDefault()
     e.stopPropagation()
+    // #43: the menu and the ports tooltip must never share pixels — the
+    // tooltip painted OVER the menu's first items. Opening any context menu
+    // dismisses a live tip (and any in-flight ports pull); it only comes
+    // back on the next fresh hover of a row.
+    holdPortsTip()
+    portsSeq.current += 1
+    setPortsTip(null)
     menuOpenedAtRef.current = Date.now()
     setMenu({ x: e.clientX, y: e.clientY, header, workspaceId, tabId })
   }
@@ -1293,8 +1326,27 @@ export function WorkspaceShell() {
     (panelId: string) => applySignal(panelId, 'resize'),
     [applySignal],
   )
+  // Command-submitted cwd refresh (#44): the branch label must follow the
+  // shell's LIVE directory — after `cd ..` out of a repository, waiting for
+  // the 20s periodic tick left the old branch hanging on the row. Enter is
+  // the one signal the frontend gets that a command just ran; a short
+  // trailing debounce (one timer app-wide, last Enter wins) lets the shell
+  // apply the command, then ONE snapshot reads every panel's cwd. Plain
+  // keystrokes (submitted=false) arm nothing.
+  const commandSnapshotTimer = useRef<number | null>(null)
   const notePanelUserInput = useCallback(
-    (panelId: string, submitted: boolean) => applySignal(panelId, 'input', submitted),
+    (panelId: string, submitted: boolean) => {
+      applySignal(panelId, 'input', submitted)
+      if (!submitted) return
+      if (commandSnapshotTimer.current != null) {
+        window.clearTimeout(commandSnapshotTimer.current)
+      }
+      commandSnapshotTimer.current = window.setTimeout(() => {
+        commandSnapshotTimer.current = null
+        void snapshotAndPersist()
+      }, 400)
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [applySignal],
   )
 
@@ -1654,6 +1706,31 @@ export function WorkspaceShell() {
                         aria-selected={tabActive}
                         data-testid={`tab-${ws.id}-${tab.id}`}
                         className={`tab ${tabActive ? 'is-active' : ''}`}
+                        // Drag & drop reorder (#45, same-workspace only):
+                        // drop ON a tab lands the dragged tab at that tab's
+                        // position — splice semantics keep it next to the
+                        // target whichever direction the drag went.
+                        draggable
+                        onDragStart={() => setDraggedTab({ wsId: ws.id, tabId: tab.id })}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault()
+                          if (
+                            draggedTab == null ||
+                            draggedTab.wsId !== ws.id ||
+                            draggedTab.tabId === tab.id
+                          ) {
+                            return
+                          }
+                          const targetIndex = (ws.tabs ?? []).findIndex(
+                            (t) => t.id === tab.id,
+                          )
+                          persist(
+                            moveTab(stateRef.current, ws.id, draggedTab.tabId, targetIndex),
+                          )
+                          setDraggedTab(null)
+                        }}
+                        onDragEnd={() => setDraggedTab(null)}
                         // Listening ports (#42): the custom hover tooltip
                         // replaced the native title here — showing BOTH
                         // would be two competing tooltips over one row.
@@ -1815,6 +1892,7 @@ export function WorkspaceShell() {
           settings={settings}
           onChange={applySettings}
           onClose={() => setSettingsOpen(false)}
+          onOpenSettingsFile={openSettingsFile}
         />
       )}
 
@@ -1853,6 +1931,7 @@ export function WorkspaceShell() {
       {menu && (
         <div
           className="context-menu"
+          ref={menuRef}
           style={{ left: menu.x, top: menu.y }}
           role="menu"
           // Any click inside the menu (item or padding) closes it — the

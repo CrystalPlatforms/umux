@@ -9,10 +9,10 @@
 //
 // The serialized shape is shared with the TS frontend
 // ({ notificationsEnabled, agentStatusEnabled, sessionRestoreEnabled,
-// analyticsEnabled }), so Rust and JS agree byte-for-byte. Defaults:
-// notifications on, agent status on, session restore on, analytics on
-// (always — the Settings screen exposes no switch for it; nothing is
-// collected until Phase 6 wires Aptabase).
+// analyticsEnabled, portsTooltipEnabled }), so Rust and JS agree
+// byte-for-byte. Defaults: notifications on, agent status on, session restore
+// on, analytics on (always — the Settings screen exposes no switch for it;
+// nothing is collected until Phase 6 wires Aptabase), ports tooltip on.
 
 use std::path::PathBuf;
 
@@ -52,6 +52,12 @@ pub struct Settings {
     /// make this flag mean anything.
     #[serde(default = "default_true")]
     pub analytics_enabled: bool,
+    /// Master gate for the hover-pulled listening-ports tooltip (#43): tab
+    /// rows and sidebar workspace rows. Frontend-only (the tab_ports backend
+    /// is only ever called from the tooltip's hover handlers), so off = no
+    /// query and no tooltip.
+    #[serde(default = "default_true")]
+    pub ports_tooltip_enabled: bool,
 }
 
 impl Default for Settings {
@@ -61,6 +67,7 @@ impl Default for Settings {
             agent_status_enabled: true,
             session_restore_enabled: true,
             analytics_enabled: true,
+            ports_tooltip_enabled: true,
         }
     }
 }
@@ -151,6 +158,7 @@ mod tests {
         assert!(d.agent_status_enabled, "agent status default ON");
         assert!(d.session_restore_enabled, "session restore default ON");
         assert!(d.analytics_enabled, "analytics default ON (always, no switch)");
+        assert!(d.ports_tooltip_enabled, "ports tooltip default ON (#43)");
     }
 
     // T-S2 (#27 AC4 — settings round-trip through the pure layer):
@@ -163,6 +171,7 @@ mod tests {
             agent_status_enabled: false,
             session_restore_enabled: false,
             analytics_enabled: false,
+            ports_tooltip_enabled: false,
         };
 
         let text = serialize_settings(&s);
@@ -218,6 +227,7 @@ mod tests {
             agent_status_enabled: true,
             session_restore_enabled: true,
             analytics_enabled: false,
+            ports_tooltip_enabled: true,
         };
 
         SettingsStore::new(path.clone()).save(&s).unwrap();
@@ -248,6 +258,10 @@ mod tests {
         assert!(
             text.contains("\"analyticsEnabled\""),
             "expected camelCase analyticsEnabled, got: {text}"
+        );
+        assert!(
+            text.contains("\"portsTooltipEnabled\""),
+            "expected camelCase portsTooltipEnabled, got: {text}"
         );
         assert!(
             !text.contains("notifications_enabled"),
