@@ -21,18 +21,16 @@ import { defaultSettings, type Settings } from './settings'
 
 type ToggleProps = {
   label: string
-  description: string
   checked: boolean
   testId: string
   onToggle: (next: boolean) => void
 }
 
-function SettingsToggle({ label, description, checked, testId, onToggle }: ToggleProps) {
+function SettingsToggle({ label, checked, testId, onToggle }: ToggleProps) {
   return (
     <div className="settings-row">
       <div className="settings-row__text">
         <span className="settings-row__label">{label}</span>
-        <span className="settings-row__description">{description}</span>
       </div>
       <button
         type="button"
@@ -108,28 +106,24 @@ export function SettingsDialog({
 
         <SettingsToggle
           label="Desktop notifications"
-          description="Show a native notification when a task finishes"
           checked={settings.notificationsEnabled}
           testId="toggle-notifications"
           onToggle={(next) => onChange({ notificationsEnabled: next })}
         />
         <SettingsToggle
           label="Agent status indicators"
-          description="Show the working / needs-attention dot per panel"
           checked={settings.agentStatusEnabled}
           testId="toggle-agent-status"
           onToggle={(next) => onChange({ agentStatusEnabled: next })}
         />
         <SettingsToggle
           label="Session restore"
-          description="Reopen panels in their last working directories"
           checked={settings.sessionRestoreEnabled}
           testId="toggle-session-restore"
           onToggle={(next) => onChange({ sessionRestoreEnabled: next })}
         />
         <SettingsToggle
           label="Listening-ports tooltip"
-          description="Show a tab's listening ports when hovering it (#43)"
           checked={settings.portsTooltipEnabled}
           testId="toggle-ports-tooltip"
           onToggle={(next) => onChange({ portsTooltipEnabled: next })}

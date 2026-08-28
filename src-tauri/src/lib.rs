@@ -20,7 +20,7 @@ use osc_parser::OscParser;
 use pty_service::{PtyHandle, PtyService};
 use settings_store::{Settings, SettingsStore};
 use ssh_manager::{parse_ssh_target, SshHandle, SshManager};
-use workspace_store::{fallback_warning, Workspace, WorkspaceData, WorkspaceStore};
+use workspace_store::{fallback_warning, Group, Workspace, WorkspaceData, WorkspaceStore};
 
 /// The app-wide notification mute flag. One instance is created in `run()` and
 /// shared (via Arc) with every panel's NotificationService, so a single toggle
@@ -697,13 +697,21 @@ fn load_workspaces(
 fn save_workspaces(
     state: State<'_, WorkspaceStore>,
     workspaces: Vec<Workspace>,
+    groups: Vec<Group>,
+    order: Vec<String>,
 ) -> Result<(), String> {
-    // The param is named `workspaces` to match the key the frontend has
-    // always sent (`invoke('save_workspaces', { workspaces: ... })`). An
-    // earlier `data: WorkspaceData` signature silently rejected every save:
-    // Tauri maps invoke args by name, so `workspaces` never reached `data`.
+    // The params are named after the keys the frontend sends
+    // (`invoke('save_workspaces', { workspaces, groups, order })`) — Tauri
+    // maps invoke args by name, and an earlier `data: WorkspaceData`
+    // signature silently rejected every save because `workspaces` never
+    // reached `data`. Same rule, three keys since the tree (#48): every
+    // invoke key must have its matching parameter here.
     state
-        .save(&WorkspaceData { workspaces })
+        .save(&WorkspaceData {
+            workspaces,
+            groups,
+            order,
+        })
         .map_err(|e| e.to_string())
 }
 

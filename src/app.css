@@ -330,6 +330,8 @@ body {
   padding: 8px;
   flex: 1;
   overflow-y: auto;
+  /* Anchor for the live drag-insertion line (round 3). */
+  position: relative;
 }
 
 .workspace-row {
@@ -368,6 +370,170 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--text-sm);
+}
+
+/* Two-line rows (#47): the name lives on its own line and the agent-status
+   chips on a second line BELOW it, so chips wrap among themselves and can
+   never obscure or squeeze the name at any sidebar width. */
+.row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.row-name-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* Group rows (#48) reuse the workspace row chrome; the folder glyph marks
+   the node kind until badges land (Phase 4). */
+.row-folder {
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* Drop-target highlight (#49): the group row lights up while a dragged
+   workspace's pointer rests in its middle zone — that means the row will be
+   FILED INTO the group (appended at its end). */
+.workspace-row.is-drop-target {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+/* Live drag & drop (round 3): the row under the pointer dims while its
+   ghost tours the list, and the insertion line shows where release will
+   land it. The line straddles the boundary it sits on. */
+.workspace-row.is-dragged,
+.tab.is-dragged {
+  opacity: 0.4;
+}
+
+/* The floating drag ghost (round 4): a pill with the carried row's name
+   travels with the pointer, so the carrier is always visible under the
+   cursor. Fixed + transform: no layout cost, pointer passes through. */
+.drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1100;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent-line);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.drag-ghost-icon {
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* While a drag is live nothing may select: WKWebView ignores pointermove
+   preventDefault for selections, so the freeze is explicit (and the cursor
+   reads as "grabbing" for the whole gesture). */
+body.is-dragging,
+body.is-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: grabbing;
+}
+
+.drag-line {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--accent);
+  border-radius: 1px;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 6;
+}
+
+.drag-line-tab {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  border-radius: 1px;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* The header's single "+" and its dropdown (round 2, Adam): one button,
+   two creation targets. The dropdown anchors under the button and shares
+   the context menu's chrome. */
+.header-create {
+  position: relative;
+}
+
+.create-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 1050;
+  min-width: 160px;
+  padding: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+}
+
+/* The "Move to group…" picker (#49) — swaps the context menu's contents in
+   place. The title states what the picker does; the input creates a group
+   on the fly. */
+.menu-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.menu-picker-title {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  padding: 2px 8px;
+}
+
+.menu-picker-input {
+  height: 26px;
+}
+
+.menu-note {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  padding: 2px 8px;
 }
 
 /* ---- Main / terminal area ------------------------------------------------ */
@@ -437,6 +603,8 @@ body {
   flex: 0 0 auto;
   height: var(--chrome-row);
   padding: 0 8px;
+  /* Anchor for the live tab drag-insertion line (round 3). */
+  position: relative;
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-soft);
   overflow-x: auto;
@@ -886,14 +1054,16 @@ body {
   color: var(--text-faint);
   white-space: nowrap;
 }
-/* The stacked statuses on a workspace row: the main aggregate chip on top,
-   the remaining panels' statuses (mini) below it. */
+/* The statuses on a workspace row — the row's SECOND line since #47, ONE
+   chip per line (round 2, Adam): each additional panel adds a line below,
+   so a crowd of splits grows the row downward instead of squeezing. */
 .workspace-statuses {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 2px;
-  flex-shrink: 0;
+  margin-top: 2px;
+  min-width: 0;
 }
 
 .agent-status--mini {

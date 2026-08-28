@@ -26,8 +26,14 @@ import {
   openWorkspace,
   closeWorkspace,
   deleteWorkspace,
-  moveWorkspace,
   setWorkspacePinned,
+  createGroup,
+  renameGroup,
+  deleteGroup,
+  isGroupEmpty,
+  moveNode,
+  moveToNewGroup,
+  flattenSidebar,
   addTab,
   closeTab,
   moveTab,
@@ -41,14 +47,24 @@ import {
   focusPanel,
   activePanelOf,
   bootState,
+  defaultGenId,
   panelIdsOf,
   upsertPanelCwd,
   toggleZoom,
   zoomedPanelOf,
+  type Group,
   type Panel,
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
+import {
+  computeSidebarDrop,
+  computeTabDrop,
+  type SidebarDrop,
+  type SidebarRegion,
+  type TabDrop,
+  type TabRegion,
+} from './dragInsertion'
 import { boxes, leafIds, type LayoutNode, type Orientation, type Container } from './PaneLayout'
 import { matchShortcut, activeTagOf } from './shortcuts'
 import { NotificationMuteButton } from './NotificationMuteButton'
@@ -139,6 +155,25 @@ function PinIcon({ className }: IconProps) {
   )
 }
 
+function FolderIcon({ className }: IconProps) {
+  // Folder — marks a group row (#48) and the "Move to group…" actions (#49).
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+    </svg>
+  )
+}
+
+function FolderPlusIcon({ className }: IconProps) {
+  // Folder with a plus — the "New group" action (#48).
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+      <path d="M12 10v6M9 13h6" />
+    </svg>
+  )
+}
+
 function SplitHorizontalIcon({ className }: IconProps) {
   // A panel split into left | right by a vertical divider.
   return (
@@ -204,6 +239,13 @@ type MenuState = {
   // tab-scoped actions (Rename tab / Pin tab / Close tab) show instead of
   // the workspace-list actions.
   tabId?: string
+  // Set when the menu was opened from a GROUP row (#48): the group actions
+  // (Rename group / Delete group) show alongside the shared ones.
+  groupId?: string
+  // Set when the "Move to group…" picker is open for this WORKSPACE (#49):
+  // the whole menu renders the picker — existing groups as buttons, plus an
+  // inline field that creates a group and files the workspace into it.
+  groupPickerFor?: string
 } | null
 
 /// A mouse press that should open the context menu: the right button, or
@@ -450,10 +492,23 @@ function PanelZoomButton({ zoomed, short, onToggle }: PanelZoomButtonProps) {
 
 export function WorkspaceShell() {
   const [state, setState] = useState<WorkspaceState>(emptyState)
-  const [creating, setCreating] = useState(false)
+  // What the inline create form is making (#48): a workspace or a GROUP —
+  // same interaction pattern (header action / context menu -> inline name
+  // field -> commit on Enter), null = nothing being created.
+  const [creatingKind, setCreatingKind] = useState<'workspace' | 'group' | null>(null)
   const [draftName, setDraftName] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
+  // Group inline rename (#48): the same one-edit-at-a-time pattern the
+  // workspace rename uses, keyed by group id.
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null)
+  const [editGroupName, setEditGroupName] = useState('')
+  // The "Move to group…" picker's fresh-name field (#49).
+  const [newGroupName, setNewGroupName] = useState('')
+  // Header "+" dropdown (round 2, Adam): ONE button unfolds the choice of
+  // what to create — a workspace or a group — instead of two sibling icons.
+  const [createMenuOpen, setCreateMenuOpen] = useState(false)
+  const createMenuRef = useRef<HTMLDivElement | null>(null)
   // Tab rename (#37 follow-up): which TAB is being renamed inline (double
   // click or the tab menu) and the draft name.
   const [editingTab, setEditingTab] = useState<{ wsId: string; tabId: string } | null>(null)
@@ -464,11 +519,278 @@ export function WorkspaceShell() {
   // Windows right-click, macOS Ctrl+click) — those must not close it again.
   const menuOpenedAtRef = useRef(0)
   const [collapsed, setCollapsed] = useState(false)
-  const [draggedId, setDraggedId] = useState<string | null>(null)
-  // The tab currently being dragged (#45) — separate from `draggedId`
-  // (workspaces) so a sidebar drag can never land on a tab bar and vice
-  // versa; moves are same-workspace only.
-  const [draggedTab, setDraggedTab] = useState<{ wsId: string; tabId: string } | null>(null)
+
+  // --- Live pointer drag & drop (round 3, Adam) -----------------------------
+  //
+  // HTML5 drag & drop is abandoned here on purpose: WKWebView refuses to
+  // start a drag session without transfer data and Tauri's native hook
+  // fights the page for drop targets — and neither can show a LIVE
+  // insertion line. So rows drag via POINTER events instead: press a row,
+  // move past a 4px threshold, and a line follows the pointer showing where
+  // the row will land (a group's middle zone highlights instead — the row
+  // will FILE into it). Release commits through the same pure ops as before
+  // (moveNode / moveTab); Escape cancels. The geometry lives in
+  // dragInsertion.ts (pure, unit-tested); this block is glue.
+  type ActiveDrag =
+    | {
+        kind: 'sidebar'
+        id: string
+        label: string
+        isGroup: boolean
+        regions: SidebarRegion[]
+        listTop: number
+        x: number
+        y: number
+      }
+    | {
+        kind: 'tab'
+        wsId: string
+        id: string
+        label: string
+        regions: TabRegion[]
+        barLeft: number
+        x: number
+        y: number
+      }
+  const [drag, setDrag] = useState<ActiveDrag | null>(null)
+  const [sideDrop, setSideDrop] = useState<SidebarDrop | null>(null)
+  const [tabDrop, setTabDrop] = useState<TabDrop | null>(null)
+  // Event-time mirrors: window pointer listeners outlive renders, so they
+  // read through refs (same discipline as stateRef below).
+  const dragRef = useRef<ActiveDrag | null>(null)
+  // The floating ghost pill travels WITH the pointer: its position updates
+  // imperatively on every move (state would freeze whenever the landing
+  // decision stops changing, and re-rendering the shell per mousemove is
+  // waste). React only seeds the initial transform at activation.
+  const ghostRef = useRef<HTMLDivElement | null>(null)
+  const sideDropRef = useRef<SidebarDrop | null>(null)
+  const tabDropRef = useRef<TabDrop | null>(null)
+  sideDropRef.current = sideDrop
+  tabDropRef.current = tabDrop
+  // The press waiting to become a drag (activation happens on first move
+  // past the threshold), and whether the CURRENT press did become one —
+  // the rows' onClick consumes that flag so a drop never also activates
+  // the row underneath.
+  const dragCandidate = useRef<
+    { kind: 'sidebar' | 'tab'; wsId?: string; id: string; x: number; y: number } | null
+  >(null)
+  const dragActive = useRef(false)
+  const suppressClickRef = useRef(false)
+  const listRef = useRef<HTMLUListElement | null>(null)
+
+  /// A press that may become a sidebar drag. Left button only (right /
+  /// Ctrl+click belong to the context menu), and never from a button or the
+  /// rename input — those keep their own click semantics.
+  const beginSidebarDrag = (e: React.PointerEvent, id: string) => {
+    if (e.button !== 0 || e.ctrlKey) return
+    if ((e.target as HTMLElement).closest('button, input')) return
+    suppressClickRef.current = false
+    dragCandidate.current = { kind: 'sidebar', id, x: e.clientX, y: e.clientY }
+  }
+
+  /// The tab-bar twin — drags stay inside their own workspace (#45).
+  const beginTabDrag = (e: React.PointerEvent, wsId: string, tabId: string) => {
+    if (e.button !== 0 || e.ctrlKey) return
+    if ((e.target as HTMLElement).closest('button, input')) return
+    suppressClickRef.current = false
+    dragCandidate.current = { kind: 'tab', wsId, id: tabId, x: e.clientX, y: e.clientY }
+  }
+
+  // One set of window-level listeners drives the whole drag lifecycle; they
+  // no-op while no press is pending. Reads go through the refs above, so the
+  // mount-time closure stays valid forever (same discipline as stateRef).
+  useEffect(() => {
+    const THRESHOLD = 4
+
+    const clearDrag = () => {
+      dragRef.current = null
+      dragActive.current = false
+      document.body.classList.remove('is-dragging')
+      // The trailing click of this gesture must not activate whatever row
+      // ends up under the pointer.
+      suppressClickRef.current = true
+      dragCandidate.current = null
+      setDrag(null)
+      setSideDrop(null)
+      setTabDrop(null)
+    }
+
+    const activateSidebar = (id: string, x: number, y: number): SidebarRegion[] => {
+      const listEl = listRef.current
+      const regions: SidebarRegion[] = listEl
+        ? [...listEl.querySelectorAll<HTMLElement>('.workspace-row')].map((el) => {
+            const rect = el.getBoundingClientRect()
+            const nodeId = el.dataset.nodeId ?? ''
+            const isGroup = el.classList.contains('group-row')
+            return {
+              id: nodeId,
+              kind: isGroup ? 'group' : 'workspace',
+              parentId: isGroup
+                ? null
+                : (stateRef.current.workspaces.find((w) => w.id === nodeId)?.groupId ??
+                  null),
+              top: rect.top,
+              bottom: rect.bottom,
+            }
+          })
+        : []
+      const isGroup = !stateRef.current.workspaces.some((w) => w.id === id)
+      const label = isGroup
+        ? (stateRef.current.groups.find((g) => g.id === id)?.name ?? '')
+        : (stateRef.current.workspaces.find((w) => w.id === id)?.name ?? '')
+      const d: ActiveDrag = {
+        kind: 'sidebar',
+        id,
+        label,
+        isGroup,
+        regions,
+        listTop: listEl?.getBoundingClientRect().top ?? 0,
+        x,
+        y,
+      }
+      dragRef.current = d
+      setDrag(d)
+      return regions
+    }
+
+    const activateTab = (wsId: string, id: string, x: number, y: number): TabRegion[] => {
+      const barEl = document.querySelector<HTMLElement>(`[data-testid="tab-bar-${wsId}"]`)
+      const regions: TabRegion[] = barEl
+        ? [...barEl.querySelectorAll<HTMLElement>('.tab')].map((el) => {
+            const rect = el.getBoundingClientRect()
+            return { id: el.dataset.tabId ?? '', left: rect.left, right: rect.right }
+          })
+        : []
+      const tabs = stateRef.current.workspaces.find((w) => w.id === wsId)?.tabs ?? []
+      const idx = tabs.findIndex((t) => t.id === id)
+      const d: ActiveDrag = {
+        kind: 'tab',
+        wsId,
+        id,
+        label: tabs[idx]?.name ?? `Tab ${idx + 1}`,
+        regions,
+        barLeft: barEl?.getBoundingClientRect().left ?? 0,
+        x,
+        y,
+      }
+      dragRef.current = d
+      setDrag(d)
+      return regions
+    }
+
+    const onPointerMove = (e: PointerEvent) => {
+      const cand = dragCandidate.current
+      if (cand == null) return
+      // An active drag must never select text it travels over.
+      if (dragActive.current) e.preventDefault()
+      if (!dragActive.current) {
+        // A wiggle is a click; past the threshold the drag goes live.
+        if (Math.hypot(e.clientX - cand.x, e.clientY - cand.y) < THRESHOLD) return
+        dragActive.current = true
+        // Kill any text selection the press started and freeze selection for
+        // the whole drag (WKWebView ignores pointermove preventDefault here).
+        document.body.classList.add('is-dragging')
+        window.getSelection()?.removeAllRanges()
+        // First line position lands in THIS event — it must not wait for a
+        // further move to appear.
+        if (cand.kind === 'sidebar') {
+          const regions = activateSidebar(cand.id, e.clientX, e.clientY)
+          const drop = computeSidebarDrop(e.clientY, cand.id, regions)
+          sideDropRef.current = drop
+          setSideDrop(drop)
+        } else {
+          const regions = activateTab(cand.wsId as string, cand.id, e.clientX, e.clientY)
+          const drop = computeTabDrop(e.clientX, regions)
+          tabDropRef.current = drop
+          setTabDrop(drop)
+        }
+        return
+      }
+      const d = dragRef.current
+      if (d == null) return
+      // The ghost pill follows the pointer continuously.
+      if (ghostRef.current != null) {
+        ghostRef.current.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 10}px)`
+      }
+      if (d.kind === 'sidebar') {
+        const drop = computeSidebarDrop(e.clientY, d.id, d.regions)
+        sideDropRef.current = drop
+        setSideDrop(drop)
+      } else {
+        const drop = computeTabDrop(e.clientX, d.regions)
+        tabDropRef.current = drop
+        setTabDrop(drop)
+      }
+    }
+
+    const onPointerUp = () => {
+      const cand = dragCandidate.current
+      if (cand == null) return
+      if (!dragActive.current) {
+        // A plain click: nothing to commit, nothing to suppress.
+        dragCandidate.current = null
+        return
+      }
+      const d = dragRef.current
+      if (d != null) {
+        if (d.kind === 'sidebar') {
+          const drop = sideDropRef.current
+          if (drop != null) {
+            const parentId = drop.intoGroupId ?? drop.parentId
+            persist(
+              moveNode(stateRef.current, d.id, {
+                parentId,
+                ...(drop.intoGroupId == null && drop.beforeId != null
+                  ? { beforeId: drop.beforeId }
+                  : {}),
+              }),
+            )
+          }
+        } else {
+          const drop = tabDropRef.current
+          const ws = stateRef.current.workspaces.find((w) => w.id === d.wsId)
+          const tabs = ws?.tabs ?? []
+          const fromIndex = tabs.findIndex((t) => t.id === d.id)
+          const targetIdx =
+            drop == null || drop.beforeId == null
+              ? tabs.length
+              : tabs.findIndex((t) => t.id === drop.beforeId)
+          // moveTab splices AFTER removing the tab, so a forward move aims
+          // one slot earlier than the raw index of the sibling.
+          const newIndex =
+            targetIdx < 0
+              ? tabs.length
+              : fromIndex > -1 && fromIndex < targetIdx
+                ? targetIdx - 1
+                : targetIdx
+          persist(moveTab(stateRef.current, d.wsId, d.id, newIndex))
+        }
+      }
+      clearDrag()
+    }
+
+    const onPointerCancel = () => {
+      if (dragCandidate.current != null) clearDrag()
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && dragActive.current) clearDrag()
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerCancel)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerCancel)
+      window.removeEventListener('keydown', onKeyDown)
+      // A drag cut short by an unmount must not leave the body frozen.
+      document.body.classList.remove('is-dragging')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   // Feature toggles (v0.2 Phase 3 / #27). Loaded from the Rust SettingsStore
   // on mount; every change is persisted immediately and takes effect live.
   // `muted` is derived from the notifications toggle — the bell button and
@@ -605,6 +927,24 @@ export function WorkspaceShell() {
       .catch((err) => console.error('copy port failed:', err))
   }
 
+  // The "+" dropdown closes on any pointer press outside of it (its own
+  // toggle and its two items handle themselves).
+  useEffect(() => {
+    if (!createMenuOpen) return
+    const close = (e: PointerEvent) => {
+      if (
+        createMenuRef.current != null &&
+        e.target instanceof Node &&
+        createMenuRef.current.contains(e.target)
+      ) {
+        return
+      }
+      setCreateMenuOpen(false)
+    }
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [createMenuOpen])
+
   // Config fallback warning (Phase 18 / #19, AC3). Set when the backend emits
   // `config_fallback` (corrupt/unreadable config -> defaults), so the downgrade
   // is surfaced instead of silent. Dismissible; cleared on dismiss.
@@ -616,17 +956,32 @@ export function WorkspaceShell() {
   // consumes cwd once, at mount), so it must be known before the first mount.
   useEffect(() => {
     void Promise.all([
-      invoke<{ workspaces: Workspace[] }>('load_workspaces').catch(() => ({
+      invoke<{
+        workspaces: Workspace[]
+        groups: Group[]
+        order: string[]
+      }>('load_workspaces').catch(() => ({
         workspaces: [] as Workspace[],
+        groups: [] as Group[],
+        order: [] as string[],
       })),
       invoke<Settings>('load_settings').catch(() => defaultSettings),
     ]).then(([data, rawSettings]) => {
       setSettings(coerceSettings(rawSettings))
       // bootState keeps each workspace's persisted layout tree (v0.2 / #25 —
       // the split layout round-trips through restart) and seeds a fresh single
-      // leaf for pre-v0.2 configs that have none. Every defined workspace
-      // starts open with its first panel focused.
-      setState(bootState(data.workspaces ?? []))
+      // leaf for pre-v0.2 configs that have none. It also takes the sidebar
+      // tree (#48): groups + the shared order; a pre-groups config carries
+      // neither and loads flat. Every defined workspace starts open with its
+      // first panel focused.
+      setState(
+        bootState(
+          data.workspaces ?? [],
+          defaultGenId,
+          data.groups ?? [],
+          data.order ?? [],
+        ),
+      )
     })
   }, [])
 
@@ -723,11 +1078,22 @@ export function WorkspaceShell() {
 
   // Close the context menu on any click outside it — unless it just opened
   // (see menuOpenedAtRef): the opening gesture's own trailing click/contextmenu
-  // events would otherwise close the menu in the same instant.
+  // events would otherwise close the menu in the same instant. Clicks INSIDE
+  // the menu are ignored here too: React's stopPropagation never reaches the
+  // window listener (it only prunes the synthetic tree), so a native click on
+  // "Move to group…" — which must SWAP the menu for the picker, not close it
+  // — used to tear the whole menu down immediately (#49 round 2).
   useEffect(() => {
     if (menu == null) return
-    const close = () => {
+    const close = (e: MouseEvent) => {
       if (Date.now() - menuOpenedAtRef.current < 300) return
+      if (
+        menuRef.current != null &&
+        e.target instanceof Node &&
+        menuRef.current.contains(e.target)
+      ) {
+        return
+      }
       setMenu(null)
     }
     window.addEventListener('click', close)
@@ -742,9 +1108,13 @@ export function WorkspaceShell() {
     setState(next)
     // A rejected save must at least reach the console — a silent one once hid
     // an argument-name mismatch for an entire release (nothing persisted).
-    invoke('save_workspaces', { workspaces: next.workspaces }).catch((e) =>
-      console.error('save_workspaces failed:', e),
-    )
+    // The tree rides along since #48: groups + the shared display order are
+    // persisted beside the workspace definitions.
+    invoke('save_workspaces', {
+      workspaces: next.workspaces,
+      groups: next.groups,
+      order: next.order,
+    }).catch((e) => console.error('save_workspaces failed:', e))
   }
 
   // --- Session snapshot (v0.2 Phase 5 / #29) ---------------------------------
@@ -810,7 +1180,11 @@ export function WorkspaceShell() {
     let merged = stateRef.current
     for (const [pid, cwd] of cwds) merged = upsertPanelCwd(merged, pid, cwd)
     if (merged === stateRef.current) return
-    await invoke('save_workspaces', { workspaces: merged.workspaces }).catch((e) => {
+    await invoke('save_workspaces', {
+      workspaces: merged.workspaces,
+      groups: merged.groups,
+      order: merged.order,
+    }).catch((e) => {
       console.error('save_workspaces failed:', e)
       return undefined
     })
@@ -908,21 +1282,35 @@ export function WorkspaceShell() {
   }, [state])
 
   const startCreate = () => {
-    setCreating(true)
+    setCreatingKind('workspace')
     setEditingId(null)
+    setEditingGroupId(null)
+  }
+
+  /// The "New group" action (#48): the same inline-field pattern, appending
+  /// an empty group at the end of the top level.
+  const startCreateGroup = () => {
+    setCreatingKind('group')
+    setEditingId(null)
+    setEditingGroupId(null)
   }
 
   const handleCreate = () => {
-    if (draftName.trim() === '') return
-    persist(createWorkspace(state, draftName.trim()))
+    const name = draftName.trim()
+    if (name === '') return
+    persist(
+      creatingKind === 'group'
+        ? createGroup(state, name)
+        : createWorkspace(state, name),
+    )
     setDraftName('')
-    setCreating(false)
+    setCreatingKind(null)
   }
 
-  /// Cancel workspace creation (#37): hide the name form and drop the draft.
-  /// The visible × button and the Escape key share this one path.
+  /// Cancel creation (#37, generalized in #48): hide the name form and drop
+  /// the draft. The visible × button and the Escape key share this one path.
   const cancelCreate = () => {
-    setCreating(false)
+    setCreatingKind(null)
     setDraftName('')
   }
 
@@ -1004,6 +1392,7 @@ export function WorkspaceShell() {
     header: boolean,
     workspaceId?: string,
     tabId?: string,
+    groupId?: string,
   ) => {
     e.preventDefault()
     e.stopPropagation()
@@ -1015,7 +1404,7 @@ export function WorkspaceShell() {
     portsSeq.current += 1
     setPortsTip(null)
     menuOpenedAtRef.current = Date.now()
-    setMenu({ x: e.clientX, y: e.clientY, header, workspaceId, tabId })
+    setMenu({ x: e.clientX, y: e.clientY, header, workspaceId, tabId, groupId })
   }
 
   const deleteFromMenu = () => {
@@ -1053,6 +1442,68 @@ export function WorkspaceShell() {
     if (id == null) return
     const ws = stateRef.current.workspaces.find((w) => w.id === id)
     if (ws != null) startRename(ws)
+  }
+
+  // --- Group actions (#48) ---------------------------------------------------
+  // The group twins of the workspace actions: inline rename (pencil icon or
+  // the group menu), direct delete of an EMPTY group, and the menu entry
+  // points. The destructive delete-with-children lands in Phase 5 — until
+  // then deleteGroup no-ops on a non-empty group, and the UI keeps its
+  // Delete action disabled with a hint.
+
+  const startGroupRename = (g: Group) => {
+    setEditingGroupId(g.id)
+    setEditGroupName(g.name)
+  }
+
+  const commitGroupRename = (id: string) => {
+    const name = editGroupName.trim()
+    setEditingGroupId(null)
+    if (name !== '') persist(renameGroup(stateRef.current, id, name))
+  }
+
+  const renameGroupFromMenu = () => {
+    const gid = menu?.groupId
+    setMenu(null)
+    if (gid == null) return
+    const g = stateRef.current.groups.find((x) => x.id === gid)
+    if (g != null) startGroupRename(g)
+  }
+
+  const deleteGroupFromMenu = () => {
+    const gid = menu?.groupId
+    setMenu(null)
+    if (gid == null) return
+    persist(deleteGroup(stateRef.current, gid))
+  }
+
+  // --- Move to group… (#49) ---------------------------------------------------
+  // The workspace menu's "Move to group…" swaps the menu's contents for the
+  // picker IN PLACE (same coordinates): one button per top-level group (the
+  // current group is left out — moving there is a no-op), plus the inline
+  // fresh-name field that creates a group and files the workspace into it.
+
+  const openGroupPicker = () => {
+    const wsId = menu?.workspaceId
+    if (wsId == null) return
+    setMenu((m) => (m == null ? m : { ...m, groupPickerFor: wsId }))
+    setNewGroupName('')
+  }
+
+  const pickExistingGroup = (groupId: string) => {
+    const wsId = menu?.groupPickerFor
+    setMenu(null)
+    if (wsId == null) return
+    persist(moveNode(stateRef.current, wsId, { parentId: groupId }))
+  }
+
+  const pickNewGroup = () => {
+    const wsId = menu?.groupPickerFor
+    const name = newGroupName.trim()
+    setMenu(null)
+    setNewGroupName('')
+    if (wsId == null || name === '') return
+    persist(moveToNewGroup(stateRef.current, wsId, name))
   }
 
   const minimize = () => { void getCurrentWindow().minimize() }
@@ -1484,14 +1935,45 @@ export function WorkspaceShell() {
               >
                 <SettingsIcon />
               </button>
-              <button
-                className="icon-btn"
-                aria-label="New workspace"
-                title="New workspace"
-                onClick={startCreate}
-              >
-                <PlusIcon />
-              </button>
+              {/* ONE create button (round 2, Adam): the "+" unfolds a small
+                  dropdown offering workspace or group — same inline-field
+                  pattern either way. */}
+              <div className="header-create" ref={createMenuRef}>
+                <button
+                  className="icon-btn"
+                  aria-label="Add workspace or group"
+                  title="Add workspace or group"
+                  onClick={() => setCreateMenuOpen((o) => !o)}
+                >
+                  <PlusIcon />
+                </button>
+                {createMenuOpen && (
+                  <div className="create-dropdown" role="menu">
+                    <button
+                      className="menu-item"
+                      role="menuitem"
+                      onClick={() => {
+                        setCreateMenuOpen(false)
+                        startCreate()
+                      }}
+                    >
+                      <PlusIcon />
+                      New workspace
+                    </button>
+                    <button
+                      className="menu-item"
+                      role="menuitem"
+                      onClick={() => {
+                        setCreateMenuOpen(false)
+                        startCreateGroup()
+                      }}
+                    >
+                      <FolderPlusIcon />
+                      New group
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 className="icon-btn"
                 aria-label="Collapse sidebar"
@@ -1503,14 +1985,14 @@ export function WorkspaceShell() {
             </div>
           </div>
 
-        {creating && (
+        {creatingKind != null && (
           <div className="create-form">
             <input
               className="text-input"
-              aria-label="New workspace name"
+              aria-label={creatingKind === 'group' ? 'New group name' : 'New workspace name'}
               autoFocus
               value={draftName}
-              placeholder="workspace name"
+              placeholder={creatingKind === 'group' ? 'group name' : 'workspace name'}
               onChange={(e) => setDraftName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleCreate()
@@ -1524,7 +2006,7 @@ export function WorkspaceShell() {
                 Escape, for when the keyboard is not the instinct. */}
             <button
               className="icon-btn"
-              aria-label="Cancel creating workspace"
+              aria-label="Cancel creating"
               title="Cancel"
               onClick={cancelCreate}
             >
@@ -1533,113 +2015,221 @@ export function WorkspaceShell() {
           </div>
         )}
 
-        <ul className="workspace-list">
-          {state.workspaces.map((ws) => (
-            <li
-              key={ws.id}
-              data-testid={`workspace-row-${ws.id}`}
-              className={`workspace-row ${ws.id === state.activeId ? 'is-active' : ''}`}
-              draggable
-              onDragStart={() => setDraggedId(ws.id)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault()
-                if (draggedId == null || draggedId === ws.id) return
-                const targetIndex = state.workspaces.findIndex(
-                  (w) => w.id === ws.id,
-                )
-                persist(moveWorkspace(state, draggedId, targetIndex))
-                setDraggedId(null)
-              }}
-              onClick={() => setState(openWorkspace(state, ws.id))}
-              onContextMenu={(e) => openMenu(e, false, ws.id)}
-              // Same hover-pulled ports tooltip as tab rows (#42, round 2):
-              // the workspace aggregates EVERY tab it holds into one union,
-              // anchored to the sidebar's right wall (round 3).
-              onMouseEnter={(e) => openPortsTip(e, `ws:${ws.id}`, ws.tabs ?? [], 'right')}
-              onMouseLeave={closePortsTip}
-              onMouseDown={(e) => {
-                if (isMenuPress(e)) openMenu(e, false, ws.id)
-              }}
-            >
-              {editingId === ws.id ? (
-                <input
-                  className="text-input"
-                  aria-label="Rename workspace"
-                  autoFocus
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') commitRename(ws.id)
-                    if (e.key === 'Escape') setEditingId(null)
-                  }}
-                />
-              ) : (
-                <>
-                  {/* #37: pinned workspaces carry a pin glyph; the pinned
-                      group always leads the list (setWorkspacePinned). */}
-                  {ws.pinned === true && <PinIcon className="row-pin" />}
-                  <span className="workspace-name">{ws.name}</span>
-                  {settings.agentStatusEnabled &&
-                    state.openIds.includes(ws.id) &&
-                    (() => {
-                      // One chip per panel, the ACTIVE panel's chip first with
-                      // the bigger dot (HITL round 5: the big dot marks the
-                      // terminal you're in — switching panel focus moves it),
-                      // the remaining panels' statuses as minis below. Since
-                      // the #37 rework this covers EVERY tab's panes — all of
-                      // a workspace's statuses live here, on its row (Adam's
-                      // call: tabs stay clean, no chips on the tab bar).
-                      const pids = panelIdsOf(state, ws.id)
-                      if (pids.length === 0) return null
-                      const activePid = activePanelOf(state, ws.id) ?? pids[0]
-                      // Fixed chip order (panel tree order) — chips never move
-                      // when focus changes; ONLY the active panel's dot grows
-                      // (mini -> full), exactly where that panel's chip sits
-                      // (HITL round 7).
-                      return (
-                        <span className="workspace-statuses">
-                          {pids.map((pid) => (
-                            <AgentStatusIndicator
-                              key={pid}
-                              status={statuses[pid] ?? 'idle'}
-                              mini={pid !== activePid}
-                            />
-                          ))}
-                        </span>
-                      )
-                    })()}
-                  <button
-                    className="icon-btn"
-                    aria-label={`Rename ${ws.name}`}
-                    title="Rename"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      startRename(ws)
+        {/* position: relative (CSS) — the live drag line anchors here. */}
+        <ul className="workspace-list" ref={listRef}>
+          {/* The sidebar renders the FLATTENED tree (#48): groups and their
+              workspaces interleaved in the shared order, depth driving the
+              indentation. */}
+          {flattenSidebar(state).map((entry) =>
+            entry.kind === 'group' ? (
+              <li
+                key={entry.group.id}
+                data-testid={`group-row-${entry.group.id}`}
+                data-node-id={entry.group.id}
+                className={`workspace-row group-row ${
+                  sideDrop?.intoGroupId === entry.group.id ? 'is-drop-target' : ''
+                } ${drag?.kind === 'sidebar' && drag.id === entry.group.id ? 'is-dragged' : ''}`}
+                style={entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined}
+                onPointerDown={(e) => beginSidebarDrag(e, entry.group.id)}
+                onContextMenu={(e) =>
+                  openMenu(e, false, undefined, undefined, entry.group.id)
+                }
+                onMouseDown={(e) => {
+                  if (isMenuPress(e)) {
+                    openMenu(e, false, undefined, undefined, entry.group.id)
+                  }
+                }}
+              >
+                {editingGroupId === entry.group.id ? (
+                  <input
+                    className="text-input"
+                    aria-label="Rename group"
+                    autoFocus
+                    value={editGroupName}
+                    onChange={(e) => setEditGroupName(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitGroupRename(entry.group.id)
+                      if (e.key === 'Escape') setEditingGroupId(null)
                     }}
-                  >
-                    <PencilIcon />
-                  </button>
-                  <button
-                    className="icon-btn"
-                    aria-label={`Close ${ws.name}`}
-                    title="Close (keep workspace)"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      // v0.2 Phase 4 / #28: workspace close asks when ANY of
-                      // its panels has a live process (shared dialog).
-                      requestCloseWorkspace(ws.id)
+                  />
+                ) : (
+                  <>
+                    <FolderIcon className="row-folder" />
+                    <span className="workspace-name">{entry.group.name}</span>
+                    <div className="row-actions">
+                      <button
+                        className="icon-btn"
+                        aria-label={`Rename group ${entry.group.name}`}
+                        title="Rename"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          startGroupRename(entry.group)
+                        }}
+                      >
+                        <PencilIcon />
+                      </button>
+                      {/* Empty groups delete outright (#48) — nothing inside
+                          can be lost; a non-empty group stays until Phase 5's
+                          destructive delete, so the button disables with a
+                          hint instead. */}
+                      <button
+                        className="icon-btn"
+                        aria-label={`Delete group ${entry.group.name}`}
+                        title={
+                          isGroupEmpty(stateRef.current, entry.group.id)
+                            ? 'Delete group'
+                            : 'Group is not empty'
+                        }
+                        disabled={!isGroupEmpty(stateRef.current, entry.group.id)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          persist(deleteGroup(stateRef.current, entry.group.id))
+                        }}
+                      >
+                        <CloseIcon />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </li>
+            ) : (
+              <li
+                key={entry.workspace.id}
+                data-testid={`workspace-row-${entry.workspace.id}`}
+                data-node-id={entry.workspace.id}
+                className={`workspace-row ${
+                  entry.workspace.id === state.activeId ? 'is-active' : ''
+                } ${drag?.kind === 'sidebar' && drag.id === entry.workspace.id ? 'is-dragged' : ''}`}
+                style={entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined}
+                onPointerDown={(e) => beginSidebarDrag(e, entry.workspace.id)}
+                onClick={() => {
+                  // A drag's trailing click must not activate the row.
+                  if (suppressClickRef.current) {
+                    suppressClickRef.current = false
+                    return
+                  }
+                  setState(openWorkspace(state, entry.workspace.id))
+                }}
+                onContextMenu={(e) => openMenu(e, false, entry.workspace.id)}
+                // Same hover-pulled ports tooltip as tab rows (#42, round 2):
+                // the workspace aggregates EVERY tab it holds into one union,
+                // anchored to the sidebar's right wall (round 3).
+                onMouseEnter={(e) =>
+                  openPortsTip(
+                    e,
+                    `ws:${entry.workspace.id}`,
+                    entry.workspace.tabs ?? [],
+                    'right',
+                  )
+                }
+                onMouseLeave={closePortsTip}
+                onMouseDown={(e) => {
+                  if (isMenuPress(e)) openMenu(e, false, entry.workspace.id)
+                }}
+              >
+                {editingId === entry.workspace.id ? (
+                  <input
+                    className="text-input"
+                    aria-label="Rename workspace"
+                    autoFocus
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRename(entry.workspace.id)
+                      if (e.key === 'Escape') setEditingId(null)
                     }}
-                  >
-                    <CloseIcon />
-                  </button>
-                </>
-              )}
-            </li>
-          ))}
+                  />
+                ) : (
+                  <>
+                    {/* Two-line row (#47): the name gets its OWN line and the
+                        agent-status chips a second line BELOW it — chips wrap
+                        among themselves and can never obscure or squeeze the
+                        name at any sidebar width. */}
+                    <div className="row-main">
+                      <div className="row-name-line">
+                        {/* #37: pinned workspaces carry a pin glyph; the
+                            pinned group always leads its siblings. */}
+                        {entry.workspace.pinned === true && (
+                          <PinIcon className="row-pin" />
+                        )}
+                        <span className="workspace-name">{entry.workspace.name}</span>
+                      </div>
+                      {settings.agentStatusEnabled &&
+                        state.openIds.includes(entry.workspace.id) &&
+                        (() => {
+                          // One chip per panel, the ACTIVE panel's chip first
+                          // with the bigger dot (HITL round 5: the big dot
+                          // marks the terminal you're in — switching panel
+                          // focus moves it), the remaining panels' statuses
+                          // as minis below. Since the #37 rework this covers
+                          // EVERY tab's panes — all of a workspace's statuses
+                          // live here, on its row (Adam's call: tabs stay
+                          // clean, no chips on the tab bar).
+                          const pids = panelIdsOf(state, entry.workspace.id)
+                          if (pids.length === 0) return null
+                          const activePid =
+                            activePanelOf(state, entry.workspace.id) ?? pids[0]
+                          // Fixed chip order (panel tree order) — chips never
+                          // move when focus changes; ONLY the active panel's
+                          // dot grows (mini -> full), exactly where that
+                          // panel's chip sits (HITL round 7).
+                          return (
+                            <span className="workspace-statuses">
+                              {pids.map((pid) => (
+                                <AgentStatusIndicator
+                                  key={pid}
+                                  status={statuses[pid] ?? 'idle'}
+                                  mini={pid !== activePid}
+                                />
+                              ))}
+                            </span>
+                          )
+                        })()}
+                    </div>
+                    <div className="row-actions">
+                      <button
+                        className="icon-btn"
+                        aria-label={`Rename ${entry.workspace.name}`}
+                        title="Rename"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          startRename(entry.workspace)
+                        }}
+                      >
+                        <PencilIcon />
+                      </button>
+                      <button
+                        className="icon-btn"
+                        aria-label={`Close ${entry.workspace.name}`}
+                        title="Close (keep workspace)"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          // v0.2 Phase 4 / #28: workspace close asks when ANY
+                          // of its panels has a live process (shared dialog).
+                          requestCloseWorkspace(entry.workspace.id)
+                        }}
+                      >
+                        <CloseIcon />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </li>
+            ),
+          )}
           {state.workspaces.length === 0 && (
             <li className="empty-hint">No workspaces yet.</li>
+          )}
+          {/* Live insertion line (round 3): follows the pointer while a
+              sidebar row drags; a group's middle zone highlights the row
+              instead (the drop FILES into it), so no line then. */}
+          {drag?.kind === 'sidebar' && sideDrop?.lineTop != null && (
+            <div
+              className="drag-line"
+              style={{ top: sideDrop.lineTop - drag.listTop }}
+            />
           )}
         </ul>
         </div>
@@ -1662,7 +2252,7 @@ export function WorkspaceShell() {
         {/* `.panels` is the positioning context for the absolute `.panel`s
             (that used to be `.main` itself). */}
         <div className="panels">
-          {state.workspaces.length === 0 && !creating ? (
+          {state.workspaces.length === 0 && creatingKind == null ? (
             <EmptyState onCreate={startCreate} />
           ) : null}
           {state.workspaces
@@ -1693,6 +2283,7 @@ export function WorkspaceShell() {
                   className="tab-bar"
                   role="tablist"
                   aria-label={`${ws.name} terminals`}
+                  data-testid={`tab-bar-${ws.id}`}
                 >
                   {(ws.tabs ?? []).map((tab, i) => {
                     const tabActive = tab.id === activeTab?.id
@@ -1705,38 +2296,27 @@ export function WorkspaceShell() {
                         role="tab"
                         aria-selected={tabActive}
                         data-testid={`tab-${ws.id}-${tab.id}`}
-                        className={`tab ${tabActive ? 'is-active' : ''}`}
-                        // Drag & drop reorder (#45, same-workspace only):
-                        // drop ON a tab lands the dragged tab at that tab's
-                        // position — splice semantics keep it next to the
-                        // target whichever direction the drag went.
-                        draggable
-                        onDragStart={() => setDraggedTab({ wsId: ws.id, tabId: tab.id })}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={(e) => {
-                          e.preventDefault()
-                          if (
-                            draggedTab == null ||
-                            draggedTab.wsId !== ws.id ||
-                            draggedTab.tabId === tab.id
-                          ) {
-                            return
-                          }
-                          const targetIndex = (ws.tabs ?? []).findIndex(
-                            (t) => t.id === tab.id,
-                          )
-                          persist(
-                            moveTab(stateRef.current, ws.id, draggedTab.tabId, targetIndex),
-                          )
-                          setDraggedTab(null)
-                        }}
-                        onDragEnd={() => setDraggedTab(null)}
+                        data-tab-id={tab.id}
+                        className={`tab ${tabActive ? 'is-active' : ''} ${
+                          drag?.kind === 'tab' && drag.id === tab.id ? 'is-dragged' : ''
+                        }`}
+                        // Live pointer drag reorder (round 3; same-workspace
+                        // only, #45 semantics): press, move, release — the
+                        // line follows the pointer between tabs.
+                        onPointerDown={(e) => beginTabDrag(e, ws.id, tab.id)}
                         // Listening ports (#42): the custom hover tooltip
                         // replaced the native title here — showing BOTH
                         // would be two competing tooltips over one row.
                         onMouseEnter={(e) => openPortsTip(e, tab.id, [tab])}
                         onMouseLeave={closePortsTip}
-                        onClick={() => setState(switchTab(state, ws.id, tab.id))}
+                        onClick={() => {
+                          // A drag's trailing click must not switch tabs.
+                          if (suppressClickRef.current) {
+                            suppressClickRef.current = false
+                            return
+                          }
+                          setState(switchTab(state, ws.id, tab.id))
+                        }}
                         onDoubleClick={(e) => {
                           e.stopPropagation()
                           startTabRename(ws.id, tab.id, tab.name)
@@ -1826,6 +2406,13 @@ export function WorkspaceShell() {
                   >
                     <PlusIcon />
                   </button>
+                  {/* Live insertion line for tab drags (round 3). */}
+                  {drag?.kind === 'tab' && drag.wsId === ws.id && tabDrop != null && (
+                    <div
+                      className="drag-line-tab"
+                      style={{ left: tabDrop.lineLeft - drag.barLeft }}
+                    />
+                  )}
                 </div>
                 {/* Every tab's panes stay mounted (hidden when not active) so
                     each keeps its shells — the same contract workspace
@@ -1939,11 +2526,72 @@ export function WorkspaceShell() {
           // time-guarded against the opening gesture.
           onClick={() => setMenu(null)}
         >
+          {menu.groupPickerFor != null ? (
+            /* "Move to group…" picker (#49): swaps the menu's contents IN
+                PLACE — one button per top-level group (the workspace's
+                current group is left out; moving there is a no-op), plus the
+                fresh-name field that creates a group on the fly and files
+                the workspace into it. Clicks inside stay local — only an
+                item, Enter, or an outside click closes. */
+            <div className="menu-picker" onClick={(e) => e.stopPropagation()}>
+              <div className="menu-picker-title">Move to group…</div>
+              {state.groups
+                .filter(
+                  (g) =>
+                    g.id !==
+                    state.workspaces.find((w) => w.id === menu.groupPickerFor)
+                      ?.groupId,
+                )
+                .map((g) => (
+                  <button
+                    key={g.id}
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={() => pickExistingGroup(g.id)}
+                  >
+                    <FolderIcon />
+                    {g.name}
+                  </button>
+                ))}
+              {state.groups.length === 0 && (
+                <div className="menu-note">No groups yet — name one below.</div>
+              )}
+              <div className="menu-separator" />
+              <input
+                className="text-input menu-picker-input"
+                aria-label="New group name"
+                placeholder="new group name"
+                autoFocus
+                value={newGroupName}
+                onChange={(e) => setNewGroupName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') pickNewGroup()
+                  if (e.key === 'Escape') setMenu(null)
+                }}
+              />
+              <button className="menu-item" role="menuitem" onClick={pickNewGroup}>
+                <FolderPlusIcon />
+                Create group and move
+              </button>
+            </div>
+          ) : (
+            <>
           {menu.tabId == null && (
-            <button className="menu-item" role="menuitem" onClick={startCreate}>
-              <PlusIcon />
-              New workspace
-            </button>
+            <>
+              <button className="menu-item" role="menuitem" onClick={startCreate}>
+                <PlusIcon />
+                New workspace
+              </button>
+              {/* New group (#48): the sidebar's group action, reachable from
+                  every non-tab menu — same inline-field pattern. */}
+              <button className="menu-item" role="menuitem" onClick={() => {
+                setMenu(null)
+                startCreateGroup()
+              }}>
+                <FolderPlusIcon />
+                New group
+              </button>
+            </>
           )}
           {/* Tab-scoped actions (#37 follow-up): the menu opened from a
               TERMINAL TAB offers the tab's own actions — rename, pin, close —
@@ -2007,33 +2655,17 @@ export function WorkspaceShell() {
               )
             })()}
           {menu.tabId == null && menu.workspaceId && (() => {
-            // v0.2 / #25: unlimited panels — the split actions are always
-            // available (they split the workspace's active panel).
-            // #37: Pin and Rename sit between the splits and Delete (Adam's
-            // requested position: Pin directly before Delete).
+            // #47 (plan Phase 1): the splits LEFT the workspace menu — they
+            // stay on the tab menu and the shortcuts, where the panel they
+            // split is unambiguous. Pin / Rename / Delete remain (Adam's
+            // position: Pin directly before Delete), joined by "Move to
+            // group…" (#49).
             const menuTarget = state.workspaces.find(
               (w) => w.id === menu.workspaceId,
             )
             const pinned = menuTarget?.pinned === true
             return (
               <>
-                <div className="menu-separator" />
-                <button
-                  className="menu-item"
-                  role="menuitem"
-                  onClick={() => splitFromMenu('horizontal')}
-                >
-                  <SplitHorizontalIcon />
-                  Split horizontal
-                </button>
-                <button
-                  className="menu-item"
-                  role="menuitem"
-                  onClick={() => splitFromMenu('vertical')}
-                >
-                  <SplitVerticalIcon />
-                  Split vertical
-                </button>
                 <div className="menu-separator" />
                 <button
                   className="menu-item"
@@ -2051,6 +2683,20 @@ export function WorkspaceShell() {
                   <PencilIcon />
                   Rename workspace
                 </button>
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  // stopPropagation: this item SWAPS the menu's contents for
+                  // the picker instead of closing it — the container's
+                  // close-on-click must not fire over it.
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    openGroupPicker()
+                  }}
+                >
+                  <FolderIcon />
+                  Move to group…
+                </button>
                 <div className="menu-separator" />
                 <button
                   className="menu-item danger"
@@ -2059,6 +2705,36 @@ export function WorkspaceShell() {
                 >
                   <CloseIcon />
                   Delete workspace
+                </button>
+              </>
+            )
+          })()}
+          {/* Group row menu (#48): Rename + Delete (empty only — the same
+              rule the row's delete button follows). */}
+          {menu.tabId == null && menu.groupId && (() => {
+            const menuGroup = state.groups.find((g) => g.id === menu.groupId)
+            if (menuGroup == null) return null
+            const empty = isGroupEmpty(stateRef.current, menuGroup.id)
+            return (
+              <>
+                <div className="menu-separator" />
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={renameGroupFromMenu}
+                >
+                  <PencilIcon />
+                  Rename group
+                </button>
+                <button
+                  className="menu-item danger"
+                  role="menuitem"
+                  disabled={!empty}
+                  title={empty ? undefined : 'Group is not empty'}
+                  onClick={deleteGroupFromMenu}
+                >
+                  <CloseIcon />
+                  Delete group
                 </button>
               </>
             )
@@ -2078,6 +2754,8 @@ export function WorkspaceShell() {
                 <CloseIcon />
                 Close
               </button>
+            </>
+          )}
             </>
           )}
         </div>
@@ -2111,6 +2789,22 @@ export function WorkspaceShell() {
               </Fragment>
             ))
           )}
+        </div>
+      )}
+      {/* The drag ghost (round 4): a pill carrying the dragged row's name
+          travels just under the pointer — the carrier is never invisible.
+          React seeds the transform once at activation; the window pointermove
+          mutates it imperatively from there. */}
+      {drag != null && (
+        <div
+          className="drag-ghost"
+          ref={ghostRef}
+          style={{ transform: `translate(${drag.x + 12}px, ${drag.y + 10}px)` }}
+        >
+          {drag.kind === 'sidebar' && drag.isGroup && (
+            <FolderIcon className="drag-ghost-icon" />
+          )}
+          <span>{drag.label}</span>
         </div>
       )}
     </div>

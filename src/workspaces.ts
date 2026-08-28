@@ -50,9 +50,25 @@ export type Tab = {
   pinned?: boolean
 }
 
+// A group node of the sidebar tree (#48): a named container workspaces can be
+// filed into (#49). `collapsed`/`pinned` are forward-compat slots from the
+// groups plan (collapse = Phase 4, pin = Phase 6): carried on the model from
+// day one, optional, and the persisted payload must not gain the keys just by
+// passing through here — mirrored as Option fields in the Rust store.
+export type Group = {
+  id: string
+  name: string
+  collapsed?: boolean
+  pinned?: boolean
+}
+
 export type Workspace = {
   id: string
   name: string
+  // Parent group (#49). Absent = the workspace sits at top level. Optional so
+  // pre-groups configs type-check on load and ungrouped workspaces persist
+  // WITHOUT the key — mirrored as an Option field in the Rust store.
+  groupId?: string
   // Pinned workspaces sit at the TOP of the list as a group (#37). Optional
   // like `panels`: absent = unpinned, and the persisted payload must not gain
   // the key just by passing through here — mirrored as an Option field in the
@@ -75,6 +91,13 @@ export type Workspace = {
 
 export type WorkspaceState = {
   workspaces: Workspace[]
+  // The sidebar tree (#48). `groups` holds the group nodes; `order` is ONE
+  // interleaved display order of EVERY node id (groups + workspaces) — a
+  // node's siblings are the entries sharing its parent, ranked by their
+  // relative position here. Both are persisted via the Rust store (which
+  // serializes them since #48); bootState normalizes them on load.
+  groups: Group[]
+  order: string[]
   activeId: string | null
   // Runtime-only (NOT persisted, like activeId): which workspaces currently
   // have a live, mounted panel — i.e. an open shell. A workspace not in this
@@ -97,6 +120,8 @@ export type WorkspaceState = {
 
 export const emptyState: WorkspaceState = {
   workspaces: [],
+  groups: [],
+  order: [],
   activeId: null,
   openIds: [],
   activeTabId: {},
@@ -104,7 +129,9 @@ export const emptyState: WorkspaceState = {
   zoomedPanelId: {},
 }
 
-const defaultGenId = (): string => crypto.randomUUID()
+// Exported for call sites that must pass later optional parameters past it
+// (bootState's tree arguments, #48) — the id generator itself stays injectable.
+export const defaultGenId = (): string => crypto.randomUUID()
 
 /// Return a shallow copy of `map` without `key`. Pure helper for runtime-only
 /// records keyed by workspace id.
@@ -114,19 +141,30 @@ function removeKey<V>(map: Record<string, V>, key: string): Record<string, V> {
 }
 
 /// Seed app state from the persisted config (v0.2 / #25, AC4; reworked for
-/// tabs in #37). The migration ladder per workspace:
+/// tabs in #37; tree-shaped since #48). The migration ladder per workspace:
 ///   - already has `tabs` (a rework-era config): kept untouched;
 ///   - only the legacy top-level `layout` (v0.2 / first #37 cut): it becomes
 ///     the workspace's single tab and the legacy key is STRIPPED, so the next
 ///     save writes the new shape and never both;
 ///   - neither (pre-v0.2): one fresh tab with a single-leaf tree.
+/// The tree side (#48): `loadedGroups`/`loadedOrder` come from the config
+/// when present; a PRE-GROUPS (flat) config carries neither and loads with
+/// zero groups and every workspace at top level. `order` is normalized —
+/// unknown/duplicate ids drop out, and any node the config forgot to rank is
+/// appended (workspaces first, then groups) so nothing silently disappears
+/// from a hand-edited file. A `groupId` pointing at a group the config does
+/// not define is stale and is stripped (the workspace loads at top level).
 /// Every loaded workspace starts open with its first tab and first panel
 /// focused, and the first workspace is active.
 export function bootState(
   loaded: Workspace[],
   genId: () => string = defaultGenId,
+  loadedGroups: Group[] = [],
+  loadedOrder: string[] = [],
 ): WorkspaceState {
+  const knownGroups = new Set(loadedGroups.map((g) => g.id))
   const migrate = (w: Workspace): Workspace => {
+    let base: Workspace
     if (w.tabs != null && w.tabs.length > 0) {
       // Drop a legacy `layout` key if a hand-merge left both behind, and
       // FILL missing tab names with stable positional defaults: an unnamed
@@ -134,20 +172,50 @@ export function bootState(
       // a pin/reorder moves it (HITL: "I pin tab 2 and tab 1 gets pinned"),
       // so every tab gets a name that sticks at boot.
       const { layout: _legacy, ...rest } = w
-      return {
+      base = {
         ...rest,
         tabs: w.tabs.map((t, i) =>
           t.name == null ? { ...t, name: `Tab ${i + 1}` } : t,
         ),
       }
+    } else {
+      const tree = w.layout ?? createTree(genId())
+      const { layout: _legacy, ...rest } = w
+      base = { ...rest, tabs: [{ id: genId(), layout: tree, name: 'Tab 1' }] }
     }
-    const tree = w.layout ?? createTree(genId())
-    const { layout: _legacy, ...rest } = w
-    return { ...rest, tabs: [{ id: genId(), layout: tree, name: 'Tab 1' }] }
+    if (base.groupId != null && !knownGroups.has(base.groupId)) {
+      const { groupId: _stale, ...rest } = base
+      return rest
+    }
+    return base
   }
   const workspaces = loaded.map(migrate)
+  const groups = loadedGroups
+  const known = new Set<string>([...workspaces.map((w) => w.id), ...groups.map((g) => g.id)])
+  const seen = new Set<string>()
+  const order: string[] = []
+  for (const id of loadedOrder) {
+    if (known.has(id) && !seen.has(id)) {
+      order.push(id)
+      seen.add(id)
+    }
+  }
+  for (const w of workspaces) {
+    if (!seen.has(w.id)) {
+      order.push(w.id)
+      seen.add(w.id)
+    }
+  }
+  for (const g of groups) {
+    if (!seen.has(g.id)) {
+      order.push(g.id)
+      seen.add(g.id)
+    }
+  }
   return {
     workspaces,
+    groups,
+    order,
     activeId: workspaces[0]?.id ?? null,
     openIds: workspaces.map((w) => w.id),
     activeTabId: Object.fromEntries(
@@ -184,6 +252,10 @@ export function createWorkspace(
   const workspace: Workspace = { id, name, panels: [], tabs: [tab] }
   return {
     workspaces: [...state.workspaces, workspace],
+    groups: state.groups,
+    // New workspaces ALWAYS attach at TOP level (#49): last among the
+    // top-level siblings in the shared display order, never inside a group.
+    order: [...state.order, id],
     activeId: id,
     openIds: [...state.openIds, id],
     activeTabId: { ...state.activeTabId, [id]: tab.id },
@@ -194,6 +266,190 @@ export function createWorkspace(
     // Runtime records of the existing workspaces ride along untouched.
     zoomedPanelId: state.zoomedPanelId,
   }
+}
+
+// --- Sidebar tree (#48): groups + the shared interleaved order --------------
+//
+// All mutations are pure state operations (same discipline as the rest of
+// the module): they return a new WorkspaceState and never touch I/O. Groups
+// and workspaces share ONE display order (`state.order`); a node's siblings
+// are the entries sharing its parent, ranked by relative position there.
+
+/// Append an empty group at the END of the top level (#48, "New group").
+/// The genId is consumed for the group's id only.
+export function createGroup(
+  state: WorkspaceState,
+  name: string,
+  genId: () => string = defaultGenId,
+): WorkspaceState {
+  const group: Group = { id: genId(), name }
+  return {
+    ...state,
+    groups: [...state.groups, group],
+    order: [...state.order, group.id],
+  }
+}
+
+/// Rename a group (#48). No-op for an unknown id; an empty name is ignored
+/// (the same rule renameWorkspace applies to workspaces).
+export function renameGroup(
+  state: WorkspaceState,
+  id: string,
+  name: string,
+): WorkspaceState {
+  if (!state.groups.some((g) => g.id === id)) return state
+  if (name.trim() === '') return state
+  return {
+    ...state,
+    groups: state.groups.map((g) => (g.id === id ? { ...g, name } : g)),
+  }
+}
+
+/// True when no workspace is filed inside group `id` (#48): only an empty
+/// group may be deleted until Phase 5 brings the destructive subtree delete.
+export function isGroupEmpty(state: WorkspaceState, id: string): boolean {
+  return !state.workspaces.some((w) => w.groupId === id)
+}
+
+/// Delete an EMPTY group (#48): the node leaves `groups` and `order`; its
+/// (nonexistent) children are untouched. A non-empty group or an unknown id
+/// is a no-op — the destructive delete-with-children lands in Phase 5.
+export function deleteGroup(state: WorkspaceState, id: string): WorkspaceState {
+  if (!state.groups.some((g) => g.id === id)) return state
+  if (!isGroupEmpty(state, id)) return state
+  return {
+    ...state,
+    groups: state.groups.filter((g) => g.id !== id),
+    order: state.order.filter((nodeId) => nodeId !== id),
+  }
+}
+
+/// Where a moved node should land: the parent group (`null` = top level)
+/// and optionally the sibling id to insert BEFORE (reorder). Omitting
+/// `beforeId` appends at the end of the target's children (#49: dropping
+/// onto a group files the workspace at the end of that group).
+export type MoveTarget = { parentId: string | null; beforeId?: string }
+
+/// The parent group id of a node in `order`, or `null` = top level. Groups
+/// always live at top level until nesting lands (Phase 5).
+function parentOf(state: WorkspaceState, nodeId: string): string | null {
+  if (state.groups.some((g) => g.id === nodeId)) return null
+  return state.workspaces.find((w) => w.id === nodeId)?.groupId ?? null
+}
+
+/// Move a node (workspace or group) within the tree (#49):
+///   - a workspace onto a group -> filed INSIDE it, appended at the end of
+///     that group's children;
+///   - a workspace to top-level space -> back at top level;
+///   - any node with `beforeId` -> inserted before that sibling (reorder);
+///   - a GROUP may only move at top level — moving a group into a group is
+///     nesting and is rejected (no-op) until Phase 5.
+/// Unknown nodes, unknown target groups, and `beforeId` ids that are not
+/// siblings of the target parent are no-ops too. Everything else about the
+/// state (activation, open set, tabs, panels) rides along untouched.
+export function moveNode(
+  state: WorkspaceState,
+  nodeId: string,
+  target: MoveTarget,
+): WorkspaceState {
+  const isGroupNode = state.groups.some((g) => g.id === nodeId)
+  const ws = state.workspaces.find((w) => w.id === nodeId)
+  if (!isGroupNode && ws == null) return state
+  if (isGroupNode && target.parentId != null) return state // no nesting yet
+  if (
+    !isGroupNode &&
+    target.parentId != null &&
+    !state.groups.some((g) => g.id === target.parentId)
+  ) {
+    return state
+  }
+  if (target.beforeId === nodeId) return state
+  const parentId = isGroupNode ? null : target.parentId
+  // Remove the node, then re-insert at its new sibling position.
+  const without = state.order.filter((id) => id !== nodeId)
+  let insertAt: number
+  if (
+    target.beforeId != null &&
+    parentOf(state, target.beforeId) === parentId
+  ) {
+    const idx = without.indexOf(target.beforeId)
+    insertAt = idx === -1 ? without.length : idx
+  } else {
+    // Append after the target parent's LAST sibling — a new child lands at
+    // the end of its group, not at the end of the whole list. With no
+    // siblings yet, the FIRST child lands right after its parent group
+    // (never in front of it); a top-level append goes to the very end.
+    let last = -1
+    for (let i = 0; i < without.length; i++) {
+      if (parentOf(state, without[i]) === parentId) last = i
+    }
+    if (last >= 0) {
+      insertAt = last + 1
+    } else if (parentId != null) {
+      const p = without.indexOf(parentId)
+      insertAt = p === -1 ? without.length : p + 1
+    } else {
+      insertAt = without.length
+    }
+  }
+  const order = [...without.slice(0, insertAt), nodeId, ...without.slice(insertAt)]
+  // A workspace leaving a group DROPS the `groupId` key — the persisted
+  // payload stays byte-identical to one that was never grouped (same hygiene
+  // as omitPinned).
+  const newParentId = target.parentId
+  const workspaces = isGroupNode
+    ? state.workspaces
+    : newParentId != null
+      ? state.workspaces.map((w) =>
+          w.id === nodeId ? { ...w, groupId: newParentId } : w,
+        )
+      : state.workspaces.map((w) => {
+          if (w.id !== nodeId) return w
+          const { groupId: _dropped, ...rest } = w
+          return rest
+        })
+  return { ...state, workspaces, order }
+}
+
+/// "Move to group…" with a FRESH name (#49): creates the group on the fly
+/// (appended at the end of the top level, same as "New group") and files the
+/// workspace into it as its only child. No-op for an unknown workspace id or
+/// a blank name. genId order (stable, tests rely on it): the group's id only.
+export function moveToNewGroup(
+  state: WorkspaceState,
+  workspaceId: string,
+  name: string,
+  genId: () => string = defaultGenId,
+): WorkspaceState {
+  if (!state.workspaces.some((w) => w.id === workspaceId)) return state
+  if (name.trim() === '') return state
+  const created = createGroup(state, name.trim(), genId)
+  const gid = created.groups[created.groups.length - 1].id
+  return moveNode(created, workspaceId, { parentId: gid })
+}
+
+/// One flattened, ordered sidebar entry with its depth (#48) — the shape the
+/// UI renders so indentation is a pure read. Depth is 0 for top-level nodes
+/// and 1 for workspaces filed into a group (nesting, Phase 5, generalizes
+/// this to a walk over parents).
+export type SidebarEntry =
+  | { kind: 'group'; group: Group; depth: number }
+  | { kind: 'workspace'; workspace: Workspace; depth: number }
+
+export function flattenSidebar(state: WorkspaceState): SidebarEntry[] {
+  return state.order.flatMap((nodeId): SidebarEntry[] => {
+    const group = state.groups.find((g) => g.id === nodeId)
+    if (group != null) return [{ kind: 'group', group, depth: 0 }]
+    const workspace = state.workspaces.find((w) => w.id === nodeId)
+    if (workspace == null) return []
+    return [
+      {
+        kind: 'workspace',
+        workspace,
+        depth: workspace.groupId != null ? 1 : 0,
+      },
+    ]
+  })
 }
 
 /// The workspace's ACTIVE tab (runtime record with a first-tab fallback, so
@@ -388,14 +644,15 @@ export function switchWorkspace(
 }
 
 /// Pick the next workspace to activate after `removedId` is gone from the open
-/// set: the next open sibling in list order, else the previous open one, else
-/// null (no open workspace left -> EmptyState). Definitions order is the source
-/// of truth for "sibling".
+/// set: the next open one in SIDEBAR order, else the previous open one, else
+/// null (no open workspace left -> EmptyState). The tree's shared order is
+/// the source of truth for what the user sees as "next" (#48).
 function pickReplacementActive(
   state: WorkspaceState,
   removedId: string,
 ): string | null {
-  const ids = state.workspaces.map((w) => w.id)
+  const wsIds = new Set(state.workspaces.map((w) => w.id))
+  const ids = state.order.filter((id) => wsIds.has(id))
   const idx = ids.indexOf(removedId)
   const after = ids.slice(idx + 1).find((id) => state.openIds.includes(id))
   if (after != null) return after
@@ -425,6 +682,10 @@ export function deleteWorkspace(
   )
   return {
     workspaces: state.workspaces.filter((w) => w.id !== id),
+    groups: state.groups,
+    // The node also leaves the shared sidebar order (#48) — a stale id there
+    // would render a ghost row.
+    order: state.order.filter((nodeId) => nodeId !== id),
     activeId: nextActive,
     openIds: state.openIds.filter((openId) => openId !== id),
     activeTabId: removeKey(state.activeTabId, id),
@@ -465,31 +726,54 @@ export function openWorkspace(
   return { ...state, activeId: id, openIds }
 }
 
-/// Pin or unpin a workspace (#37). Pinned workspaces always sit at the TOP of
-/// the list as a group, so the toggle MOVES the definition in the array — the
-/// array stays the single source of display order (drag-and-drop, the sidebar
-/// list, and the tab bar all read it directly). Pinning appends to the END of
-/// the pinned block; unpinning inserts at the HEAD of the unpinned block (the
-/// workspace lands right behind the pinned group — the list never jumps).
-/// No-op for an unknown id or when the flag already matches.
+/// Pin or unpin a workspace (#37; re-homed onto the tree in #48). Pinned
+/// workspaces lead their sibling group in the SHARED sidebar order, so the
+/// toggle reorders `state.order` among the target's siblings (the definitions
+/// array no longer drives display). Pinning appends after the pinned block;
+/// unpinning inserts at the head of the unpinned block — the list never
+/// jumps. Non-sibling nodes keep their absolute slots. No-op for an unknown
+/// id or when the flag already matches.
 export function setWorkspacePinned(
   state: WorkspaceState,
   id: string,
   pinned: boolean,
 ): WorkspaceState {
-  const fromIndex = state.workspaces.findIndex((w) => w.id === id)
-  if (fromIndex === -1) return state
-  const target = state.workspaces[fromIndex]
+  const target = state.workspaces.find((w) => w.id === id)
+  if (target == null) return state
   if ((target.pinned ?? false) === pinned) return state
-  const rest = state.workspaces.filter((w) => w.id !== id)
   const updated = pinned ? { ...target, pinned } : omitPinned(target)
+  // Siblings = nodes sharing the target's parent, in tree order (groups
+  // count as top-level siblings; their pin flag is a Phase 6 concern).
+  const parentId = target.groupId ?? null
+  const isSibling = (nodeId: string): boolean => {
+    if (nodeId === id) return true
+    if (state.groups.some((g) => g.id === nodeId)) return parentId == null
+    const w = state.workspaces.find((x) => x.id === nodeId)
+    return (w?.groupId ?? null) === parentId
+  }
+  const pinnedOf = (nodeId: string): boolean =>
+    state.workspaces.find((w) => w.id === nodeId)?.pinned === true
+  const siblings = state.order.filter(isSibling)
+  const rest = siblings.filter((nodeId) => nodeId !== id)
   const insertAt = pinned
-    ? rest.filter((w) => w.pinned === true).length
-    : rest.findIndex((w) => w.pinned !== true)
+    ? rest.filter(pinnedOf).length
+    : rest.findIndex((nodeId) => !pinnedOf(nodeId))
   const index = insertAt === -1 ? rest.length : insertAt
+  const sequence = [...rest.slice(0, index), id, ...rest.slice(index)]
+  // Write the reordered sibling sequence back into the SAME order slots, so
+  // nodes outside the sibling set never move.
+  const slots: number[] = []
+  state.order.forEach((nodeId, i) => {
+    if (isSibling(nodeId)) slots.push(i)
+  })
+  const order = [...state.order]
+  sequence.forEach((nodeId, k) => {
+    order[slots[k]] = nodeId
+  })
   return {
     ...state,
-    workspaces: [...rest.slice(0, index), updated, ...rest.slice(index)],
+    workspaces: state.workspaces.map((w) => (w.id === id ? updated : w)),
+    order,
   }
 }
 
@@ -501,26 +785,9 @@ function omitPinned(workspace: Workspace): Workspace {
   return rest
 }
 
-/// Reorder a workspace definition: move the workspace with `id` to `newIndex`
-/// in the list (clamped to the valid range). Definitions-only — openIds are a
-/// runtime set and are not reordered. No-op for an unknown id.
-export function moveWorkspace(
-  state: WorkspaceState,
-  id: string,
-  newIndex: number,
-): WorkspaceState {
-  const fromIndex = state.workspaces.findIndex((w) => w.id === id)
-  if (fromIndex === -1) return state
-  const next = [...state.workspaces]
-  const [moved] = next.splice(fromIndex, 1)
-  const clamped = Math.max(0, Math.min(newIndex, next.length))
-  next.splice(clamped, 0, moved)
-  return { ...state, workspaces: next }
-}
-
 /// Reorder workspace `id`'s tabs (#45): drag & drop inside ONE workspace's
-/// tab bar (HITL: no cross-workspace drags). Mirrors moveWorkspace — splice
-/// the tab out, clamp the target index, splice it back. Everything hangs off
+/// tab bar (HITL: no cross-workspace drags). Splice the tab out, clamp the
+/// target index, splice it back. Everything hangs off
 /// the tab's ID (name, panels, pinned flag, the active-tab record), so only
 /// ORDER changes. No-op for unknown workspace/tab ids.
 export function moveTab(

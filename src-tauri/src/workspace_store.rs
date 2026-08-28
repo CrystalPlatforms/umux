@@ -71,6 +71,28 @@ pub struct Workspace {
     // the optional `pinned` on the TS `Workspace` in workspaces.ts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    // Parent group (#49). None = the workspace sits at top level. `Option` +
+    // `default` + `skip_serializing_if` so pre-groups configs load and
+    // ungrouped workspaces re-save WITHOUT the key — mirrors the optional
+    // `groupId` on the TS `Workspace` in workspaces.ts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+}
+
+/// A group node of the sidebar tree (#48): a named container workspaces can
+/// be filed into (#49). `collapsed`/`pinned` are forward-compat slots from
+/// the groups plan (collapse = Phase 4, pin = Phase 6) — `Option` + `default`
+/// + `skip_serializing_if` so early configs neither need nor gain the keys.
+/// Shape-identical to the TS `Group` in workspaces.ts.
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collapsed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
@@ -102,6 +124,16 @@ pub enum LayoutNode {
 pub struct WorkspaceData {
     #[serde(default)]
     pub workspaces: Vec<Workspace>,
+    // The sidebar tree (#48): group nodes plus ONE interleaved display order
+    // of every node id (groups + workspaces). Both `#[serde(default)]` so a
+    // PRE-GROUPS (flat) config — which carries neither key — loads with zero
+    // groups and every workspace at top level, and `skip_serializing_if`
+    // keeps a group-less state's saves free of the new keys. Mirrors the TS
+    // `WorkspaceState.groups`/`order` in workspaces.ts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
 }
 
 /// Parse a workspace config from its JSON text form.
@@ -230,9 +262,11 @@ mod tests {
     fn serialize_config_round_trips() {
         let data = WorkspaceData {
             workspaces: vec![
-                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![], layout: None, pinned: None, tabs: vec![] },
-                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![], layout: None, pinned: None, tabs: vec![] },
+                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![], layout: None, pinned: None, group_id: None, tabs: vec![] },
+                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![], layout: None, pinned: None, group_id: None, tabs: vec![] },
             ],
+            groups: vec![],
+            order: vec![],
         };
 
         let text = serialize_config(&data);
@@ -271,8 +305,11 @@ mod tests {
                 }],
                 layout: None,
                 pinned: None,
+                group_id: None,
                 tabs: vec![],
             }],
+            groups: vec![],
+            order: vec![],
         };
 
         let text = serialize_config(&data);
@@ -310,8 +347,11 @@ mod tests {
                 panels: vec![],
                 layout: None,
                 pinned: None,
+                group_id: None,
                 tabs: vec![],
             }],
+            groups: vec![],
+            order: vec![],
         };
 
         store.save(&data).unwrap();
@@ -340,8 +380,11 @@ mod tests {
                 }],
                 layout: None,
                 pinned: None,
+                group_id: None,
                 tabs: vec![],
             }],
+            groups: vec![],
+            order: vec![],
         };
 
         store.save(&data).unwrap();
@@ -448,8 +491,11 @@ mod tests {
                 }],
                 layout: None,
                 pinned: None,
+                group_id: None,
                 tabs: vec![],
             }],
+            groups: vec![],
+            order: vec![],
         };
 
         let text = serialize_config(&data);
@@ -503,8 +549,11 @@ mod tests {
                 panels: vec![],
                 layout: Some(nested_tree()),
                 pinned: None,
+                group_id: None,
                 tabs: vec![],
             }],
+            groups: vec![],
+            order: vec![],
         };
 
         let text = serialize_config(&data);
@@ -540,8 +589,11 @@ mod tests {
                 panels: vec![],
                 layout: Some(nested_tree()),
                 pinned: None,
+                group_id: None,
                 tabs: vec![],
             }],
+            groups: vec![],
+            order: vec![],
         };
 
         let text = serialize_config(&data);
@@ -580,13 +632,176 @@ mod tests {
                 panels: vec![],
                 layout: Some(nested_tree()),
                 pinned: None,
+                group_id: None,
                 tabs: vec![],
             }],
+            groups: vec![],
+            order: vec![],
         };
 
         store.save(&data).unwrap();
         let back = store.load();
 
         assert_eq!(back, data);
+    }
+
+    // --- Workspace groups: tree persistence (#48/#49) -------------------------
+
+    /// A grouped config: two workspaces, one group, ws-1 filed inside it and
+    /// the shared interleaved order [top-level ws-2, group g-1, its child
+    /// ws-1]. Mirrors the frontend fixture used in the TS suites.
+    fn grouped_data() -> WorkspaceData {
+        WorkspaceData {
+            workspaces: vec![
+                Workspace {
+                    id: "ws-1".into(),
+                    name: "alpha".into(),
+                    panels: vec![],
+                    layout: None,
+                    pinned: None,
+                    group_id: Some("g-1".into()),
+                    tabs: vec![],
+                },
+                Workspace {
+                    id: "ws-2".into(),
+                    name: "beta".into(),
+                    panels: vec![],
+                    layout: None,
+                    pinned: None,
+                    group_id: None,
+                    tabs: vec![],
+                },
+            ],
+            groups: vec![Group {
+                id: "g-1".into(),
+                name: "projekty".into(),
+                collapsed: None,
+                pinned: None,
+            }],
+            order: vec!["ws-2".into(), "g-1".into(), "ws-1".into()],
+        }
+    }
+
+    // T-G1 (AC "tree config round-trips" — the pure layer preserves groups,
+    // tree order and node parents):
+    //   Input:  WorkspaceData with a group, a grouped workspace and an
+    //           interleaved order.
+    //   Output: serialize_config -> parse_config yields identical data.
+    #[test]
+    fn serialize_round_trips_tree_config() {
+        let data = grouped_data();
+
+        let text = serialize_config(&data);
+        let back = parse_config(&text);
+
+        assert_eq!(back, data);
+    }
+
+    // T-G2 (AC "mixed order round-trips" — interleaved group/workspace order
+    // survives the FILESYSTEM, not just the pure layer):
+    //   Input:  the grouped config persisted via save() to a real temp file.
+    //   Output: load() reads back identical data, order position for position.
+    #[test]
+    fn save_then_load_round_trips_mixed_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path().join("config.json"));
+        let data = grouped_data();
+
+        store.save(&data).unwrap();
+        let back = store.load();
+
+        assert_eq!(back, data);
+        assert_eq!(
+            back.order,
+            ["ws-2".to_string(), "g-1".to_string(), "ws-1".to_string()]
+        );
+        assert_eq!(back.groups[0].id, "g-1");
+        assert_eq!(back.workspaces[0].group_id.as_deref(), Some("g-1"));
+    }
+
+    // T-G3 (AC "old flat config loads flat" — a PRE-GROUPS config, which
+    // carries neither `groups` nor `order`, parses with zero groups and every
+    // workspace at TOP LEVEL — never an error, never a crash):
+    //   Input:  JSON written by a pre-groups umux ({id, name} workspaces only).
+    //   Output: groups empty, every group_id None, status Ok.
+    #[test]
+    fn old_flat_config_loads_flat() {
+        let text = r#"{"workspaces":[{"id":"ws-1","name":"alpha"},{"id":"ws-2","name":"beta"}]}"#;
+
+        let (data, status) = parse_config_with_status(text);
+
+        assert_eq!(status, ConfigStatus::Ok);
+        assert!(data.groups.is_empty());
+        assert!(data.order.is_empty());
+        assert!(data.workspaces.iter().all(|w| w.group_id.is_none()));
+        assert_eq!(data.workspaces.len(), 2);
+    }
+
+    // T-G4 (wire format — the tree speaks the SAME camelCase contract the TS
+    // frontend reads: `groupId` on the wire, and a grouped save carries the
+    // `groups`/`order` keys; an UNGROUPED workspace's payload stays free of
+    // the `groupId` key entirely):
+    //   Input:  the grouped config.
+    //   Output: camelCase keys on the wire, no snake_case leaks, and the
+    //           emitted JSON parses back into the same data.
+    #[test]
+    fn tree_serializes_camel_case_matching_frontend() {
+        let data = grouped_data();
+
+        let text = serialize_config(&data);
+
+        assert!(
+            text.contains(r#""groupId":"g-1""#),
+            "expected camelCase groupId on the wire, got: {text}"
+        );
+        assert!(
+            text.contains(r#""groups":"#) && text.contains(r#""order":"#),
+            "expected the tree keys in the wire JSON, got: {text}"
+        );
+        assert!(
+            !text.contains("\"group_id\""),
+            "snake_case group_id leaked into wire JSON: {text}"
+        );
+
+        // And the camelCase form parses back into the same data.
+        assert_eq!(parse_config(&text), data);
+    }
+
+    // T-G5 (forward-compat slots — a group carrying `collapsed`/`pinned`
+    // round-trips, and an ungrouped workspace re-serializes WITHOUT gaining
+    // the `groupId` key — byte-identical discipline as for `pinned`):
+    //   Input:  a group with collapsed=true; serialize; inspect the grouped
+    //           workspace's absence of groupId.
+    //   Output: flags survive a round-trip; the ungrouped payload stays clean.
+    #[test]
+    fn group_flags_round_trip_and_ungrouped_payload_stays_clean() {
+        let mut data = grouped_data();
+        data.groups[0].collapsed = Some(true);
+
+        let text = serialize_config(&data);
+        assert!(
+            text.contains(r#""collapsed":true"#),
+            "collapsed flag lost on the wire: {text}"
+        );
+        assert_eq!(parse_config(&text).groups[0].collapsed, Some(true));
+
+        // ws-2 (ungrouped) carries no groupId key in its JSON object.
+        let ws2_text = serialize_config(&WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-2".into(),
+                name: "beta".into(),
+                panels: vec![],
+                layout: None,
+                pinned: None,
+                group_id: None,
+                tabs: vec![],
+            }],
+            groups: vec![],
+            order: vec![],
+        });
+        assert!(
+            !ws2_text.contains("groupId"),
+            "ungrouped workspace gained a groupId key: {ws2_text}"
+        );
     }
 }

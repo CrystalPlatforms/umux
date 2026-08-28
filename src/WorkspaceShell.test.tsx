@@ -103,6 +103,46 @@ vi.mock('./TerminalSurface', () => ({
 
 import { WorkspaceShell } from './WorkspaceShell'
 
+/// Open the sidebar's create form via the header "+" dropdown (round 2:
+/// ONE button unfolds the New workspace / New group choice).
+async function openCreateForm(kind: 'workspace' | 'group' = 'workspace') {
+  fireEvent.click(screen.getByRole('button', { name: /add workspace or group/i }))
+  fireEvent.click(
+    await screen.findByRole(
+      'menuitem',
+      { name: kind === 'group' ? /new group/i : /new workspace/i },
+    ),
+  )
+}
+
+/// Live pointer drag (round 3): jsdom has no layout, so the component
+/// measures rows via getBoundingClientRect at drag activation — this stub
+/// feeds synthetic rects keyed by the element's data-testid. Returns the
+/// spy; restore it when the test is done.
+type Box = { top?: number; bottom?: number; left?: number; right?: number }
+function stubRects(rects: Record<string, Box>) {
+  return vi
+    .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+    .mockImplementation(function (this: HTMLElement) {
+      const r = rects[this.getAttribute('data-testid') ?? '']
+      const left = r?.left ?? 0
+      const right = r?.right ?? 100
+      const top = r?.top ?? 0
+      const bottom = r?.bottom ?? 0
+      return {
+        x: left,
+        y: top,
+        top,
+        bottom,
+        left,
+        right,
+        width: right - left,
+        height: bottom - top,
+        toJSON: () => ({}),
+      } as DOMRect
+    })
+}
+
 describe('WorkspaceShell', () => {
   beforeEach(() => {
     invokeMock.mockReset()
@@ -123,7 +163,9 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
-    expect(screen.getByRole('button', { name: /new workspace/i })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /add workspace or group/i }),
+    ).toBeInTheDocument()
   })
 
   // Phase 17 / Issue #18 — onboarding empty state. A fresh install (no
@@ -186,22 +228,27 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
 
-    fireEvent.click(screen.getByRole('button', { name: /new workspace/i }))
+    await openCreateForm('workspace')
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'my-project' } })
     fireEvent.click(screen.getByRole('button', { name: /create/i }))
 
     expect(await screen.findByText('my-project', { selector: '.workspace-name' })).toBeInTheDocument()
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [
-          {
-            id: expect.any(String),
-            name: 'my-project',
-            panels: [],
-            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
-          },
-        ],
-      }),
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        // The payload carries the sidebar tree since #48 (groups + order) —
+        // these assertions target the workspace definitions beside it.
+        expect.objectContaining({
+          workspaces: [
+            {
+              id: expect.any(String),
+              name: 'my-project',
+              panels: [],
+              tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
+            },
+          ],
+        }),
+      ),
     )
   })
 
@@ -252,17 +299,20 @@ describe('WorkspaceShell', () => {
 
     expect(await screen.findByText('alpha-renamed', { selector: '.workspace-name' })).toBeInTheDocument()
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [
-          {
-            id: 'ws-1',
-            name: 'alpha-renamed',
-            // bootState seeded a fresh single-leaf layout for the config that
-            // had none (v0.2 / #25) — it persists along with the rename.
-            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
-          },
-        ],
-      }),
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha-renamed',
+              // bootState seeded a fresh single-leaf layout for the config that
+              // had none (v0.2 / #25) — it persists along with the rename.
+              tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
+            },
+          ],
+        }),
+      ),
     )
   })
 
@@ -306,7 +356,7 @@ describe('WorkspaceShell', () => {
 
     fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-1'), { button: 2 })
 
-    expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeInTheDocument()
+    expect(await screen.findByRole('menuitem', { name: /new workspace/i })).toBeInTheDocument()
   })
 
   it('opens the workspace menu on Ctrl+click (macOS right-click)', async () => {
@@ -323,7 +373,7 @@ describe('WorkspaceShell', () => {
       ctrlKey: true,
     })
 
-    expect(await screen.findByRole('menuitem', { name: /split horizontal/i })).toBeInTheDocument()
+    expect(await screen.findByRole('menuitem', { name: /new workspace/i })).toBeInTheDocument()
   })
 
   it('collapses the sidebar (stays mounted, is-collapsed) and expands it again from the corner toggle', async () => {
@@ -430,15 +480,18 @@ describe('WorkspaceShell', () => {
     expect(screen.queryByText('alpha')).not.toBeInTheDocument()
     expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [
-          {
-            id: 'ws-2',
-            name: 'beta',
-            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
-          },
-        ],
-      }),
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          workspaces: [
+            {
+              id: 'ws-2',
+              name: 'beta',
+              tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
+            },
+          ],
+        }),
+      ),
     )
   })
 
@@ -464,7 +517,7 @@ describe('WorkspaceShell', () => {
     expect(invokeMock).not.toHaveBeenCalledWith('save_workspaces', expect.anything())
   })
 
-  it('reorders workspaces via drag-and-drop and persists the new order', async () => {
+  it('reorders workspaces via live pointer drag: the line follows the pointer and release persists', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'load_workspaces')
         return Promise.resolve({
@@ -480,35 +533,71 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByText('gamma', { selector: '.workspace-name' })).toBeInTheDocument())
 
-    // Drag the alpha row onto the gamma row -> alpha moves to the end.
-    fireEvent.dragStart(screen.getByTestId('workspace-row-ws-1'))
-    fireEvent.drop(screen.getByTestId('workspace-row-ws-3'))
+    const restore = stubRects({
+      'workspace-row-ws-1': { top: 0, bottom: 30 },
+      'workspace-row-ws-2': { top: 30, bottom: 60 },
+      'workspace-row-ws-3': { top: 60, bottom: 90 },
+    })
+
+    // Press ws-1, drag onto ws-3 — the LIVE line must appear and follow the
+    // pointer BEFORE anything is committed.
+    const src = screen.getByTestId('workspace-row-ws-1')
+    fireEvent.pointerDown(src, { button: 0, clientX: 10, clientY: 15 })
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 70 })
+    expect(document.querySelector('.drag-line')).not.toBeNull()
+    // Top half of ws-3 (60..90) -> the line rests at its TOP edge (before).
+    expect((document.querySelector('.drag-line') as HTMLElement).style.top).toBe('60px')
+    // The ghost pill carries the dragged row's name under the pointer, and
+    // the whole document freezes selection for the gesture (round 4).
+    expect(document.querySelector('.drag-ghost')?.textContent).toContain('alpha')
+    expect(document.body.classList.contains('is-dragging')).toBe(true)
+
+    // Dropping into the bottom half moves the line to the bottom edge —
+    // release lands ws-1 AFTER ws-3.
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 85 })
+    expect((document.querySelector('.drag-line') as HTMLElement).style.top).toBe('90px')
+    fireEvent.pointerUp(window, {})
+    restore.mockRestore()
+    // Release cleans up the ghost and the selection freeze.
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+    expect(document.body.classList.contains('is-dragging')).toBe(false)
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [
-          {
-            id: 'ws-2',
-            name: 'beta',
-            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
-          },
-          {
-            id: 'ws-3',
-            name: 'gamma',
-            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
-          },
-          {
-            id: 'ws-1',
-            name: 'alpha',
-            tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
-          },
-        ],
-      }),
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          // The definitions array stays creation-ordered — the SIDEBAR order
+          // moved (ws-1 released under ws-3's bottom half -> lands after
+          // ws-3), and the persisted `order` carries it (#48).
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
+            },
+            {
+              id: 'ws-2',
+              name: 'beta',
+              tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
+            },
+            {
+              id: 'ws-3',
+              name: 'gamma',
+              tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
+            },
+          ],
+          order: ['ws-2', 'ws-3', 'ws-1'],
+        }),
+      ),
     )
+    // The line is gone after release.
+    expect(document.querySelector('.drag-line')).toBeNull()
   })
 
-  // Phase 9 / #10 — split into two panels (stories 15–17). Split actions live
-  // in the workspace's right-click context menu, not a persistent toolbar.
+  // Phase 9 / #10 — split into two panels (stories 15–17). Since #47 the
+  // split actions live in the TERMINAL TAB's context menu (they left the
+  // workspace menu with the two-line-rows phase), targeting that tab's
+  // active panel — the split tests route through the tab menu below.
   describe('panel split', () => {
     const seedOne = () => {
       invokeMock.mockImplementation((cmd: string) => {
@@ -518,9 +607,12 @@ describe('WorkspaceShell', () => {
       })
     }
 
-    // Right-click a workspace row to open its context menu.
+    // Right-click the active workspace's ACTIVE TAB to open ITS menu — the
+    // menu that carries the split actions since #47.
     const openRowMenu = () =>
-      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.contextMenu(
+        within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')[0],
+      )
 
     it('mounts a single terminal surface per open workspace', async () => {
       seedOne()
@@ -530,7 +622,7 @@ describe('WorkspaceShell', () => {
       expect(screen.getAllByTestId('terminal-surface')).toHaveLength(1)
     })
 
-    it('offers the split actions in the workspace context menu', async () => {
+    it('offers the split actions in the tab context menu (#47: both of them)', async () => {
       seedOne()
       render(<WorkspaceShell />)
       await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
@@ -720,7 +812,9 @@ describe('WorkspaceShell', () => {
       seedOne()
       const { container } = render(<WorkspaceShell />)
       await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
-      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.contextMenu(
+        within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')[0],
+      )
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
       await screen.findAllByTestId('terminal-surface')
       return container.querySelectorAll<HTMLElement>('[data-panel-id]')
@@ -832,7 +926,9 @@ describe('WorkspaceShell', () => {
       await waitFor(() =>
         expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
       )
-      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.contextMenu(
+        within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')[0],
+      )
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
       await screen.findAllByTestId('terminal-surface')
       return container.querySelectorAll<HTMLElement>('[data-panel-id]')
@@ -1120,7 +1216,9 @@ describe('WorkspaceShell', () => {
     const splitIntoTwo = async () => {
       render(<WorkspaceShell />)
       await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
-      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.contextMenu(
+        within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')[0],
+      )
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
       await waitFor(() =>
         expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2),
@@ -1246,7 +1344,9 @@ describe('WorkspaceShell', () => {
       await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
       // Split alpha: two surfaces, focus moves to the new leaf.
-      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+      fireEvent.contextMenu(
+        within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')[0],
+      )
       fireEvent.click(await screen.findByRole('menuitem', { name: /split horizontal/i }))
       await waitFor(() =>
         expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2),
@@ -1266,8 +1366,11 @@ describe('WorkspaceShell', () => {
       // the tab bar carries its own "+" since #37.
       fireEvent.click(
         within(screen.getByRole('complementary')).getByRole('button', {
-          name: /new workspace/i,
+          name: /add workspace or group/i,
         }),
+      )
+      fireEvent.click(
+        await screen.findByRole('menuitem', { name: /new workspace/i }),
       )
       fireEvent.change(screen.getByLabelText(/new workspace name/i), {
         target: { value: 'beta' },
@@ -1409,14 +1512,17 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
 
     fireEvent.click(
       within(screen.getByRole('complementary')).getByRole('button', {
-        name: /new workspace/i,
+        name: /add workspace or group/i,
       }),
+    )
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: /new workspace/i }),
     )
     fireEvent.change(screen.getByLabelText(/new workspace name/i), {
       target: { value: 'draft' },
     })
     fireEvent.click(
-      screen.getByRole('button', { name: /cancel creating workspace/i }),
+      screen.getByRole('button', { name: /cancel creating/i }),
     )
 
     expect(
@@ -1433,7 +1539,7 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
     )
   })
 
-  it('offers Pin and Rename in the row menu, both before Delete', async () => {
+  it('offers Pin and Rename in the row menu, both before Delete — and no split items (#47)', async () => {
     seedTwo()
     render(<WorkspaceShell />)
     await waitFor(() =>
@@ -1453,11 +1559,14 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
     expect(pin).toBeGreaterThan(-1)
     expect(rename).toBeGreaterThan(-1)
     expect(del).toBeGreaterThan(-1)
-    // Adam's requested position: Pin (and Rename) directly before Delete,
-    // after the split actions.
+    // Adam's requested position: Pin (and Rename) directly before Delete.
     expect(pin).toBeLessThan(del)
     expect(rename).toBeLessThan(del)
-    expect(pin).toBeGreaterThan(names.indexOf('Split vertical'))
+    // #47: the splits LEFT the workspace menu — they belong to the tab menu
+    // (and the shortcuts). "Move to group…" (#49) joins the row actions.
+    expect(names).not.toContain('Split horizontal')
+    expect(names).not.toContain('Split vertical')
+    expect(names).toContain('Move to group…')
   })
 
   it('pins a workspace from the menu: it leads the list and persists', async () => {
@@ -1479,12 +1588,19 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       expect(rowOrder()).toEqual(['workspace-row-ws-2', 'workspace-row-ws-1']),
     )
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [
-          expect.objectContaining({ id: 'ws-2', name: 'beta', pinned: true }),
-          expect.objectContaining({ id: 'ws-1', name: 'alpha' }),
-        ],
-      }),
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          // The flag lands on the definition; the DEFINITIONS array keeps
+          // creation order — the shared tree `order` carries the
+          // pinned-first display since #48.
+          workspaces: [
+            expect.objectContaining({ id: 'ws-1', name: 'alpha' }),
+            expect.objectContaining({ id: 'ws-2', name: 'beta', pinned: true }),
+          ],
+          order: ['ws-2', 'ws-1'],
+        }),
+      ),
     )
 
     // The menu label flips for a pinned workspace, and unpinning drops the
@@ -1529,12 +1645,15 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       await screen.findByText('renamed', { selector: '.workspace-name' }),
     ).toBeInTheDocument()
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('save_workspaces', {
-        workspaces: [
-          expect.objectContaining({ id: 'ws-1', name: 'renamed' }),
-          expect.objectContaining({ id: 'ws-2', name: 'beta' }),
-        ],
-      }),
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          workspaces: [
+            expect.objectContaining({ id: 'ws-1', name: 'renamed' }),
+            expect.objectContaining({ id: 'ws-2', name: 'beta' }),
+          ],
+        }),
+      ),
     )
   })
 
@@ -1864,7 +1983,7 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       fireEvent.mouseEnter(within(panel).getAllByRole('tab')[0])
 
       await waitFor(() =>
-        expect(screen.getByRole('tooltip').textContent).toBe('No listening ports'),
+        expect(screen.getByRole('tooltip').textContent).toBe('No ports'),
       )
     })
 
@@ -2070,14 +2189,371 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       const tabEls = () => within(panel).getAllByRole('tab')
       const before = tabEls().map((el) => el.getAttribute('data-testid'))
 
-      fireEvent.dragStart(tabEls()[0])
-      fireEvent.drop(tabEls()[1])
+      // Synthetic tab rects (jsdom has no layout): tab A spans 0..100,
+      // tab B 100..200; the bar anchors at left 0.
+      const restore = stubRects({
+        [before[0]!]: { left: 0, right: 100 },
+        [before[1]!]: { left: 100, right: 200 },
+        'tab-bar-ws-1': { left: 0, right: 200 },
+      })
+
+      // Drag tab A onto tab B's right half — the live vertical line must
+      // show during the drag, before the release commits the swap.
+      fireEvent.pointerDown(tabEls()[0], { button: 0, clientX: 10, clientY: 10 })
+      fireEvent.pointerMove(window, { clientX: 160, clientY: 10 })
+      expect(document.querySelector('.drag-line-tab')).not.toBeNull()
+      // The ghost travels for tabs too.
+      expect(document.querySelector('.drag-ghost')).not.toBeNull()
+      expect(document.body.classList.contains('is-dragging')).toBe(true)
+      fireEvent.pointerUp(window, {})
+      restore.mockRestore()
+      expect(document.querySelector('.drag-ghost')).toBeNull()
 
       const after = tabEls().map((el) => el.getAttribute('data-testid'))
       expect(after).toEqual([before[1], before[0]])
       expect(invokeMock).toHaveBeenCalledWith(
         'save_workspaces',
         expect.objectContaining({ workspaces: expect.any(Array) }),
+      )
+    })
+  })
+
+  // --- Workspace groups: two-line rows, tree, filing (#47/#48/#49) -----------
+  //
+  // Assumptions encoded:
+  //  - Rows are TWO-LINE since #47: the name lives in .row-name-line, the
+  //    agent-status chips in a SIBLING line — chips can never cover the name.
+  //  - Groups ride the persisted tree: a config WITHOUT groups/order keys
+  //    loads flat exactly as before; a grouped config renders interleaved
+  //    rows with depth indentation.
+  //  - Drag ONTO a group files the workspace inside (appended at the end);
+  //    a drop on the list background restores top level; "+" always creates
+  //    at top level; "Move to group…" files via the picker, including
+  //    creating a fresh group from a typed name.
+  describe('workspace groups (#47/#48/#49)', () => {
+    const seedGrouped = () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              { id: 'ws-1', name: 'alpha', groupId: 'g-1' },
+              { id: 'ws-2', name: 'beta' },
+            ],
+            groups: [{ id: 'g-1', name: 'projekty' }],
+            order: ['ws-2', 'g-1', 'ws-1'],
+          })
+        return Promise.resolve(undefined)
+      })
+    }
+
+    it('row shows the name line and the status line as separate lines (#47)', async () => {
+      seedTwo()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      const row = screen.getByTestId('workspace-row-ws-1')
+      const nameLine = row.querySelector('.row-name-line')
+      const statusLine = row.querySelector('.workspace-statuses')
+
+      expect(nameLine).not.toBeNull()
+      expect(nameLine!.querySelector('.workspace-name')?.textContent).toBe('alpha')
+      // The workspace ships one seeded tab (one panel) -> one chip — and it
+      // renders BELOW the name line, never inside it.
+      expect(statusLine).not.toBeNull()
+      expect(statusLine!.children.length).toBeGreaterThan(0)
+      expect(nameLine!.contains(statusLine!)).toBe(false)
+    })
+
+    it('a pre-groups (flat) config loads flat: no group rows (#48)', async () => {
+      seedTwo()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      expect(document.querySelectorAll('[data-testid^="group-row-"]')).toHaveLength(0)
+      expect(rowOrder()).toEqual(['workspace-row-ws-1', 'workspace-row-ws-2'])
+    })
+
+    it('New group from the header creates a top-level group and persists the tree (#48)', async () => {
+      seedTwo()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      await openCreateForm('group')
+      fireEvent.change(screen.getByLabelText(/new group name/i), {
+        target: { value: 'projekty' },
+      })
+      fireEvent.keyDown(screen.getByLabelText(/new group name/i), { key: 'Enter' })
+
+      expect(
+        await screen.findByText('projekty', { selector: '.workspace-name' }),
+      ).toBeInTheDocument()
+      expect(document.querySelectorAll('[data-testid^="group-row-"]')).toHaveLength(1)
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_workspaces',
+          expect.objectContaining({
+            groups: [expect.objectContaining({ name: 'projekty' })],
+            // Appended at the END of the top level.
+            order: ['ws-1', 'ws-2', expect.any(String)],
+          }),
+        ),
+      )
+    })
+
+    it('group rows render interleaved with depth, and their menu renames (#48)', async () => {
+      seedGrouped()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      // Interleaved order straight from the tree; the filed workspace is
+      // indented (depth 1 -> 8 + 16px padding).
+      expect(rowOrder()).toEqual([
+        'workspace-row-ws-2',
+        'group-row-g-1',
+        'workspace-row-ws-1',
+      ])
+      expect(screen.getByTestId('workspace-row-ws-1').style.paddingLeft).toBe('24px')
+
+      fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /rename group/i }))
+      const input = await screen.findByLabelText(/rename group/i)
+      expect(input).toHaveValue('projekty')
+      fireEvent.change(input, { target: { value: 'klienty' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+
+      expect(
+        await screen.findByText('klienty', { selector: '.workspace-name' }),
+      ).toBeInTheDocument()
+    })
+
+    it('Delete group is DISABLED while the group is non-empty (#48)', async () => {
+      seedGrouped() // g-1 holds ws-1
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+      const del = await screen.findByRole('menuitem', { name: /delete group/i })
+      expect(del).toBeDisabled()
+      expect(del.getAttribute('title')).toBe('Group is not empty')
+    })
+
+    it('an EMPTY group deletes outright from the same menu (#48)', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [{ id: 'ws-1', name: 'alpha' }],
+            groups: [{ id: 'g-1', name: 'projekty' }],
+            order: ['g-1', 'ws-1'],
+          })
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /delete group/i }))
+
+      // The row goes away and the tree persists without the group.
+      await waitFor(() =>
+        expect(document.querySelectorAll('[data-testid^="group-row-"]')).toHaveLength(0),
+      )
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_workspaces',
+          expect.objectContaining({
+            groups: [],
+            order: ['ws-1'],
+          }),
+        ),
+      )
+    })
+
+    it('dragging a workspace ONTO a group files it at the end of that group (#49)', async () => {
+      seedGrouped()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      // Layout: [ws-2 (0..30)] [g-1 (30..60)] [ws-1 inside g-1 (60..90)].
+      const restore = stubRects({
+        'workspace-row-ws-2': { top: 0, bottom: 30 },
+        'group-row-g-1': { top: 30, bottom: 60 },
+        'workspace-row-ws-1': { top: 60, bottom: 90 },
+      })
+
+      // ws-2 released in the group row's MIDDLE zone — the group row
+      // highlights (no line) and the workspace FILES into it.
+      const src = screen.getByTestId('workspace-row-ws-2')
+      fireEvent.pointerDown(src, { button: 0, clientX: 10, clientY: 15 })
+      fireEvent.pointerMove(window, { clientX: 10, clientY: 45 })
+      expect(
+        screen.getByTestId('group-row-g-1').classList.contains('is-drop-target'),
+      ).toBe(true)
+      expect(document.querySelector('.drag-line')).toBeNull()
+      fireEvent.pointerUp(window, {})
+      restore.mockRestore()
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_workspaces',
+          expect.objectContaining({
+            workspaces: [
+              expect.objectContaining({ id: 'ws-1', groupId: 'g-1' }),
+              expect.objectContaining({ id: 'ws-2', groupId: 'g-1' }),
+            ],
+            // Appended at the END of the group's children.
+            order: ['g-1', 'ws-1', 'ws-2'],
+          }),
+        ),
+      )
+      await waitFor(() =>
+        expect(rowOrder()).toEqual([
+          'group-row-g-1',
+          'workspace-row-ws-1',
+          'workspace-row-ws-2',
+        ]),
+      )
+    })
+
+    it('dropping below the rows restores TOP LEVEL (#49)', async () => {
+      seedGrouped()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      const restore = stubRects({
+        'workspace-row-ws-2': { top: 0, bottom: 30 },
+        'group-row-g-1': { top: 30, bottom: 60 },
+        'workspace-row-ws-1': { top: 60, bottom: 90 },
+      })
+
+      // ws-1 (inside g-1) released BELOW every row — back to top level,
+      // with the line at the very end of the list before the release.
+      const src = screen.getByTestId('workspace-row-ws-1')
+      fireEvent.pointerDown(src, { button: 0, clientX: 10, clientY: 75 })
+      fireEvent.pointerMove(window, { clientX: 10, clientY: 200 })
+      expect((document.querySelector('.drag-line') as HTMLElement).style.top).toBe('90px')
+      fireEvent.pointerUp(window, {})
+      restore.mockRestore()
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_workspaces',
+          expect.objectContaining({
+            // The groupId key DROPS — the persisted payload matches a
+            // workspace that was never grouped.
+            workspaces: [
+              expect.not.objectContaining({ groupId: expect.anything() }),
+              expect.objectContaining({ id: 'ws-2' }),
+            ],
+            order: ['ws-2', 'g-1', 'ws-1'],
+          }),
+        ),
+      )
+    })
+
+    it('"+" keeps creating workspaces at TOP LEVEL, even with groups (#49)', async () => {
+      seedGrouped()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      await openCreateForm('workspace')
+      fireEvent.change(screen.getByLabelText(/new workspace name/i), {
+        target: { value: 'gamma' },
+      })
+      fireEvent.click(screen.getByRole('button', { name: /create/i }))
+
+      expect(await screen.findByText('gamma', { selector: '.workspace-name' })).toBeInTheDocument()
+      await waitFor(() => {
+        const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+        const last = calls[calls.length - 1][1] as {
+          workspaces: Array<Record<string, unknown>>
+          order: string[]
+        }
+        const gamma = last.workspaces.find((w) => w.name === 'gamma')
+        expect(gamma).toBeDefined()
+        // No groupId key at all — the new workspace was never grouped.
+        expect('groupId' in gamma!).toBe(false)
+        // Ranked last among the TOP-LEVEL siblings — after the group.
+        expect(last.order.slice(0, 3)).toEqual(['ws-2', 'g-1', 'ws-1'])
+        expect(last.order[3]).toBe(gamma!.id)
+      })
+    })
+
+    it('"Move to group…" files the workspace into an existing group (#49)', async () => {
+      seedGrouped()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-2'))
+      // Regression (round 2): a DELIBERATE pause between opening the menu and
+      // clicking — past the 300ms open-guard, the window-level close used to
+      // eat the "Move to group…" swap and the picker never appeared.
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000)
+      fireEvent.click(await screen.findByRole('menuitem', { name: /move to group/i }))
+      nowSpy.mockRestore()
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'projekty' }))
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_workspaces',
+          expect.objectContaining({
+            workspaces: [
+              expect.objectContaining({ id: 'ws-1', groupId: 'g-1' }),
+              expect.objectContaining({ id: 'ws-2', groupId: 'g-1' }),
+            ],
+            order: ['g-1', 'ws-1', 'ws-2'],
+          }),
+        ),
+      )
+    })
+
+    it('"Move to group…" creates a fresh group from a typed name (#49)', async () => {
+      seedGrouped()
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-2'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /move to group/i }))
+      fireEvent.change(screen.getByLabelText(/new group name/i), {
+        target: { value: 'klienty' },
+      })
+      fireEvent.keyDown(screen.getByLabelText(/new group name/i), { key: 'Enter' })
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_workspaces',
+          expect.objectContaining({
+            // The original projekty group AND the fresh klienty group.
+            groups: expect.arrayContaining([
+              expect.objectContaining({ name: 'klienty' }),
+            ]),
+            workspaces: expect.arrayContaining([
+              expect.objectContaining({ id: 'ws-2', groupId: expect.any(String) }),
+            ]),
+            order: ['g-1', 'ws-1', expect.any(String), expect.any(String)],
+          }),
+        ),
       )
     })
   })

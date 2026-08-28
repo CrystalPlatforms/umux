@@ -4,7 +4,7 @@
 // Assumptions encoded by these tests:
 //  - formatPorts renders the WHOLE tooltip body: ports joined with the app's
 //    " · " separator, ascending already guaranteed by the backend; an EMPTY
-//    list must render the explicit "No listening ports" state so a quiet
+//    list must render the explicit "No ports" state so a quiet
 //    tooltip is never ambiguous.
 //  - localPtyIds picks ONE backend handle per panel of the hovered tab,
 //    keeping only LOCAL shells (SSH panels are skipped — the local process
@@ -26,7 +26,7 @@ describe('formatPorts', () => {
 
   // T-F2 (#42 AC3): the empty answer must be EXPLICIT, never blank space.
   it('shows an explicit no-ports state for an empty list', () => {
-    expect(formatPorts([])).toBe('No listening ports')
+    expect(formatPorts([])).toBe('No ports')
   })
 
   it('renders a single port bare', () => {

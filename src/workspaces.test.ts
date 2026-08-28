@@ -34,7 +34,13 @@ import {
   renameTab,
   setTabPinned,
   activeTabOf,
-  moveWorkspace,
+  moveNode,
+  moveToNewGroup,
+  createGroup,
+  renameGroup,
+  deleteGroup,
+  isGroupEmpty,
+  flattenSidebar,
   setWorkspacePinned,
   splitPanel,
   resizePanel,
@@ -46,6 +52,7 @@ import {
   upsertPanelCwd,
   toggleZoom,
   zoomedPanelOf,
+  type WorkspaceState,
 } from './workspaces'
 import { leafIds, type LayoutNode } from './PaneLayout'
 
@@ -57,6 +64,16 @@ import { leafIds, type LayoutNode } from './PaneLayout'
 function seq(...ids: string[]): () => string {
   let i = 0
   return () => ids[i++]
+}
+
+/// The DISPLAY order of the sidebar's node ids (#48): groups and workspaces
+/// interleaved, straight from the tree. The pre-tree tests asserted the
+/// workspaces ARRAY as the display order — since #48 the shared `order` is
+/// the source of truth, so display assertions go through here.
+function displayIds(state: WorkspaceState): string[] {
+  return flattenSidebar(state).map((e) =>
+    e.kind === 'workspace' ? e.workspace.id : e.group.id,
+  )
 }
 
 /// The first workspace's ACTIVE TAB's layout — the post-rework location of
@@ -587,47 +604,259 @@ describe('workspace state', () => {
     })
   })
 
-  describe('moveWorkspace', () => {
-    it('moves a workspace to a new position in the list', () => {
+  // --- Sidebar tree (#48): groups exist, rename, delete (empty only) --------
+  //
+  // Assumptions encoded:
+  //  - WorkspaceState carries `groups: Group[]` and ONE shared `order` of
+  //    every node id; sibling order = relative position in `order` among
+  //    entries sharing a parent.
+  //  - createGroup appends at the END of the top level; the fresh group
+  //    carries NO collapsed/pinned keys (they are Phase 4/6 slots).
+  //  - Only an EMPTY group deletes (Phase 5 brings the destructive delete);
+  //    a deleted group leaves both `groups` and `order`.
+  //  - bootState is the migration surface: a pre-groups (flat) config loads
+  //    with zero groups and every workspace at top level, a stale groupId
+  //    strips back to top level, and `order` is normalized (unknown ids
+  //    drop, missing ids append) so a hand-edited file loses nothing.
+  describe('workspace groups (#48)', () => {
+    function groupedState() {
       let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
       state = createWorkspace(state, 'beta', () => 'ws-2')
-      state = createWorkspace(state, 'gamma', () => 'ws-3')
+      state = createGroup(state, 'projekty', () => 'g-1')
+      return state
+    }
 
-      // drag alpha (index 0) to the end (index 2)
-      const next = moveWorkspace(state, 'ws-1', 2)
+    it('createGroup appends an empty group node at top level', () => {
+      const state = groupedState()
 
-      expect(listWorkspaces(next).map((w) => w.id)).toEqual([
-        'ws-2',
-        'ws-3',
-        'ws-1',
-      ])
+      expect(state.groups.map((g) => g.id)).toEqual(['g-1'])
+      expect(state.groups[0].name).toBe('projekty')
+      expect(displayIds(state)).toEqual(['ws-1', 'ws-2', 'g-1'])
+      // Definitions untouched: creating a group never touches workspaces,
+      // activation, or the open set.
+      expect(state.workspaces.map((w) => w.id)).toEqual(['ws-1', 'ws-2'])
+      expect(state.activeId).toBe('ws-2')
+      expect(state.openIds).toEqual(['ws-1', 'ws-2'])
     })
 
-    it('clamps an out-of-range index to the end of the list', () => {
-      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
-      state = createWorkspace(state, 'beta', () => 'ws-2')
+    it('a fresh group carries no collapsed/pinned keys', () => {
+      const state = groupedState()
 
-      const next = moveWorkspace(state, 'ws-1', 99)
-
-      expect(listWorkspaces(next).map((w) => w.id)).toEqual(['ws-2', 'ws-1'])
+      expect('collapsed' in state.groups[0]).toBe(false)
+      expect('pinned' in state.groups[0]).toBe(false)
     })
 
-    it('does not touch openIds (reorder is definitions-only)', () => {
-      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
-      state = createWorkspace(state, 'beta', () => 'ws-2')
+    it('renameGroup renames; blank names and unknown ids are no-ops', () => {
+      const state = groupedState()
 
-      const next = moveWorkspace(state, 'ws-1', 1)
+      const renamed = renameGroup(state, 'g-1', 'klienty')
+      expect(renamed.groups[0].name).toBe('klienty')
 
-      expect(next.openIds).toEqual(['ws-1', 'ws-2'])
+      expect(renameGroup(state, 'g-1', '   ')).toBe(state)
+      expect(renameGroup(state, 'g-x', 'nope')).toBe(state)
     })
 
-    it('is a no-op for an unknown id', () => {
-      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
-      state = createWorkspace(state, 'beta', () => 'ws-2')
+    it('deleteGroup removes an EMPTY group from groups and order', () => {
+      const state = groupedState()
+      expect(isGroupEmpty(state, 'g-1')).toBe(true)
 
-      const next = moveWorkspace(state, 'nope', 1)
+      const next = deleteGroup(state, 'g-1')
+
+      expect(next.groups).toEqual([])
+      expect(next.order).toEqual(['ws-1', 'ws-2'])
+    })
+
+    it('deleteGroup refuses a NON-EMPTY group (destructive delete is Phase 5)', () => {
+      let state = groupedState()
+      state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+      expect(isGroupEmpty(state, 'g-1')).toBe(false)
+
+      const next = deleteGroup(state, 'g-1')
 
       expect(next).toBe(state)
+      expect(next.groups.map((g) => g.id)).toEqual(['g-1'])
+    })
+
+    it('bootState: a pre-groups FLAT config loads flat (zero groups, all top level)', () => {
+      const loaded = [
+        { id: 'ws-1', name: 'alpha' },
+        { id: 'ws-2', name: 'beta' },
+      ]
+
+      const state = bootState(loaded)
+
+      expect(state.groups).toEqual([])
+      expect(state.order).toEqual(['ws-1', 'ws-2'])
+      for (const w of state.workspaces) expect(w.groupId).toBeUndefined()
+    })
+
+    it('bootState: a stale groupId (unknown group) strips back to top level', () => {
+      const loaded = [{ id: 'ws-1', name: 'alpha', groupId: 'g-gone' }]
+
+      const state = bootState(loaded)
+
+      expect('groupId' in state.workspaces[0]).toBe(false)
+      expect(state.groups).toEqual([])
+      expect(state.order).toEqual(['ws-1'])
+    })
+
+    it('bootState: order normalization drops unknown ids, dedupes, appends missing', () => {
+      const loaded = [
+        { id: 'ws-1', name: 'alpha' },
+        { id: 'ws-2', name: 'beta' },
+      ]
+      const groups = [{ id: 'g-1', name: 'projekty' }]
+
+      const state = bootState(loaded, seq(), groups, [
+        'g-1',
+        'ghost',
+        'ws-2',
+        'ws-2',
+      ])
+
+      // 'ghost' drops (unknown), the duplicate ws-2 drops, and ws-1 — which
+      // the config forgot to rank — appends last.
+      expect(state.order).toEqual(['g-1', 'ws-2', 'ws-1'])
+    })
+
+    it('flattenSidebar interleaves groups and workspaces with depth', () => {
+      let state = groupedState()
+      state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+
+      const entries = flattenSidebar(state)
+
+      expect(entries.map((e) => (e.kind === 'group' ? `g:${e.group.name}` : `w:${e.workspace.id}`))).toEqual([
+        'w:ws-2',
+        'g:projekty',
+        'w:ws-1',
+      ])
+      expect(entries.map((e) => e.depth)).toEqual([0, 0, 1])
+    })
+  })
+
+  // --- moveNode (#49): filing workspaces into groups -------------------------
+  //
+  // Assumptions encoded:
+  //  - move into a group APPENDS at the end of that group's children (the
+  //    group's block, not the end of the whole list);
+  //  - move to top-level space restores top level AND drops the `groupId`
+  //    key (the persisted payload matches one that was never grouped);
+  //  - reorder via `beforeId` keeps the relative order of the other
+  //    siblings; a `beforeId` that is not a sibling of the target parent
+  //    falls back to append;
+  //  - a GROUP may not move into a group (no nesting until Phase 5) — no-op;
+  //  - unknown nodes and unknown target groups are no-ops (same object back).
+  describe('moveNode (#49)', () => {
+    function twoInGroup() {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+      state = createGroup(state, 'projekty', () => 'g-1')
+      state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+      return state // order: [ws-2, g-1, ws-1]
+    }
+
+    it('move into a group appends at the END of the target', () => {
+      const state = twoInGroup()
+      const next = moveNode(state, 'ws-2', { parentId: 'g-1' })
+
+      // The newcomer lands after the group's existing child, not at the end
+      // of the whole list.
+      expect(next.order).toEqual(['g-1', 'ws-1', 'ws-2'])
+      expect(displayIds(next)).toEqual(['g-1', 'ws-1', 'ws-2'])
+      expect(next.workspaces.find((w) => w.id === 'ws-2')?.groupId).toBe('g-1')
+    })
+
+    it('move to top-level space restores top level and drops the groupId key', () => {
+      const state = twoInGroup()
+
+      const next = moveNode(state, 'ws-1', { parentId: null })
+
+      expect(next.order).toEqual(['ws-2', 'g-1', 'ws-1'])
+      const moved = next.workspaces.find((w) => w.id === 'ws-1')!
+      expect('groupId' in moved).toBe(false)
+    })
+
+    it('reorder inside a group preserves the other children’s relative order', () => {
+      let state = twoInGroup()
+      state = moveNode(state, 'ws-2', { parentId: 'g-1' })
+      // order: [g-1, ws-1, ws-2] — swap the children.
+      const next = moveNode(state, 'ws-2', { parentId: 'g-1', beforeId: 'ws-1' })
+
+      expect(next.order).toEqual(['g-1', 'ws-2', 'ws-1'])
+    })
+
+    it('moving a group into a group is rejected (no nesting yet)', () => {
+      let state = twoInGroup()
+      state = createGroup(state, 'inne', () => 'g-2')
+
+      const next = moveNode(state, 'g-1', { parentId: 'g-2' })
+
+      expect(next).toBe(state)
+    })
+
+    it('unknown node, unknown target group, self-move and non-sibling beforeId are safe', () => {
+      const state = twoInGroup()
+
+      expect(moveNode(state, 'nope', { parentId: 'g-1' })).toBe(state)
+      expect(moveNode(state, 'ws-2', { parentId: 'g-x' })).toBe(state)
+      expect(
+        moveNode(state, 'ws-1', { parentId: 'g-1', beforeId: 'ws-1' }),
+      ).toBe(state)
+      // beforeId='ws-1' sits inside g-1, so it is NOT a top-level sibling —
+      // moving ws-2 to top level falls back to append: after the last
+      // top-level node (the group g-1), at the head of the top level.
+      const appended = moveNode(state, 'ws-2', { parentId: null, beforeId: 'ws-1' })
+      expect(appended.order).toEqual(['g-1', 'ws-2', 'ws-1'])
+      expect(appended.workspaces.find((w) => w.id === 'ws-2')?.groupId).toBeUndefined()
+    })
+
+    it('a move never touches openIds or activeId', () => {
+      const state = twoInGroup()
+
+      const next = moveNode(state, 'ws-2', { parentId: 'g-1' })
+
+      expect(next.openIds).toEqual(['ws-1', 'ws-2'])
+      expect(next.activeId).toBe('ws-2')
+    })
+  })
+
+  describe('moveToNewGroup (#49)', () => {
+    it('creates the group on the fly and files the workspace into it', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createWorkspace(state, 'beta', () => 'ws-2')
+
+      const next = moveToNewGroup(state, 'ws-2', 'klienty', () => 'g-1')
+
+      expect(next.groups.map((g) => g.id)).toEqual(['g-1'])
+      expect(next.groups[0].name).toBe('klienty')
+      expect(next.workspaces.find((w) => w.id === 'ws-2')?.groupId).toBe('g-1')
+      // The fresh group leads no one: it appends at the end of the top
+      // level, with the filed workspace as its only child.
+      expect(next.order).toEqual(['ws-1', 'g-1', 'ws-2'])
+    })
+
+    it('blank name or unknown workspace is a no-op', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+
+      expect(moveToNewGroup(state, 'ws-1', '  ')).toBe(state)
+      expect(moveToNewGroup(state, 'nope', 'x')).toBe(state)
+    })
+  })
+
+  describe('createWorkspace stays top-level (#49)', () => {
+    it('a new workspace never lands inside a group, even with groups present', () => {
+      let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
+      state = createGroup(state, 'projekty', () => 'g-1')
+      state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+
+      const next = createWorkspace(state, 'gamma', () => 'ws-2')
+
+      expect(next.workspaces.find((w) => w.id === 'ws-2')?.groupId).toBeUndefined()
+      // Ranked last among the TOP-LEVEL siblings — after the group, not
+      // inside it.
+      expect(next.order).toEqual(['g-1', 'ws-1', 'ws-2'])
+      expect(displayIds(next)).toEqual(['g-1', 'ws-1', 'ws-2'])
+      expect(next.activeId).toBe('ws-2')
     })
   })
 
@@ -712,16 +941,15 @@ describe('workspace state', () => {
     })
   })
 
-  // #37 — pinned workspaces. The array IS the display order (the sidebar
-  // list and the tab bar both read it directly), so the pinned group is kept
-  // as a prefix of the array by MOVING definitions on toggle:
+  // #37 — pinned workspaces. Since #48 the SHARED tree order is the display
+  // order (the sidebar reads it via flattenSidebar), so the toggle reorders
+  // `order` among the target's siblings instead of the definitions array:
   //   - pinning appends to the END of the pinned block
   //   - unpinning inserts at the HEAD of the unpinned block
   // Assumptions encoded:
   //  - `pinned` is optional on Workspace; absent = unpinned, and an unpinned
   //    workspace carries NO key at all (old saves must not gain one).
-  //  - Toggling never touches activeId/openIds (definitions-only, like
-  //    moveWorkspace).
+  //  - Toggling never touches activeId/openIds (definitions-only).
   describe('setWorkspacePinned', () => {
     it('moves a pinned workspace to the top of the list', () => {
       let state = createWorkspace(emptyState, 'alpha', () => 'ws-1')
@@ -730,12 +958,8 @@ describe('workspace state', () => {
 
       const next = setWorkspacePinned(state, 'ws-3', true)
 
-      expect(listWorkspaces(next).map((w) => w.id)).toEqual([
-        'ws-3',
-        'ws-1',
-        'ws-2',
-      ])
-      expect(listWorkspaces(next)[0].pinned).toBe(true)
+      expect(displayIds(next)).toEqual(['ws-3', 'ws-1', 'ws-2'])
+      expect(listWorkspaces(next).find((w) => w.id === 'ws-3')?.pinned).toBe(true)
     })
 
     it('appends to the end of the pinned block when others are pinned', () => {
@@ -748,11 +972,7 @@ describe('workspace state', () => {
 
       // ws-1 pins first, ws-3 joins AFTER it — pinned group keeps a stable,
       // predictable order (the order in which workspaces were pinned).
-      expect(listWorkspaces(next).map((w) => w.id)).toEqual([
-        'ws-1',
-        'ws-3',
-        'ws-2',
-      ])
+      expect(displayIds(next)).toEqual(['ws-1', 'ws-3', 'ws-2'])
     })
 
     it('keeps the pinned group first as an invariant across several toggles', () => {
@@ -765,13 +985,15 @@ describe('workspace state', () => {
       state = setWorkspacePinned(state, 'ws-2', true)
       state = setWorkspacePinned(state, 'ws-3', true)
 
-      const ids = listWorkspaces(state).map((w) => w.id)
+      const ids = displayIds(state)
       expect(ids.slice(0, 3)).toEqual(['ws-4', 'ws-2', 'ws-3'])
       expect(ids[3]).toBe('ws-1')
-      for (const w of listWorkspaces(state).slice(0, 3)) {
-        expect(w.pinned).toBe(true)
+      for (const id of ['ws-4', 'ws-2', 'ws-3']) {
+        expect(listWorkspaces(state).find((w) => w.id === id)?.pinned).toBe(true)
       }
-      expect(listWorkspaces(state)[3].pinned).toBeUndefined()
+      expect(
+        listWorkspaces(state).find((w) => w.id === 'ws-1')?.pinned,
+      ).toBeUndefined()
     })
 
     it('unpins into the head of the unpinned block, right behind the pinned group', () => {
@@ -785,11 +1007,10 @@ describe('workspace state', () => {
       // slot after the — now empty — pinned group): the list never jumps,
       // the workspace simply stops carrying the pin. And the unpinned
       // workspace carries no `pinned` key at all.
-      expect(listWorkspaces(unpinned).map((w) => w.id)).toEqual([
-        'ws-2',
-        'ws-1',
-      ])
-      expect('pinned' in listWorkspaces(unpinned)[0]).toBe(false)
+      expect(displayIds(unpinned)).toEqual(['ws-2', 'ws-1'])
+      expect(
+        'pinned' in listWorkspaces(unpinned).find((w) => w.id === 'ws-2')!,
+      ).toBe(false)
     })
 
     it('moves an unpinned workspace behind the whole pinned block on unpin', () => {
@@ -802,11 +1023,7 @@ describe('workspace state', () => {
       // Pinned block is [ws-3, ws-1], gamma pinned FIRST.
       const next = setWorkspacePinned(state, 'ws-3', false)
 
-      expect(listWorkspaces(next).map((w) => w.id)).toEqual([
-        'ws-1',
-        'ws-3',
-        'ws-2',
-      ])
+      expect(displayIds(next)).toEqual(['ws-1', 'ws-3', 'ws-2'])
     })
 
     it('does not touch activeId or openIds (definitions-only)', () => {

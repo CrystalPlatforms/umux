@@ -14,7 +14,7 @@ export interface PtyInfo {
 /// ports ascending and deduplicated, so this only decides the SEPARATOR and
 /// the explicit empty state (#42: a silent tooltip must never be ambiguous).
 export function formatPorts(ports: number[]): string {
-  if (ports.length === 0) return 'No listening ports'
+  if (ports.length === 0) return 'No ports'
   return ports.join(' · ')
 }
 
