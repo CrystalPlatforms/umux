@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod cmux_import;
 pub mod git_branch;
 pub mod listening_ports;
 pub mod notification_service;
@@ -918,6 +919,7 @@ pub fn run() {
             load_settings,
             save_settings,
             open_settings_file,
+            cmux_import::read_cmux_import_sources,
         ]);
 
     // #30 AC2: "when off, the SDK is never initialized (no network call)" —

@@ -13,7 +13,7 @@
 // UI glue verified by Adam on Ubuntu/Wayland; the testable core lives in
 // ./workspaces (pure state) and the Rust WorkspaceStore (persistence).
 
-import { Fragment, useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -33,7 +33,13 @@ import {
   deleteGroupSubtree,
   isGroupEmpty,
   moveNode,
+  moveNodes,
   moveToNewGroup,
+  closeWorkspaces,
+  deleteNodes,
+  setNodesPinned,
+  batchDeleteWorkspaceCount,
+  isNodePinned,
   toggleCollapse,
   unpackGroup,
   setGroupPinned,
@@ -73,6 +79,12 @@ import {
 } from './dragInsertion'
 import { boxes, leafIds, type LayoutNode, type Orientation, type Container } from './PaneLayout'
 import { matchShortcut, activeTagOf } from './shortcuts'
+import {
+  toggleInSelection,
+  clearSelection,
+  isMacPlatform,
+  isMultiSelectModifier,
+} from './selection'
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
 import { AgentStatusMachine, type AgentStatus } from './agentStatus'
@@ -80,6 +92,7 @@ import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
+import { parseCmuxSources, applyImportPlan } from './cmuxImport'
 import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
 import { formatPorts, localPtyIds, unionPorts } from './tabPorts'
 
@@ -263,14 +276,19 @@ type MenuState = {
   // the whole menu renders the picker — existing groups as buttons, plus an
   // inline field that creates a group and files the workspace into it.
   groupPickerFor?: string
+  // The picker was opened from the BATCH selection menu (#53): picking a
+  // group moves EVERY selected node, not the single workspace.
+  batchMove?: boolean
 } | null
 
 /// A mouse press that should open the context menu: the right button, or
-/// Ctrl+click (the macOS right-click). macOS trackpads additionally deliver a
-/// two-finger click as a right mousedown WITHOUT a DOM `contextmenu` event,
-/// so the menu must open here too, not only on `onContextMenu`.
+/// Ctrl+click on macOS (the macOS right-click — on Linux/Windows Ctrl+click
+/// is the multi-select modifier instead, #53, so the menu gesture is gated
+/// to the Mac). macOS trackpads additionally deliver a two-finger click as a
+/// right mousedown WITHOUT a DOM `contextmenu` event, so the menu must open
+/// here too, not only on `onContextMenu`.
 function isMenuPress(e: React.MouseEvent): boolean {
-  return e.button === 2 || (e.ctrlKey && e.button === 0)
+  return e.button === 2 || (e.ctrlKey && e.button === 0 && isMacPlatform())
 }
 
 /// Human-readable label for a tab (confirmations, menu): the workspace's
@@ -299,6 +317,10 @@ type PanelSurfacesProps = {
   workspaceName: string
   layout: LayoutNode
   activePanelId: string | null
+  // Whether THIS workspace is the active one (HITL): the focused pane of its
+  // active tab pulls keyboard focus, so a switch makes the terminal typable
+  // immediately. Inactive workspaces' panes never take focus.
+  focused: boolean
   // Identity of the tree's first leaf — per-leaf panel config (v0.2 Phase 5 /
   // #29) with a legacy fallback: a leaf with its own entry uses it; the first
   // leaf additionally falls back to the config's first entry (the pre-v0.2
@@ -335,7 +357,7 @@ type PanelSurfacesProps = {
   statusEnabled: boolean
 }
 
-function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firstLeafId, panels, zoomedPanelId, onToggleZoom, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled }: PanelSurfacesProps) {
+function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, focused, firstLeafId, panels, zoomedPanelId, onToggleZoom, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled }: PanelSurfacesProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
 
@@ -435,6 +457,9 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, firs
               label={`${workspaceName} · ${short}`}
               sshTarget={meta?.sshTarget}
               cwd={meta?.workingDirectory}
+              // The focused pane of the active tab of the ACTIVE workspace
+              // owns the keyboard (HITL): a switch focuses it instantly.
+              focused={focused && activePanelId === p.id}
               onActivity={(bytes) => onPanelActivity(p.id, bytes)}
               onCompletion={() => onPanelCompletion(p.id)}
               onViewportResize={() => onPanelViewportResize(p.id)}
@@ -531,11 +556,42 @@ export function WorkspaceShell() {
   const [editingTab, setEditingTab] = useState<{ wsId: string; tabId: string } | null>(null)
   const [editTabName, setEditTabName] = useState('')
   const [menu, setMenu] = useState<MenuState>(null)
+  // Viewport-clamped menu position (HITL): the menu opens AT the pointer, but
+  // a pointer near the window's right/bottom edge used to push half the menu
+  // outside the app's bounds. After the menu mounts — in a LAYOUT effect, so
+  // the fix lands before the first paint and nothing flickers — its rendered
+  // size is measured and the position is pulled back inside the viewport with
+  // a small margin.
+  const [menuPos, setMenuPos] = useState<{ left: number; top: number } | null>(null)
+  useLayoutEffect(() => {
+    if (menu == null) {
+      setMenuPos(null)
+      return
+    }
+    const width = menuRef.current?.offsetWidth ?? 0
+    const height = menuRef.current?.offsetHeight ?? 0
+    const margin = 8
+    const maxLeft = Math.max(margin, window.innerWidth - width - margin)
+    const maxTop = Math.max(margin, window.innerHeight - height - margin)
+    setMenuPos({
+      left: Math.min(Math.max(margin, menu.x), maxLeft),
+      top: Math.min(Math.max(margin, menu.y), maxTop),
+    })
+  }, [menu])
   // When the current menu was opened (ms epoch). The same gesture can emit a
   // click/contextmenu right AFTER the mousedown that opened the menu (Linux/
   // Windows right-click, macOS Ctrl+click) — those must not close it again.
   const menuOpenedAtRef = useRef(0)
   const [collapsed, setCollapsed] = useState(false)
+
+  // Multi-select (#53): an ordered list of sidebar node ids — workspaces and
+  // groups, mixed. RUNTIME-ONLY (never persisted, like the active tab); the
+  // pure toggle/clear helpers live in selection.ts, the batch ACTIONS over
+  // the set in workspaces.ts. The ref mirrors the list for the mount-time
+  // drag/menu closures (same discipline as stateRef).
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const selectedIdsRef = useRef(selectedIds)
+  selectedIdsRef.current = selectedIds
 
   // --- Live pointer drag & drop (round 3, Adam) -----------------------------
   //
@@ -551,12 +607,15 @@ export function WorkspaceShell() {
   type ActiveDrag =
     | {
         kind: 'sidebar'
-        id: string
+        // The dragged NODE IDS (#53): one for a solo drag, the whole
+        // selection when the pressed row was part of a multi-selection.
+        ids: string[]
         label: string
         isGroup: boolean
         regions: SidebarRegion[]
-        // The dragged node's own subtree ids (#51): a landing inside them is
-        // rejected — a group can never file into itself or a descendant.
+        // The dragged nodes' forbidden landings (#51, #53): each selected
+        // group contributes its whole subtree, each selected workspace
+        // itself — a landing inside any of them is rejected.
         forbidden: ReadonlySet<string>
         listTop: number
         x: number
@@ -712,18 +771,39 @@ export function WorkspaceShell() {
     const activateSidebar = (id: string, x: number, y: number): SidebarRegion[] => {
       const listEl = listRef.current
       const regions: SidebarRegion[] = measureSidebarRegions()
+      // A drag started on a row that is part of the multi-selection drags the
+      // WHOLE selection (#53); anywhere else it is a solo drag. Dead ids are
+      // dropped so the batch move never feeds ghosts into moveNodes.
+      const known = (nodeId: string): boolean =>
+        stateRef.current.groups.some((g) => g.id === nodeId) ||
+        stateRef.current.workspaces.some((w) => w.id === nodeId)
+      const ids = selectedIdsRef.current.includes(id)
+        ? selectedIdsRef.current.filter(known)
+        : [id]
       const isGroup = !stateRef.current.workspaces.some((w) => w.id === id)
-      const label = isGroup
-        ? (stateRef.current.groups.find((g) => g.id === id)?.name ?? '')
-        : (stateRef.current.workspaces.find((w) => w.id === id)?.name ?? '')
+      const label =
+        ids.length > 1
+          ? `${ids.length} items`
+          : isGroup
+            ? (stateRef.current.groups.find((g) => g.id === id)?.name ?? '')
+            : (stateRef.current.workspaces.find((w) => w.id === id)?.name ?? '')
+      // Forbidden landings (#51, #53): the union of every dragged group's
+      // subtree plus each dragged workspace itself.
+      const forbidden = new Set<string>()
+      for (const nodeId of ids) {
+        if (stateRef.current.groups.some((g) => g.id === nodeId)) {
+          for (const sub of groupSubtreeIds(stateRef.current, nodeId)) forbidden.add(sub)
+        } else {
+          forbidden.add(nodeId)
+        }
+      }
       const d: ActiveDrag = {
         kind: 'sidebar',
-        id,
+        ids,
         label,
-        isGroup,
+        isGroup: ids.length === 1 && isGroup,
         regions,
-        // Nothing inside the dragged group's own subtree is a legal landing.
-        forbidden: new Set(groupSubtreeIds(stateRef.current, id)),
+        forbidden,
         listTop: listEl?.getBoundingClientRect().top ?? 0,
         x,
         y,
@@ -778,7 +858,7 @@ export function WorkspaceShell() {
           const seeded = dragRef.current
           if (seeded?.kind === 'sidebar') {
             applySidebarDrop(
-              computeSidebarDrop(e.clientY, cand.id, seeded.regions, seeded.forbidden),
+              computeSidebarDrop(e.clientY, seeded.ids[0], seeded.regions, seeded.forbidden),
             )
           }
         } else {
@@ -796,7 +876,7 @@ export function WorkspaceShell() {
         ghostRef.current.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 10}px)`
       }
       if (d.kind === 'sidebar') {
-        applySidebarDrop(computeSidebarDrop(e.clientY, d.id, d.regions, d.forbidden))
+        applySidebarDrop(computeSidebarDrop(e.clientY, d.ids[0], d.regions, d.forbidden))
       } else {
         const drop = computeTabDrop(e.clientX, d.regions)
         tabDropRef.current = drop
@@ -818,17 +898,19 @@ export function WorkspaceShell() {
           const drop = sideDropRef.current
           // A rejected landing (#51: into the dragged group's own subtree)
           // commits nothing — moveNode would refuse it anyway, but the drop
-          // decision is the single source of truth for the gesture.
+          // decision is the single source of truth for the gesture. A drag
+          // started on a selected row moves the WHOLE selection (#53).
           if (drop != null && !drop.rejected) {
             const parentId = drop.intoGroupId ?? drop.parentId
             persist(
-              moveNode(stateRef.current, d.id, {
+              moveNodes(stateRef.current, d.ids, {
                 parentId,
                 ...(drop.intoGroupId == null && drop.beforeId != null
                   ? { beforeId: drop.beforeId }
                   : {}),
               }),
             )
+            setSelectedIds([])
           }
         } else {
           const drop = tabDropRef.current
@@ -874,6 +956,41 @@ export function WorkspaceShell() {
       document.body.classList.remove('is-dragging')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Escape clears the multi-selection (#53) — the same key that cancels a
+  // live drag, one level up. Reads through the ref so the listener never
+  // goes stale; a no-op while nothing is selected.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedIdsRef.current.length > 0) {
+        setSelectedIds(clearSelection())
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  // Native WebKit menu + right-press selection suppression (HITL): with the
+  // terminal's hidden textarea now holding keyboard focus (the
+  // switch-to-type handoff), WKWebView answers right-clicks with its OWN
+  // text-editing menu (Look Up / Copy / …) and starts a DOM selection under
+  // the pointer — stacked on top of umux's context menu. Both are stopped at
+  // the window in the CAPTURE phase, before any element handler runs:
+  // preventDefault kills the native menu without stopping propagation, so
+  // umux's React menus still open exactly as before, and a right press can
+  // no longer begin a text selection. Left-drag selection — including
+  // xterm's own terminal selection — is untouched.
+  useEffect(() => {
+    const noNativeMenu = (e: MouseEvent) => e.preventDefault()
+    const noRightSelection = (e: MouseEvent) => {
+      if (e.button === 2) e.preventDefault()
+    }
+    window.addEventListener('contextmenu', noNativeMenu, true)
+    window.addEventListener('mousedown', noRightSelection, true)
+    return () => {
+      window.removeEventListener('contextmenu', noNativeMenu, true)
+      window.removeEventListener('mousedown', noRightSelection, true)
+    }
   }, [])
   // Feature toggles (v0.2 Phase 3 / #27). Loaded from the Rust SettingsStore
   // on mount; every change is persisted immediately and takes effect live.
@@ -1100,6 +1217,63 @@ export function WorkspaceShell() {
     void invoke('open_settings_file').catch((e) =>
       console.error('open_settings_file failed:', e),
     )
+  }
+
+  // --- One-shot cmux import (#54) -------------------------------------------
+  // The minimal apply path: the backend hands over cmux's two files (read
+  // only), the pure importer parses them into a plan and applies it to the
+  // live tree through the existing ops. No wizard, no preview — the plan is
+  // additive by construction (nothing overwrites; colliding names get a
+  // ` from cmux` suffix), and the status line reports the outcome. A
+  // malformed source throws BEFORE apply, so state stays untouched.
+  const [importStatus, setImportStatus] = useState<string | null>(null)
+  // The status line is transient (HITL): it clears itself after 10 seconds —
+  // one timer at a time, re-armed per message, and cancelled on unmount.
+  const importStatusTimer = useRef<number | null>(null)
+  const showImportStatus = (message: string) => {
+    setImportStatus(message)
+    if (importStatusTimer.current != null) {
+      window.clearTimeout(importStatusTimer.current)
+    }
+    importStatusTimer.current = window.setTimeout(() => {
+      importStatusTimer.current = null
+      setImportStatus(null)
+    }, 10_000)
+  }
+  useEffect(
+    () => () => {
+      if (importStatusTimer.current != null) {
+        window.clearTimeout(importStatusTimer.current)
+      }
+    },
+    [],
+  )
+  const runCmuxImport = () => {
+    void invoke<{ config: string | null; session: string | null }>(
+      'read_cmux_import_sources',
+    )
+      .then((sources) => {
+        try {
+          const plan = parseCmuxSources(sources.config ?? null, sources.session ?? null)
+          if (plan.workspaces.length === 0 && plan.groups.length === 0) {
+            showImportStatus('Nothing to import — no cmux data found.')
+            return
+          }
+          const next = applyImportPlan(stateRef.current, plan)
+          persist(next)
+          showImportStatus(
+            `Imported ${plan.workspaces.length} workspace${plan.workspaces.length === 1 ? '' : 's'} and ${plan.groups.length} group${plan.groups.length === 1 ? '' : 's'} from cmux. Open a workspace to start a shell in it.`,
+          )
+        } catch (e) {
+          showImportStatus(
+            `Import failed: ${e instanceof Error ? e.message : String(e)} State was left untouched.`,
+          )
+        }
+      })
+      .catch((e) => {
+        console.error('read_cmux_import_sources failed:', e)
+        showImportStatus('Import failed: could not read the cmux files.')
+      })
   }
 
   const muted = !settings.notificationsEnabled
@@ -1580,6 +1754,120 @@ export function WorkspaceShell() {
     persist(setGroupPinned(stateRef.current, gid, g?.pinned !== true))
   }
 
+  // --- Batch selection actions (#53) -----------------------------------------
+  // The selection menu applies each action to EVERY selected node through the
+  // workspaces.ts batch ops. The destructive ones (Close all with live
+  // processes, Delete all) resolve to ONE shared confirmation naming the
+  // total affected workspaces and the live-process count — the same dialog
+  // the single-node paths use.
+
+  /// Pin all / Unpin all (#53): every selected node gets the same flag. The
+  /// menu shows "Pin all" while ANY member is unpinned, else "Unpin all".
+  const batchPinFromMenu = (pinned: boolean) => {
+    const ids = menuBatchIds
+    setMenu(null)
+    if (ids == null) return
+    persist(setNodesPinned(stateRef.current, ids, pinned))
+    setSelectedIds([])
+  }
+
+  /// Close all (#53): closes every selected WORKSPACE (groups are skipped —
+  /// closing is a workspace concept). One busy check across all their local
+  /// panels; any live process opens the shared confirmation, none closes
+  /// immediately — the same ask-or-close contract the single close uses.
+  const batchCloseFromMenu = () => {
+    const ids = menuBatchIds
+    setMenu(null)
+    if (ids == null) return
+    const wsIds = ids.filter((id) =>
+      stateRef.current.workspaces.some((w) => w.id === id),
+    )
+    if (wsIds.length === 0) return
+    const locals = wsIds.flatMap((id) =>
+      panelIdsOf(stateRef.current, id)
+        .map((pid) => ptyIdsRef.current.get(pid))
+        .filter((e): e is PtyEntry => e != null && e.kind === 'local'),
+    )
+    const finish = () => {
+      setState(closeWorkspaces(stateRef.current, wsIds))
+      setSelectedIds([])
+      void snapshotAndPersist()
+    }
+    if (locals.length === 0) {
+      finish()
+      return
+    }
+    void Promise.all(
+      locals.map((e) =>
+        invoke<boolean>('pty_is_busy', { id: e.id }).catch(() => false),
+      ),
+    ).then((results) => {
+      const busyCount = results.filter(Boolean).length
+      if (busyCount === 0) {
+        finish()
+        return
+      }
+      setPendingClose({ kind: 'batch-close', workspaceIds: wsIds, busyCount })
+    })
+  }
+
+  /// Delete all (#53): resolves the selection to the affected workspace set
+  /// (selected groups contribute their whole subtrees) and opens ONE shared
+  /// confirmation with the total count and the live-process warning. Confirm
+  /// applies deleteNodes to the original selection — overlapping members (a
+  /// group AND a workspace inside it) are deduped by the ops themselves.
+  const batchDeleteFromMenu = () => {
+    const ids = menuBatchIds
+    setMenu(null)
+    if (ids == null) return
+    const affected = new Set<string>()
+    for (const id of ids) {
+      if (stateRef.current.groups.some((g) => g.id === id)) {
+        for (const nodeId of groupSubtreeIds(stateRef.current, id)) {
+          if (stateRef.current.workspaces.some((w) => w.id === nodeId)) {
+            affected.add(nodeId)
+          }
+        }
+      } else if (stateRef.current.workspaces.some((w) => w.id === id)) {
+        affected.add(id)
+      }
+    }
+    const workspaceCount = batchDeleteWorkspaceCount(stateRef.current, ids)
+    if (workspaceCount === 0 && affected.size === 0) {
+      setSelectedIds([])
+      return
+    }
+    const locals = [...affected].flatMap((id) =>
+      panelIdsOf(stateRef.current, id)
+        .map((pid) => ptyIdsRef.current.get(pid))
+        .filter((e): e is PtyEntry => e != null && e.kind === 'local'),
+    )
+    if (locals.length === 0) {
+      setPendingBatchDelete({ ids, workspaceCount, busyCount: 0 })
+      return
+    }
+    void Promise.all(
+      locals.map((e) =>
+        invoke<boolean>('pty_is_busy', { id: e.id }).catch(() => false),
+      ),
+    ).then((results) => {
+      setPendingBatchDelete({
+        ids,
+        workspaceCount,
+        busyCount: results.filter(Boolean).length,
+      })
+    })
+  }
+
+  const confirmBatchDelete = () => {
+    const pending = pendingBatchDelete
+    setPendingBatchDelete(null)
+    if (pending == null) return
+    persist(deleteNodes(stateRef.current, pending.ids))
+    setSelectedIds([])
+    void snapshotAndPersist()
+  }
+
   /// Ask-or-delete for a group (#51): a BARE group (nothing inside at any
   /// depth) deletes outright — nothing can be lost. Anything else opens the
   /// shared confirmation, but only after counting how many of the affected
@@ -1637,26 +1925,66 @@ export function WorkspaceShell() {
   // current group is left out — moving there is a no-op), plus the inline
   // fresh-name field that creates a group and files the workspace into it.
 
+  // Batch mode for the context menu (#53): opened from a row that is part of
+  // a MULTI selection (and the selection still resolves to live nodes), the
+  // menu shows the batch actions instead of the single-node ones. A
+  // right-click on an unselected row stays a single-node menu.
+  const menuBatchIds =
+    menu != null &&
+    menu.tabId == null &&
+    menu.groupPickerFor == null &&
+    ((menu.workspaceId != null && selectedIds.includes(menu.workspaceId)) ||
+      (menu.groupId != null && selectedIds.includes(menu.groupId))) &&
+    selectedIds.filter(
+      (id) =>
+        state.groups.some((g) => g.id === id) ||
+        state.workspaces.some((w) => w.id === id),
+    ).length > 1
+      ? selectedIds.filter(
+          (id) =>
+            state.groups.some((g) => g.id === id) ||
+            state.workspaces.some((w) => w.id === id),
+        )
+      : null
   const openGroupPicker = () => {
-    const wsId = menu?.workspaceId
+    const wsId = menu?.workspaceId ?? menu?.groupId
     if (wsId == null) return
-    setMenu((m) => (m == null ? m : { ...m, groupPickerFor: wsId }))
+    // The batch selection menu's picker (#53) moves the whole selection.
+    setMenu((m) =>
+      m == null ? m : { ...m, groupPickerFor: wsId, batchMove: menuBatchIds != null },
+    )
     setNewGroupName('')
   }
 
   const pickExistingGroup = (groupId: string) => {
     const wsId = menu?.groupPickerFor
+    const batch = menu?.batchMove === true
     setMenu(null)
     if (wsId == null) return
+    if (batch) {
+      persist(moveNodes(stateRef.current, selectedIdsRef.current, { parentId: groupId }))
+      setSelectedIds([])
+      return
+    }
     persist(moveNode(stateRef.current, wsId, { parentId: groupId }))
   }
 
   const pickNewGroup = () => {
     const wsId = menu?.groupPickerFor
+    const batch = menu?.batchMove === true
     const name = newGroupName.trim()
     setMenu(null)
     setNewGroupName('')
     if (wsId == null || name === '') return
+    if (batch) {
+      // Create the group on the fly, then file the WHOLE selection into it
+      // (#53) — the batch twin of moveToNewGroup.
+      const created = createGroup(stateRef.current, name)
+      const gid = created.groups[created.groups.length - 1].id
+      persist(moveNodes(created, selectedIdsRef.current, { parentId: gid }))
+      setSelectedIds([])
+      return
+    }
     persist(moveToNewGroup(stateRef.current, wsId, name))
   }
 
@@ -1737,6 +2065,9 @@ export function WorkspaceShell() {
     | { kind: 'panel'; workspaceId: string; panelId: string; label: string }
     | { kind: 'tab'; workspaceId: string; tabId: string; label: string; busyCount: number }
     | { kind: 'workspace'; workspaceId: string; busyCount: number }
+    // Batch close of a multi-selection (#53): one confirmation for every
+    // selected workspace's live processes.
+    | { kind: 'batch-close'; workspaceIds: string[]; busyCount: number }
     | null
   const [pendingClose, setPendingClose] = useState<PendingClose>(null)
 
@@ -1816,6 +2147,10 @@ export function WorkspaceShell() {
     else if (pc.kind === 'tab') {
       persist(closeTab(stateRef.current, pc.workspaceId, pc.tabId))
       void snapshotAndPersist()
+    } else if (pc.kind === 'batch-close') {
+      setState(closeWorkspaces(stateRef.current, pc.workspaceIds))
+      setSelectedIds([])
+      void snapshotAndPersist()
     } else {
       setState(closeWorkspace(stateRef.current, pc.workspaceId))
       void snapshotAndPersist()
@@ -1876,6 +2211,15 @@ export function WorkspaceShell() {
   const [pendingDeleteGroup, setPendingDeleteGroup] = useState<{
     groupId: string
     name: string
+    workspaceCount: number
+    busyCount: number
+  } | null>(null)
+
+  // A BATCH delete waiting on the same shared confirmation (#53): the whole
+  // selection's ids, the total affected workspace count (subtrees deduped)
+  // and the live-process count.
+  const [pendingBatchDelete, setPendingBatchDelete] = useState<{
+    ids: string[]
     workspaceCount: number
     busyCount: number
   } | null>(null)
@@ -2075,6 +2419,17 @@ export function WorkspaceShell() {
         onMouseDown={(e) => {
           if (isMenuPress(e)) openMenu(e, false)
         }}
+        onClick={(e) => {
+          // A click on the sidebar BACKGROUND (not on a row, button or
+          // input) clears the multi-selection (#53) — the mouse-driven twin
+          // of Escape.
+          if (
+            (e.target as HTMLElement).closest('.workspace-row, button, input') ==
+            null
+          ) {
+            setSelectedIds([])
+          }
+        }}
       >
         {/* Fixed-width inner column (#39): the sidebar animates its width;
             this wrapper holds 240px so contents never reflow mid-slide. */}
@@ -2193,15 +2548,31 @@ export function WorkspaceShell() {
                 data-testid-collapse={entry.group.collapsed === true ? 'collapsed' : undefined}
                 className={`workspace-row group-row ${
                   sideDrop?.intoGroupId === entry.group.id ? 'is-drop-target' : ''
-                } ${drag?.kind === 'sidebar' && drag.id === entry.group.id ? 'is-dragged' : ''}`}
+                } ${drag?.kind === 'sidebar' && drag.ids.includes(entry.group.id) ? 'is-dragged' : ''} ${
+                  selectedIds.includes(entry.group.id) ? 'is-selected' : ''
+                }`}
                 style={entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined}
                 onPointerDown={(e) => beginSidebarDrag(e, entry.group.id)}
-                onClick={() => {
+                onClick={(e) => {
                   // A drag's trailing click must not toggle the group.
                   if (suppressClickRef.current) {
                     suppressClickRef.current = false
                     return
                   }
+                  // The multi-select modifier (#53) toggles the row in the
+                  // selection instead of toggling collapse. The ACTIVE
+                  // workspace is default-selected (HITL): an empty selection
+                  // seeds with it, so "I'm in ws-1 and click a group" holds
+                  // both.
+                  if (isMultiSelectModifier(e)) {
+                    setSelectedIds((prev) =>
+                      prev.length === 0 && state.activeId != null
+                        ? [state.activeId, entry.group.id]
+                        : toggleInSelection(prev, entry.group.id),
+                    )
+                    return
+                  }
+                  setSelectedIds([])
                   // Click toggles collapse IN PLACE (#50) — the flag lives in
                   // the tree (persisted), never in transient UI state.
                   persist(toggleCollapse(stateRef.current, entry.group.id))
@@ -2299,15 +2670,37 @@ export function WorkspaceShell() {
                 data-node-id={entry.workspace.id}
                 className={`workspace-row ${
                   entry.workspace.id === state.activeId ? 'is-active' : ''
-                } ${drag?.kind === 'sidebar' && drag.id === entry.workspace.id ? 'is-dragged' : ''}`}
+                } ${drag?.kind === 'sidebar' && drag.ids.includes(entry.workspace.id) ? 'is-dragged' : ''} ${
+                  selectedIds.includes(entry.workspace.id) ? 'is-selected' : ''
+                }`}
                 style={entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined}
                 onPointerDown={(e) => beginSidebarDrag(e, entry.workspace.id)}
-                onClick={() => {
+                onClick={(e) => {
                   // A drag's trailing click must not activate the row.
                   if (suppressClickRef.current) {
                     suppressClickRef.current = false
                     return
                   }
+                  // The multi-select modifier (#53) toggles the row in the
+                  // selection instead of activating the workspace. The
+                  // ACTIVE workspace is default-selected (HITL): an empty
+                  // selection seeds with it, so "I'm in ws-1 and click ws-2
+                  // and ws-3" selects all three. Clicking the active row
+                  // itself just selects it.
+                  if (isMultiSelectModifier(e)) {
+                    setSelectedIds((prev) => {
+                      if (prev.length === 0) {
+                        const active = state.activeId
+                        if (active == null || active === entry.workspace.id) {
+                          return [entry.workspace.id]
+                        }
+                        return [active, entry.workspace.id]
+                      }
+                      return toggleInSelection(prev, entry.workspace.id)
+                    })
+                    return
+                  }
+                  setSelectedIds([])
                   setState(openWorkspace(state, entry.workspace.id))
                 }}
                 onContextMenu={(e) => openMenu(e, false, entry.workspace.id)}
@@ -2630,6 +3023,7 @@ export function WorkspaceShell() {
                         activePanelId={
                           tab.id === activeTab?.id ? activePanelOf(state, ws.id) : null
                         }
+                        focused={isActive}
                         firstLeafId={leafIds(tab.layout)[0] ?? ''}
                         zoomedPanelId={zoomedPanelOf(state, tab.id)}
                         onToggleZoom={(panelId) => toggleWorkspaceZoom(ws.id, panelId)}
@@ -2679,6 +3073,8 @@ export function WorkspaceShell() {
           onChange={applySettings}
           onClose={() => setSettingsOpen(false)}
           onOpenSettingsFile={openSettingsFile}
+          onImportCmux={runCmuxImport}
+          importStatus={importStatus}
         />
       )}
 
@@ -2689,14 +3085,18 @@ export function WorkspaceShell() {
               ? 'Close this panel?'
               : pendingClose.kind === 'tab'
                 ? 'Close this tab?'
-                : 'Close this workspace?'
+                : pendingClose.kind === 'batch-close'
+                  ? `Close ${pendingClose.workspaceIds.length} workspaces?`
+                  : 'Close this workspace?'
           }
           message={
             pendingClose.kind === 'panel'
               ? `Panel ${pendingClose.label} has a running process. Closing it now will terminate that process.`
               : pendingClose.kind === 'tab'
                 ? `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in tab ${pendingClose.label} ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
-                : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in this workspace ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+                : pendingClose.kind === 'batch-close'
+                  ? `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in the selected workspaces ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing them now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+                  : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in this workspace ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
           }
           confirmLabel="Close anyway"
           onConfirm={confirmPendingClose}
@@ -2736,11 +3136,38 @@ export function WorkspaceShell() {
         />
       )}
 
+      {/* Batch delete confirmation (#53): ONE dialog for the whole
+          selection — total affected workspaces (deduped subtrees) and the
+          live-process warning, the same contract as the single/group delete. */}
+      {pendingBatchDelete != null && (
+        <CloseConfirmDialog
+          title={`Delete ${pendingBatchDelete.workspaceCount} workspace${pendingBatchDelete.workspaceCount === 1 ? '' : 's'}?`}
+          message={`Delete the selection with everything inside it? ${
+            pendingBatchDelete.workspaceCount
+          } workspace${pendingBatchDelete.workspaceCount === 1 ? '' : 's'} will be removed. This cannot be undone.${
+            pendingBatchDelete.busyCount > 0
+              ? ` ${pendingBatchDelete.busyCount} panel${
+                  pendingBatchDelete.busyCount === 1 ? ' has' : 's have'
+                } a running process that will be terminated.`
+              : ''
+          }`}
+          confirmLabel="Delete"
+          onConfirm={confirmBatchDelete}
+          onCancel={() => setPendingBatchDelete(null)}
+        />
+      )}
+
       {menu && (
         <div
           className="context-menu"
           ref={menuRef}
-          style={{ left: menu.x, top: menu.y }}
+          // Position: the pointer's coordinates, PULLED BACK inside the
+          // viewport once the menu's real size is known (menuPos; the raw
+          // coordinates render for the single pre-paint pass only).
+          style={{
+            left: menuPos?.left ?? menu.x,
+            top: menuPos?.top ?? menu.y,
+          }}
           role="menu"
           // Any click inside the menu (item or padding) closes it — the
           // window-level close listener alone is not enough now that it is
@@ -2875,7 +3302,62 @@ export function WorkspaceShell() {
                 </>
               )
             })()}
-          {menu.tabId == null && menu.workspaceId && (() => {
+          {/* Batch selection menu (#53): opened from a row that belongs to a
+              multi-selection. One set of actions for EVERY selected node —
+              Move to group…, Pin all/Unpin all, Close all, Delete all (the
+              destructive ones resolve to the shared confirmation). Rename is
+              hidden here by design: it is a single-node action only. */}
+          {menuBatchIds != null &&
+            (() => {
+              const anyUnpinned = menuBatchIds.some(
+                (id) => !isNodePinned(state, id),
+              )
+              return (
+                <>
+                  <div className="menu-separator" />
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    // Swaps the menu for the group picker IN PLACE, with the
+                    // batch flag set — the pick applies to the whole
+                    // selection.
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openGroupPicker()
+                    }}
+                  >
+                    <FolderIcon />
+                    Move to group…
+                  </button>
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={() => batchPinFromMenu(anyUnpinned)}
+                  >
+                    <PinIcon />
+                    {anyUnpinned ? 'Pin all' : 'Unpin all'}
+                  </button>
+                  <div className="menu-separator" />
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={batchCloseFromMenu}
+                  >
+                    <CloseIcon />
+                    Close all
+                  </button>
+                  <button
+                    className="menu-item danger"
+                    role="menuitem"
+                    onClick={batchDeleteFromMenu}
+                  >
+                    <CloseIcon />
+                    Delete all
+                  </button>
+                </>
+              )
+            })()}
+          {menu.tabId == null && menu.workspaceId && menuBatchIds == null && (() => {
             // #47 (plan Phase 1): the splits LEFT the workspace menu — they
             // stay on the tab menu and the shortcuts, where the panel they
             // split is unambiguous. Pin / Rename / Delete remain (Adam's
@@ -2934,7 +3416,7 @@ export function WorkspaceShell() {
               Unpack (dissolve — children return to top level) and the
               destructive Delete, which asks through the shared confirmation
               whenever the group holds anything. */}
-          {menu.tabId == null && menu.groupId && (() => {
+          {menu.tabId == null && menu.groupId && menuBatchIds == null && (() => {
             const menuGroup = state.groups.find((g) => g.id === menu.groupId)
             if (menuGroup == null) return null
             const pinned = menuGroup.pinned === true

@@ -1,0 +1,200 @@
+{
+  "schemaVersion": 1,
+  "actions": {
+    "wspolniak": {
+      "title": "Project C",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project C",
+        "color": "#888888",
+        "cwd": "~/Documents/project-c",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              },
+              {
+                "name": "Panel 2",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "mac": {
+      "title": "Project A",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project A",
+        "color": "#888888",
+        "cwd": "~/Documents/project-a",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "crystal-studio": {
+      "title": "Project I",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project I",
+        "color": "#888888",
+        "cwd": "~/Documents/project-i",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              },
+              {
+                "name": "Panel 2",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "exsize": {
+      "title": "Project H",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project H",
+        "color": "#888888",
+        "cwd": "~/Documents/project-h",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              },
+              {
+                "name": "Panel 2",
+                "type": "terminal"
+              },
+              {
+                "name": "Panel 3",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "call-g": {
+      "title": "Project N",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project N",
+        "color": "#888888",
+        "cwd": "~/Documents/project-n",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "adm-cli": {
+      "title": "Project J",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project J",
+        "color": "#888888",
+        "cwd": "~/Documents/project-j",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              },
+              {
+                "name": "Panel 2",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "egrator": {
+      "title": "Project L",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project L",
+        "color": "#888888",
+        "cwd": "~/Documents/project-l",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "chester-ccabai": {
+      "title": "Project M",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project M",
+        "color": "#888888",
+        "cwd": "~/Documents/project-m",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "umux": {
+      "title": "Project F",
+      "type": "workspace",
+      "workspace": {
+        "name": "Project F",
+        "color": "#888888",
+        "cwd": "~/Documents/project-f",
+        "layout": {
+          "pane": {
+            "surfaces": [
+              {
+                "name": "Panel 1",
+                "type": "terminal"
+              },
+              {
+                "name": "Panel 2",
+                "type": "terminal"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

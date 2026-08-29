@@ -585,7 +585,7 @@ export function deleteGroupSubtree(
       .map((w) => w.id),
   )
   const nextActive = doomedWs.has(state.activeId ?? '')
-    ? pickReplacementActive(state, state.activeId as string)
+    ? pickReplacementActive(state, state.activeId as string, doomedWs)
     : state.activeId
   // The doomed workspaces' tabs die with them — their zoom records must not
   // outlive them (same hygiene as deleteWorkspace).
@@ -870,20 +870,26 @@ export function switchWorkspace(
 /// Pick the next workspace to activate after `removedId` is gone from the open
 /// set: the next open one in SIDEBAR order, else the previous open one, else
 /// null (no open workspace left -> EmptyState). The tree's shared order is
-/// the source of truth for what the user sees as "next" (#48).
+/// the source of truth for what the user sees as "next" (#48). `excluded`
+/// (#53 fix) names workspaces that are dying WITH the removed one — a
+/// subtree delete must not hand activation to a sibling that dies in the
+/// same operation.
 function pickReplacementActive(
   state: WorkspaceState,
   removedId: string,
+  excluded: ReadonlySet<string> = new Set(),
 ): string | null {
   const wsIds = new Set(state.workspaces.map((w) => w.id))
   const ids = state.order.filter((id) => wsIds.has(id))
   const idx = ids.indexOf(removedId)
-  const after = ids.slice(idx + 1).find((id) => state.openIds.includes(id))
+  const after = ids
+    .slice(idx + 1)
+    .find((id) => !excluded.has(id) && state.openIds.includes(id))
   if (after != null) return after
   const before = ids
     .slice(0, idx)
     .reverse()
-    .find((id) => state.openIds.includes(id))
+    .find((id) => !excluded.has(id) && state.openIds.includes(id))
   return before ?? null
 }
 
@@ -1041,8 +1047,10 @@ function reorderPinned(
 }
 
 /// A node's pin flag, whichever kind it is — the per-level pinned block
-/// mixes pinned groups and pinned workspaces (#52).
-function isNodePinned(state: WorkspaceState, nodeId: string): boolean {
+/// mixes pinned groups and pinned workspaces (#52). Exported for the batch
+/// selection menu (#53), whose "Pin all / Unpin all" label reads whether ANY
+/// selected node is currently unpinned.
+export function isNodePinned(state: WorkspaceState, nodeId: string): boolean {
   const group = state.groups.find((g) => g.id === nodeId)
   if (group != null) return group.pinned === true
   return state.workspaces.find((w) => w.id === nodeId)?.pinned === true
@@ -1054,6 +1062,116 @@ function isNodePinned(state: WorkspaceState, nodeId: string): boolean {
 function omitPinned(workspace: Workspace): Workspace {
   const { pinned: _dropped, ...rest } = workspace
   return rest
+}
+
+// --- Batch actions over a multi-selection (#53) ------------------------------
+//
+// A selection (src/selection.ts) is a list of sidebar node ids — workspaces
+// and groups, mixed. Every batch op here is a COMPOSITION of the single-node
+// pure ops above, applied sequentially, so each member goes through exactly
+// the same guards (cycle rejection, unknown-id no-ops) as a solo action and
+// an invalid member is skipped without aborting the rest.
+
+/// Sort selection ids into current SIDEBAR order (state.order), dropping
+/// unknown ids. Parent groups rank before their descendants by construction
+/// of the shared order, which is what keeps a parent-and-child selection
+/// coherent when both move in one gesture.
+function orderNodesBySidebar(state: WorkspaceState, nodeIds: readonly string[]): string[] {
+  const rank = new Map(state.order.map((id, i) => [id, i]))
+  return nodeIds
+    .filter((id) => rank.has(id))
+    .sort((a, b) => (rank.get(a) as number) - (rank.get(b) as number))
+}
+
+/// Move EVERY selected node per one drop target (#53) — dragging any member
+/// of a selection drags all of it: into a group, back to top level, or
+/// reordered before a sibling. Members apply in SIDEBAR order, which keeps
+/// the selection's own relative order for BOTH target kinds: appends land in
+/// selection order, and each insert-before lands directly before the target
+/// sibling (below the members applied before it). Invalid members (a group
+/// whose target sits inside its own subtree, unknown ids) are skipped by
+/// moveNode's no-op without aborting the rest.
+export function moveNodes(
+  state: WorkspaceState,
+  nodeIds: readonly string[],
+  target: MoveTarget,
+): WorkspaceState {
+  let next = state
+  for (const id of orderNodesBySidebar(state, nodeIds)) {
+    next = moveNode(next, id, target)
+  }
+  return next
+}
+
+/// Close every selected WORKSPACE, keeping their definitions (#53). Groups in
+/// the selection are ignored — closing is a workspace concept — and
+/// closeWorkspace's own unknown-id no-op skips anything already gone. Applied
+/// sequentially so activation falls back per close, per the existing rules.
+export function closeWorkspaces(
+  state: WorkspaceState,
+  nodeIds: readonly string[],
+): WorkspaceState {
+  let next = state
+  for (const id of nodeIds) next = closeWorkspace(next, id)
+  return next
+}
+
+/// Delete every selected node (#53): a selected group dies with its WHOLE
+/// subtree (deleteGroupSubtree), a selected workspace dies alone
+/// (deleteWorkspace). A workspace that a selected ancestor group already took
+/// with it is skipped by deleteWorkspace's no-op, so overlapping selections
+/// (a group AND a workspace inside it) never double-delete. The shared
+/// confirmation is the caller's job — batchDeleteWorkspaceCount feeds it.
+export function deleteNodes(
+  state: WorkspaceState,
+  nodeIds: readonly string[],
+): WorkspaceState {
+  let next = state
+  for (const id of nodeIds) {
+    next = state.groups.some((g) => g.id === id)
+      ? deleteGroupSubtree(next, id)
+      : deleteWorkspace(next, id)
+  }
+  return next
+}
+
+/// Pin or unpin EVERY selected node (#53): workspaces via setWorkspacePinned,
+/// groups via setGroupPinned. Members already in the target state no-op (the
+/// set*Pinned ops refuse to move a node whose flag matches), so the pinned
+/// block forms once and the list never jumps per member.
+export function setNodesPinned(
+  state: WorkspaceState,
+  nodeIds: readonly string[],
+  pinned: boolean,
+): WorkspaceState {
+  let next = state
+  for (const id of nodeIds) {
+    next = next.groups.some((g) => g.id === id)
+      ? setGroupPinned(next, id, pinned)
+      : setWorkspacePinned(next, id, pinned)
+  }
+  return next
+}
+
+/// How many workspaces a batch delete would remove (#53): the union of the
+/// selected workspaces and everything inside selected groups, DEDUPED — a
+/// workspace both selected directly and living inside a selected group counts
+/// once. This is the number the shared confirmation shows.
+export function batchDeleteWorkspaceCount(
+  state: WorkspaceState,
+  nodeIds: readonly string[],
+): number {
+  const doomed = new Set<string>()
+  for (const id of nodeIds) {
+    if (state.groups.some((g) => g.id === id)) {
+      for (const nodeId of groupSubtreeIds(state, id)) {
+        if (state.workspaces.some((w) => w.id === nodeId)) doomed.add(nodeId)
+      }
+    } else if (state.workspaces.some((w) => w.id === id)) {
+      doomed.add(id)
+    }
+  }
+  return doomed.size
 }
 
 /// Reorder workspace `id`'s tabs (#45): drag & drop inside ONE workspace's

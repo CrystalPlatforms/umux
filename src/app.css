@@ -363,6 +363,19 @@ body {
   color: var(--text);
 }
 
+/* Multi-selection (#53): a row held in the selection reads through the same
+   left rail as the active row but a dimmer fill, so a selected row stays
+   distinguishable from the ACTIVE one while several are held at once. */
+.workspace-row.is-selected {
+  background: var(--bg-sidebar-hover);
+  border-left-color: var(--accent-line);
+  color: var(--text);
+}
+
+.workspace-row.is-selected.is-active {
+  background: var(--bg-sidebar-active);
+}
+
 .workspace-name {
   flex: 1;
   min-width: 0;
@@ -1310,6 +1323,19 @@ body.is-dragging * {
 .settings-switch.is-on .settings-switch__knob {
   transform: translateX(16px);
   background: var(--accent);
+}
+
+/* Import row (HITL round): the action cell of the settings row — the
+   "Import" button anchors its dropdown here. */
+.settings-import {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.settings-import__status {
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
 }
 
 .settings-footnote {

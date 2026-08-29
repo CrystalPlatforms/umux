@@ -16,7 +16,7 @@
 // aria-checked mirroring the state, so assistive tech announces it as a
 // toggle. Escape and the header X close the dialog.
 
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
 
 type ToggleProps = {
@@ -52,6 +52,8 @@ export function SettingsDialog({
   onChange,
   onClose,
   onOpenSettingsFile,
+  onImportCmux,
+  importStatus,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -60,6 +62,11 @@ export function SettingsDialog({
   // parent to open the file with the platform's default editor (the Tauri
   // invoke lives in WorkspaceShell — this component stays invoke-free).
   onOpenSettingsFile?: () => void
+  // The one-shot cmux import (#54): clicking asks the parent to read cmux's
+  // files (read-only, via the backend) and apply the import plan to the live
+  // tree. The status line reports the outcome either way.
+  onImportCmux?: () => void
+  importStatus?: string | null
 }) {
   // Escape closes the dialog — the same dismissal key the rename/create
   // inputs use, so the app has one "back out" reflex everywhere.
@@ -70,6 +77,26 @@ export function SettingsDialog({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  // The Import dropdown (HITL round): open state + close on any press outside
+  // it — the same interaction pattern as the header's "+" dropdown.
+  const [importOpen, setImportOpen] = useState(false)
+  const importRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!importOpen) return
+    const close = (e: PointerEvent) => {
+      if (
+        importRef.current != null &&
+        e.target instanceof Node &&
+        importRef.current.contains(e.target)
+      ) {
+        return
+      }
+      setImportOpen(false)
+    }
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [importOpen])
 
   return (
     <div
@@ -128,6 +155,54 @@ export function SettingsDialog({
           testId="toggle-ports-tooltip"
           onToggle={(next) => onChange({ portsTooltipEnabled: next })}
         />
+
+        {/* Import row (HITL round): same layout as the switches — label on
+            the left, the action on the right. "Import" (the Create button's
+            style) unfolds a dropdown; today the only source is cmux. The
+            import is one-shot and never overwrites: colliding names get a
+            ` from cmux` suffix. */}
+        {onImportCmux != null && (
+          <>
+            <div className="settings-row">
+              <div className="settings-row__text">
+                <span className="settings-row__label">
+                  Import your layouts from another apps
+                </span>
+              </div>
+              <div className="settings-import" ref={importRef}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  data-testid="import-toggle"
+                  aria-expanded={importOpen}
+                  onClick={() => setImportOpen((o) => !o)}
+                >
+                  Import
+                </button>
+                {importOpen && (
+                  <div className="create-dropdown" role="menu">
+                    <button
+                      className="menu-item"
+                      role="menuitem"
+                      data-testid="import-cmux"
+                      onClick={() => {
+                        setImportOpen(false)
+                        onImportCmux()
+                      }}
+                    >
+                      from cmux
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+            {importStatus != null && (
+              <div className="settings-import__status" role="status">
+                {importStatus}
+              </div>
+            )}
+          </>
+        )}
 
         <div className="settings-footnote">
           Changes apply immediately and are saved to{' '}

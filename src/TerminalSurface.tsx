@@ -25,6 +25,7 @@ export function TerminalSurface({
   label,
   sshTarget,
   cwd,
+  focused,
   onActivity,
   onCompletion,
   onViewportResize,
@@ -41,6 +42,11 @@ export function TerminalSurface({
   // restore). Local panels only — a remote shell's cwd is the server's call.
   // Consumed once, at PTY open time (the effect below runs per mount).
   cwd?: string
+  // This panel is THE active surface (the focused pane of the active tab of
+  // the active workspace). Every flip to true pulls keyboard focus into the
+  // terminal — switching workspace or tab makes it typable immediately, no
+  // extra click (HITL, #53 fix round).
+  focused?: boolean
   // Reports the backend PTY/SSH id assigned to this surface (v0.2 Phase 4
   // / #28): this component owns the panelId↔ptyId mapping, and the close-
   // confirmation check needs it ("is a live process running in THIS panel?").
@@ -63,6 +69,9 @@ export function TerminalSurface({
   onViewportResize?: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  // The live xterm instance, surfaced so the `focused` prop below can pull
+  // keyboard focus into it (the instance is created inside the mount effect).
+  const termRef = useRef<Terminal | null>(null)
   // A connection failure (sync ssh_open rejection, or an async `ssh_exit` event
   // carrying a failure message) sets this; the panel then shows a clear error
   // instead of a blank, dead surface (Phase 16 / Issue #17, AC1 + AC2).
@@ -80,6 +89,7 @@ export function TerminalSurface({
       // is 1000; we set it explicitly so the cap is intentional, not accidental.
       scrollback: 1000,
     })
+    termRef.current = term
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
@@ -287,8 +297,22 @@ export function TerminalSurface({
         if (panelId != null) void invoke(closeCmd, { id: panelId })
       })
       term.dispose()
+      termRef.current = null
     }
   }, [])
+
+  // Keyboard handoff (HITL): every flip of `focused` to true pulls focus
+  // into this terminal, so switching workspace or tab makes it typable
+  // immediately. One animation frame of delay lets the reveal settle (the
+  // freshly revealed tab/workspace just left display:none; xterm cannot
+  // focus a hidden textarea). A focused INPUT (rename/create field) keeps
+  // the keyboard — only inputs, never the previous terminal's own textarea.
+  useEffect(() => {
+    if (focused !== true) return
+    if (document.activeElement instanceof HTMLInputElement) return
+    const id = requestAnimationFrame(() => termRef.current?.focus())
+    return () => cancelAnimationFrame(id)
+  }, [focused])
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>

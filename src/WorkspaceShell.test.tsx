@@ -76,6 +76,9 @@ vi.mock('./TerminalSurface', () => ({
   TerminalSurface: (props: {
     sshTarget?: string
     cwd?: string
+    // The keyboard-ownership flag (HITL): the real surface focuses its xterm
+    // when this flips true; the mock echoes it into a data attribute.
+    focused?: boolean
     onOpened?: (id: number) => void
     onUserInput?: () => void
   }) => {
@@ -94,6 +97,7 @@ vi.mock('./TerminalSurface', () => ({
         data-testid="terminal-surface"
         data-ssh-target={props.sshTarget ?? ''}
         data-cwd={props.cwd ?? ''}
+        data-focused={props.focused === true ? 'true' : 'false'}
         // Stand-in for "the user typed in this terminal" (xterm onData).
         onKeyDown={() => userInputRef.current?.()}
       />
@@ -360,20 +364,34 @@ describe('WorkspaceShell', () => {
   })
 
   it('opens the workspace menu on Ctrl+click (macOS right-click)', async () => {
+    // #53: Ctrl+click opens the menu ONLY on macOS — elsewhere it is the
+    // multi-select modifier — so this test runs AS a Mac.
+    const realPlatform = window.navigator.platform
+    Object.defineProperty(window.navigator, 'platform', {
+      value: 'MacIntel',
+      configurable: true,
+    })
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'load_workspaces')
         return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
       return Promise.resolve(undefined)
     })
-    render(<WorkspaceShell />)
-    await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
+    try {
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
-    fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-1'), {
-      button: 0,
-      ctrlKey: true,
-    })
+      fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-1'), {
+        button: 0,
+        ctrlKey: true,
+      })
 
-    expect(await screen.findByRole('menuitem', { name: /new workspace/i })).toBeInTheDocument()
+      expect(await screen.findByRole('menuitem', { name: /new workspace/i })).toBeInTheDocument()
+    } finally {
+      Object.defineProperty(window.navigator, 'platform', {
+        value: realPlatform,
+        configurable: true,
+      })
+    }
   })
 
   it('collapses the sidebar (stays mounted, is-collapsed) and expands it again from the corner toggle', async () => {
@@ -2801,5 +2819,541 @@ describe('workspace groups: collapse, badge, nesting actions, pin (#50/#51/#52)'
     expect(
       screen.getByTestId('group-row-g-1').querySelector('.row-pin'),
     ).toBeNull()
+  })
+})
+
+describe('multi-select + batch actions (#53)', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha', groupId: 'g-1' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+          groups: [{ id: 'g-1', name: 'projekty' }],
+          order: ['ws-2', 'g-1', 'ws-1'],
+        })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  const lastSave = () => {
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+    return calls[calls.length - 1][1] as {
+      workspaces: Array<Record<string, unknown>>
+      order: string[]
+    }
+  }
+
+  const selectedRows = () =>
+    [...document.querySelectorAll('.workspace-row.is-selected')].map((el) =>
+      el.getAttribute('data-testid'),
+    )
+
+  it('modifier-click toggles rows in and out; workspaces and groups mix (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // jsdom reports a non-Mac platform, so Ctrl is the multi-select key.
+    // The ACTIVE workspace (ws-1) is default-selected: the first click on
+    // ws-2 seeds the selection with ws-1 + ws-2 (HITL). selectedRows() reads
+    // DOM (sidebar) order, so ws-2 lists before ws-1.
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    expect(selectedRows()).toEqual(['workspace-row-ws-2', 'workspace-row-ws-1'])
+
+    fireEvent.click(screen.getByTestId('group-row-g-1'), { ctrlKey: true })
+    expect(selectedRows()).toEqual([
+      'workspace-row-ws-2',
+      'group-row-g-1',
+      'workspace-row-ws-1',
+    ])
+
+    // A modifier-click on an already-selected row removes just that row.
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    expect(selectedRows()).toEqual(['group-row-g-1', 'workspace-row-ws-1'])
+  })
+
+  it('the ACTIVE workspace is default-selected; clicking it alone selects just it (HITL)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('workspace-row-ws-1').className).toContain('is-active')
+
+    // ws-1 is active: clicking ws-2 selects BOTH (DOM order: ws-2 first).
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    expect(selectedRows()).toEqual(['workspace-row-ws-2', 'workspace-row-ws-1'])
+
+    // …and on a fresh selection, clicking the active row selects it alone.
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.click(screen.getByTestId('workspace-row-ws-1'), { ctrlKey: true })
+    expect(selectedRows()).toEqual(['workspace-row-ws-1'])
+  })
+
+  it('a modifier-click does NOT activate the workspace or toggle the group (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+
+    // Not activated: the workspace row never gains is-active…
+    expect(screen.getByTestId('workspace-row-ws-2').className).not.toContain('is-active')
+    // …and no config write happened (activation/collapse would persist).
+    expect(invokeMock.mock.calls.some((c) => c[0] === 'save_workspaces')).toBe(false)
+  })
+
+  it('on macOS Cmd is the multi-select key and plain Ctrl opens the menu instead (#53)', async () => {
+    const realPlatform = window.navigator.platform
+    Object.defineProperty(window.navigator, 'platform', {
+      value: 'MacIntel',
+      configurable: true,
+    })
+    try {
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      // Cmd+click toggles the selection (seeded with the active ws-1)…
+      fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { metaKey: true })
+      expect(selectedRows()).toEqual(['workspace-row-ws-2', 'workspace-row-ws-1'])
+
+      // …while Ctrl+click is the macOS right-click: the menu opens and the
+      // selection stays untouched.
+      fireEvent.mouseDown(screen.getByTestId('workspace-row-ws-2'), {
+        ctrlKey: true,
+        button: 0,
+      })
+      expect(await screen.findByRole('menu')).toBeInTheDocument()
+      expect(selectedRows()).toEqual(['workspace-row-ws-2', 'workspace-row-ws-1'])
+    } finally {
+      Object.defineProperty(window.navigator, 'platform', {
+        value: realPlatform,
+        configurable: true,
+      })
+    }
+  })
+
+  it('Escape clears the selection (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    fireEvent.click(screen.getByTestId('group-row-g-1'), { ctrlKey: true })
+    expect(selectedRows()).toHaveLength(3)
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(selectedRows()).toEqual([])
+  })
+
+  it('a click on the sidebar BACKGROUND clears the selection (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    expect(selectedRows()).toHaveLength(2)
+
+    fireEvent.click(document.querySelector('.workspace-list') as HTMLElement)
+
+    expect(selectedRows()).toEqual([])
+  })
+
+  it('a PLAIN click clears the selection and activates the row (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // Seed: [ws-1 (active), ws-2]; toggling ws-1 off leaves [ws-2].
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    fireEvent.click(screen.getByTestId('workspace-row-ws-1'), { ctrlKey: true })
+    expect(selectedRows()).toEqual(['workspace-row-ws-2'])
+
+    fireEvent.click(screen.getByTestId('workspace-row-ws-1'))
+
+    expect(selectedRows()).toEqual([])
+    expect(screen.getByTestId('workspace-row-ws-1').className).toContain('is-active')
+  })
+
+  it('the batch menu shows batch actions and hides Rename for a multi-selection (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // One click suffices: the seed brings the active ws-1 along, so the
+    // selection already holds two workspaces.
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-2'))
+
+    const menu = await screen.findByRole('menu')
+    expect(screen.getByRole('menuitem', { name: /move to group/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /pin all/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /close all/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /delete all/i })).toBeInTheDocument()
+    // Rename is a single-node action — hidden for a multi-selection.
+    expect(
+      within(menu).queryByRole('menuitem', { name: /rename workspace/i }),
+    ).toBeNull()
+  })
+
+  it('a SINGLE selected row keeps the regular menu with Rename (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // Clicking the ACTIVE row selects it alone — a one-node selection.
+    fireEvent.click(screen.getByTestId('workspace-row-ws-1'), { ctrlKey: true })
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+
+    await screen.findByRole('menu')
+    expect(
+      screen.getByRole('menuitem', { name: /rename workspace/i }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /delete all/i })).toBeNull()
+  })
+
+  it('Delete all resolves to ONE shared confirmation with the total count and live-process warning (#53)', async () => {
+    surfacesReportHandles = true
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha', groupId: 'g-1' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+          groups: [{ id: 'g-1', name: 'projekty' }],
+          order: ['ws-2', 'g-1', 'ws-1'],
+        })
+      if (cmd === 'pty_is_busy') return Promise.resolve(true)
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // Selection: ws-2 directly + g-1 (holding ws-1) — TWO affected
+    // workspaces, deduped across the overlap.
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+    fireEvent.click(screen.getByTestId('group-row-g-1'), { ctrlKey: true })
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-2'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /delete all/i }))
+
+    // Exactly ONE dialog, naming both the total and the processes.
+    const dialogs = await screen.findAllByRole('alertdialog')
+    expect(dialogs).toHaveLength(1)
+    expect(dialogs[0].textContent).toContain('2 workspaces will be removed')
+    expect(dialogs[0].textContent).toContain('2 panels have a running process')
+
+    fireEvent.click(within(dialogs[0]).getByRole('button', { name: /delete/i }))
+
+    // Confirm applies to the WHOLE selection in one config write.
+    await waitFor(() => {
+      const saved = lastSave()
+      expect(saved.workspaces).toEqual([])
+    })
+    expect(screen.queryByTestId('workspace-row-ws-1')).toBeNull()
+    expect(screen.queryByTestId('workspace-row-ws-2')).toBeNull()
+    expect(screen.queryByTestId('group-row-g-1')).toBeNull()
+    // The selection cleared with the nodes it held.
+    expect(selectedRows()).toEqual([])
+  })
+
+  it('dragging one member of the selection moves the WHOLE selection (#53)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // Select BOTH workspaces with ONE click: the seed brings the active
+    // ws-1 along, so the selection is [ws-1, ws-2].
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'), { ctrlKey: true })
+
+    const restore = stubRects({
+      'workspace-row-ws-2': { top: 0, bottom: 30 },
+      'group-row-g-1': { top: 30, bottom: 60 },
+      'workspace-row-ws-1': { top: 60, bottom: 90 },
+    })
+
+    // Drag the SELECTED ws-1 into g-1's middle zone — the ghost carries the
+    // whole selection ("2 items") and both workspaces file into g-1.
+    const src = screen.getByTestId('workspace-row-ws-1')
+    fireEvent.pointerDown(src, { button: 0, clientX: 10, clientY: 75 })
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 45 })
+    expect(document.querySelector('.drag-ghost')?.textContent).toContain('2 items')
+    fireEvent.pointerUp(window, {})
+    restore.mockRestore()
+
+    await waitFor(() => {
+      const saved = lastSave()
+      const grouped = saved.workspaces.filter(
+        (w) => (w as { groupId?: string }).groupId === 'g-1',
+      )
+      expect(grouped).toHaveLength(2)
+    })
+    // The selection cleared after the batch move.
+    expect(selectedRows()).toEqual([])
+  })
+})
+
+describe('cmux import (#54)', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      if (cmd === 'read_cmux_import_sources')
+        return Promise.resolve({
+          config: null,
+          session: JSON.stringify({
+            windows: [
+              {
+                tabManager: {
+                  workspaceGroups: [
+                    { id: 'g-9', name: 'Group One', isCollapsed: true, isPinned: false },
+                  ],
+                  workspaces: [
+                    { workspaceId: 'w-9', customTitle: 'Project A', currentDirectory: '~/Documents/project-a' },
+                  ],
+                },
+              },
+            ],
+          }),
+        })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  it('the Settings button applies the import plan and reports the outcome (#54)', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    // Open Settings (header gear), unfold the Import dropdown, pick cmux.
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(await screen.findByTestId('import-toggle'))
+    fireEvent.click(await screen.findByTestId('import-cmux'))
+
+    // The read went through the read-only backend command…
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('read_cmux_import_sources'),
+    )
+    // …the plan applied (one config write), and the status line says so.
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          workspaces: [expect.objectContaining({ name: 'Project A' })],
+          groups: [expect.objectContaining({ name: 'Group One', collapsed: true })],
+        }),
+      ),
+    )
+    expect(await screen.findByRole('status').then((el) => el.textContent)).toContain(
+      'Imported 1 workspace and 1 group',
+    )
+  })
+
+  it('a malformed cmux file reports the error and writes NOTHING (#54)', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      if (cmd === 'read_cmux_import_sources')
+        return Promise.resolve({ config: null, session: '{broken' })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(await screen.findByTestId('import-toggle'))
+    fireEvent.click(await screen.findByTestId('import-cmux'))
+
+    const status = await screen.findByRole('status')
+    expect(status.textContent).toContain('Import failed')
+    expect(status.textContent).toContain('not valid JSON')
+    // State untouched: no config write happened.
+    expect(invokeMock.mock.calls.some((c) => c[0] === 'save_workspaces')).toBe(false)
+  })
+
+  it('the import status clears itself after 10 seconds (#54, HITL)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render(<WorkspaceShell />)
+      await vi.waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith('load_workspaces'),
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+      fireEvent.click(await screen.findByTestId('import-toggle'))
+      fireEvent.click(await screen.findByTestId('import-cmux'))
+
+      await vi.waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          'save_workspaces',
+          expect.objectContaining({ workspaces: expect.any(Array) }),
+        ),
+      )
+      expect(screen.getByRole('status')).toBeInTheDocument()
+
+      // Ten seconds later the status is gone on its own.
+      await act(async () => {
+        vi.advanceTimersByTime(10_000)
+      })
+      expect(screen.queryByRole('status')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('keyboard handoff on switch (HITL, #53 fix round)', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  const surfaceIn = (containerTestId: string) =>
+    within(screen.getByTestId(containerTestId)).getByTestId('terminal-surface')
+
+  it('switching the active WORKSPACE focuses its terminal immediately', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // Boot: the FIRST workspace owns the keyboard…
+    expect(surfaceIn('panel-surfaces-ws-1').getAttribute('data-focused')).toBe('true')
+    expect(surfaceIn('panel-surfaces-ws-2').getAttribute('data-focused')).toBe('false')
+
+    // …one click later the OTHER one does — no extra click into the pane.
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'))
+
+    expect(surfaceIn('panel-surfaces-ws-2').getAttribute('data-focused')).toBe('true')
+    expect(surfaceIn('panel-surfaces-ws-1').getAttribute('data-focused')).toBe('false')
+  })
+
+  it('switching the active TAB focuses its terminal immediately', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              tabs: [
+                { id: 'tab-1', name: 'Tab 1', layout: { kind: 'leaf', id: 'p-1' } },
+                { id: 'tab-2', name: 'Tab 2', layout: { kind: 'leaf', id: 'p-2' } },
+              ],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    expect(surfaceIn('tab-panes-tab-1').getAttribute('data-focused')).toBe('true')
+    expect(surfaceIn('tab-panes-tab-2').getAttribute('data-focused')).toBe('false')
+
+    // Switch to the second tab (by index — the tab's accessible name carries
+    // the close button's label, so name-based queries are unreliable).
+    const tabs = within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')
+    fireEvent.click(tabs[1])
+
+    expect(surfaceIn('tab-panes-tab-2').getAttribute('data-focused')).toBe('true')
+    expect(surfaceIn('tab-panes-tab-1').getAttribute('data-focused')).toBe('false')
+  })
+})
+
+describe('context menu stays fully inside the app bounds (HITL)', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+      return Promise.resolve(undefined)
+    })
+  })
+
+  function stubMenuSize(width: number, height: number) {
+    const wSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetWidth', 'get')
+      .mockReturnValue(width)
+    const hSpy = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockReturnValue(height)
+    const realW = window.innerWidth
+    const realH = window.innerHeight
+    window.innerWidth = 1024
+    window.innerHeight = 720
+    return () => {
+      wSpy.mockRestore()
+      hSpy.mockRestore()
+      window.innerWidth = realW
+      window.innerHeight = realH
+    }
+  }
+
+  it('a menu opened near the BOTTOM-RIGHT edge is pulled back inside the window', async () => {
+    const restore = stubMenuSize(200, 300)
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // Pointer 24px from the right edge and 20px from the bottom: the raw
+    // position would clip the 200x300 menu.
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'), {
+      clientX: 1000,
+      clientY: 700,
+    })
+
+    const menuEl = await screen.findByRole('menu')
+    expect(menuEl.style.left).toBe('816px') // 1024 - 200 - 8 (margin)
+    expect(menuEl.style.top).toBe('412px') // 720 - 300 - 8 (margin)
+    restore()
+  })
+
+  it('a menu opened in the OPEN keeps the pointer position', async () => {
+    const restore = stubMenuSize(200, 300)
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'), {
+      clientX: 100,
+      clientY: 100,
+    })
+
+    const menuEl = await screen.findByRole('menu')
+    expect(menuEl.style.left).toBe('100px')
+    expect(menuEl.style.top).toBe('100px')
+    restore()
   })
 })

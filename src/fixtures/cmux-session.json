@@ -1,0 +1,304 @@
+{
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "version": 1,
+  "windows": [
+    {
+      "tabManager": {
+        "selectedWorkspaceIndex": 0,
+        "workspaceGroups": [
+          {
+            "id": "d5c501c1-9264-46ed-ac7b-77373f3d9dac",
+            "name": "Group One",
+            "isCollapsed": true,
+            "isPinned": false,
+            "anchorWorkspaceId": "6717a8f9-8d2d-4199-abb2-2b8369b5f552",
+            "anchorMemberIndex": 0
+          },
+          {
+            "id": "9b6a3687-477b-42a4-9749-6af5884af141",
+            "name": "Group Two",
+            "isCollapsed": false,
+            "isPinned": false,
+            "anchorWorkspaceId": "4c09b3df-98e3-465f-9067-50c22376d994",
+            "anchorMemberIndex": 0
+          },
+          {
+            "id": "b2fc102f-bddd-489d-baa5-7ed082c7f129",
+            "name": "Group Three",
+            "isCollapsed": true,
+            "isPinned": false,
+            "anchorWorkspaceId": "df9d539d-8acf-4579-a56d-666f72d72669",
+            "anchorMemberIndex": 0
+          }
+        ],
+        "workspaces": [
+          {
+            "workspaceId": "18123738-b7a1-47c0-8875-0be5bf89597f",
+            "stableId": "033daf48-ab80-486a-bec4-b54a968f15c0",
+            "customTitle": "Project A",
+            "currentDirectory": "~/Documents/project-a",
+            "customColor": "#888888",
+            "isPinned": true,
+            "panels": [
+              {
+                "id": "bfed1ad8-3231-4e4a-8c44-5e19f3d4eed2",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-a"
+              }
+            ]
+          },
+          {
+            "workspaceId": "6717a8f9-8d2d-4199-abb2-2b8369b5f552",
+            "stableId": "dcbae267-22bf-440a-921a-e7aa63ce9acc",
+            "customTitle": "Project B",
+            "currentDirectory": "~/Documents/project-b",
+            "customColor": "#888888",
+            "groupId": "d5c501c1-9264-46ed-ac7b-77373f3d9dac",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "37b6c51a-b8ef-4228-9354-b66ac6030fcd",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-b"
+              }
+            ]
+          },
+          {
+            "workspaceId": "b4f46c84-6cfc-4f90-9c68-6df882df3a90",
+            "stableId": "5c063f9b-70ea-4565-9930-b2a4ed8387af",
+            "customTitle": "Project C",
+            "currentDirectory": "~/Documents/project-c",
+            "customColor": "#888888",
+            "groupId": "d5c501c1-9264-46ed-ac7b-77373f3d9dac",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "9006c4ea-a427-4f16-91b4-b9d116352935",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-c"
+              },
+              {
+                "id": "2378f6f8-33a7-4032-837a-d27f6e9a52e3",
+                "title": "Panel 2",
+                "type": "terminal",
+                "directory": "~/Documents/project-c"
+              }
+            ]
+          },
+          {
+            "workspaceId": "0378053d-b71c-4a67-aa1c-4010dbee8c03",
+            "stableId": "04048990-e94e-4ca8-9bf8-25be77d4cb75",
+            "customTitle": "Project D",
+            "currentDirectory": "~/Documents/project-d",
+            "customColor": "#888888",
+            "groupId": "d5c501c1-9264-46ed-ac7b-77373f3d9dac",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "8d2ee989-d029-4bdf-961f-6a6a2c5e4514",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-d"
+              },
+              {
+                "id": "d1aa4f26-639e-4131-b51d-3e0a86715976",
+                "title": "Panel 2",
+                "type": "terminal",
+                "directory": "~/Documents/project-d"
+              }
+            ]
+          },
+          {
+            "workspaceId": "4c09b3df-98e3-465f-9067-50c22376d994",
+            "stableId": "7a240845-4f11-4399-8bc9-cf224697f98a",
+            "customTitle": "Project E",
+            "currentDirectory": "~/Documents/project-e",
+            "customColor": "#888888",
+            "groupId": "9b6a3687-477b-42a4-9749-6af5884af141",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "b4e16b9f-9325-48a7-9249-ed1c7a1f2b18",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-e"
+              }
+            ]
+          },
+          {
+            "workspaceId": "abef0fce-de76-463d-82dd-03ebedf88bb1",
+            "stableId": "ccfe2714-c374-43a6-a864-21f353c3db27",
+            "customTitle": "Project F",
+            "currentDirectory": "~/Documents/project-f",
+            "customColor": "#888888",
+            "groupId": "9b6a3687-477b-42a4-9749-6af5884af141",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "87cb9c10-8c33-459c-89db-aac611d00bb3",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-f"
+              },
+              {
+                "id": "eda2b0a4-7c91-4cd0-8e04-f067bb363257",
+                "title": "Panel 2",
+                "type": "terminal",
+                "directory": "~/Documents/project-f"
+              }
+            ]
+          },
+          {
+            "workspaceId": "c421395a-9b36-48b0-a4bc-2d45b282769d",
+            "stableId": "4a8b162b-984d-4e7c-94b0-6cc6a65e01e3",
+            "customTitle": "Project G",
+            "currentDirectory": "~/Documents/project-g",
+            "customColor": "#888888",
+            "groupId": "9b6a3687-477b-42a4-9749-6af5884af141",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "ff9996db-baf2-494f-883b-918bf314fdd0",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-g"
+              },
+              {
+                "id": "8d869ccd-61c5-43d8-b027-7b69ad30e114",
+                "title": "Panel 2",
+                "type": "terminal",
+                "directory": "~/Documents/project-g"
+              }
+            ]
+          },
+          {
+            "workspaceId": "2f44481b-5991-4b76-9db5-db05d1d9a900",
+            "stableId": "3a550961-958f-4d06-8c63-81501e1d2a20",
+            "customTitle": "Project H",
+            "currentDirectory": "~/Documents/project-h",
+            "customColor": "#888888",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "b269a9fa-95fb-4dd6-88d5-4b6460fa7aff",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-h"
+              },
+              {
+                "id": "dadb61b5-2a56-4ccd-945c-15b26324389e",
+                "title": "Panel 2",
+                "type": "terminal",
+                "directory": "~/Documents/project-h"
+              },
+              {
+                "id": "5c8deba9-6d18-4961-b520-c25b04cbda98",
+                "title": "Panel 3",
+                "type": "terminal",
+                "directory": "~/Documents/project-h"
+              }
+            ]
+          },
+          {
+            "workspaceId": "2d58a2a3-0473-4478-bdc5-b1e3a513bed0",
+            "stableId": "c035c820-672f-4f56-8fb2-a1d5f6673bbb",
+            "customTitle": "Project I",
+            "currentDirectory": "~/Documents/project-i",
+            "customColor": "#888888",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "4f21d8f8-d79b-4349-81f0-e5ff90e043e4",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-i"
+              },
+              {
+                "id": "e745b5f1-6d43-4c18-ab7c-5b23db892a3d",
+                "title": "Panel 2",
+                "type": "terminal",
+                "directory": "~/Documents/project-i"
+              }
+            ]
+          },
+          {
+            "workspaceId": "1cf9c998-1313-4412-8e2a-ffb83d6223b9",
+            "stableId": "e272d8f6-97cb-4a7d-9a6a-aecc07c93034",
+            "customTitle": "Project J",
+            "currentDirectory": "~/Documents/project-j",
+            "customColor": "#888888",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "caf49711-6c3a-4aec-a082-ea46304bdaee",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-j"
+              },
+              {
+                "id": "977a5a23-28ba-4eca-87be-5dd478d9a71a",
+                "title": "Panel 2",
+                "type": "terminal",
+                "directory": "~/Documents/project-j"
+              }
+            ]
+          },
+          {
+            "workspaceId": "df9d539d-8acf-4579-a56d-666f72d72669",
+            "stableId": "734dc142-d67f-4818-a152-2631739b6875",
+            "customTitle": "Project K",
+            "currentDirectory": "~/Documents/project-k",
+            "customColor": "#888888",
+            "groupId": "b2fc102f-bddd-489d-baa5-7ed082c7f129",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "9fbe27e0-8585-4827-a574-712b6c3d1438",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-k"
+              }
+            ]
+          },
+          {
+            "workspaceId": "1422cd2e-d197-4b72-b135-a0a1caf740aa",
+            "stableId": "8d6b70be-7564-4f6f-9e52-e6ed1daa3a1b",
+            "customTitle": "Project L",
+            "currentDirectory": "~/Documents/project-l",
+            "customColor": "#888888",
+            "groupId": "b2fc102f-bddd-489d-baa5-7ed082c7f129",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "e689d9bb-cf53-4edd-b49e-c50c5b9ef2ff",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-l"
+              }
+            ]
+          },
+          {
+            "workspaceId": "76654f00-c7a1-4ead-ae6a-f6d469c287bf",
+            "stableId": "4edabc4d-4c1a-40ce-8653-c4a95bcb35c7",
+            "customTitle": "Project M",
+            "currentDirectory": "~/Documents/project-m",
+            "customColor": "#888888",
+            "groupId": "b2fc102f-bddd-489d-baa5-7ed082c7f129",
+            "isPinned": false,
+            "panels": [
+              {
+                "id": "e77d1b1d-e1f0-4184-b942-55d52c2cdef4",
+                "title": "Panel 1",
+                "type": "terminal",
+                "directory": "~/Documents/project-m"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

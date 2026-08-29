@@ -35,7 +35,12 @@ import {
   setTabPinned,
   activeTabOf,
   moveNode,
+  moveNodes,
   moveToNewGroup,
+  closeWorkspaces,
+  deleteNodes,
+  setNodesPinned,
+  batchDeleteWorkspaceCount,
   createGroup,
   renameGroup,
   deleteGroup,
@@ -1800,7 +1805,10 @@ describe('workspace groups: unpack + destructive delete (#51)', () => {
     let state2 = seedForUnpack()
     state2 = { ...state2, activeId: 'ws-2' } // ws-2 lives in g-sub
     const next2 = deleteGroupSubtree(state2, 'g-main')
-    expect(next2.activeId).toBe('ws-1')
+    // ws-1 is ALSO inside the doomed subtree (it lives in g-main) — #53's
+    // excluded-set fix stops activation from landing on a workspace dying in
+    // the same operation, so it falls to the one true survivor, ws-3.
+    expect(next2.activeId).toBe('ws-3')
   })
 
   it('deleteGroupSubtree drops the zoom records of the deleted tabs', () => {
@@ -1946,5 +1954,183 @@ describe('workspace groups: pin per container (#52)', () => {
 
     const pinned = setGroupPinned(state, 'g-1', true)
     expect(setGroupPinned(pinned, 'g-1', true)).toBe(pinned)
+  })
+})
+
+describe('batch actions over a multi-selection (#53)', () => {
+  // Seed: g-1 { ws-1, ws-2 }, g-2, ws-3 at top level — one group with two
+  // children, a second (empty) group as a move TARGET, and one top-level
+  // workspace as a mixed-selection member.
+  function seedBatch(): WorkspaceState {
+    let state = emptyState
+    state = createGroup(state, 'one', () => 'g-1')
+    state = createWorkspace(state, 'ws one', seq('ws-1', 't-1', 'p-1'))
+    state = createWorkspace(state, 'ws two', seq('ws-2', 't-2', 'p-2'))
+    state = createGroup(state, 'two', () => 'g-2')
+    state = createWorkspace(state, 'ws three', seq('ws-3', 't-3', 'p-3'))
+    state = moveNode(state, 'ws-1', { parentId: 'g-1' })
+    state = moveNode(state, 'ws-2', { parentId: 'g-1' })
+    return state
+  }
+
+  describe('moveNodes', () => {
+    it('moves a MIXED selection into a group in one operation, preserving sidebar order', () => {
+      const state = seedBatch()
+
+      // Deliberately unsorted input: a group AND a top-level workspace.
+      const next = moveNodes(state, ['ws-3', 'g-1'], { parentId: 'g-2' })
+
+      // g-1 nests into g-2 with its children following it; ws-3 appends
+      // after them — the selection's sidebar order (g-1 before ws-3) holds.
+      expect(displayIds(next)).toEqual(['g-2', 'g-1', 'ws-1', 'ws-2', 'ws-3'])
+      expect(next.workspaces.find((w) => w.id === 'ws-3')?.groupId).toBe('g-2')
+      expect(next.groups.find((g) => g.id === 'g-1')?.parentId).toBe('g-2')
+    })
+
+    it('reorders a selection BEFORE a sibling, preserving its relative order', () => {
+      const state = seedBatch()
+
+      // Both workspaces insert before g-2; each lands directly before it, so
+      // the FIRST sidebar member ends up topmost of the batch.
+      const next = moveNodes(state, ['ws-1', 'ws-3'], {
+        parentId: null,
+        beforeId: 'g-2',
+      })
+
+      expect(displayIds(next)).toEqual(['g-1', 'ws-2', 'ws-1', 'ws-3', 'g-2'])
+    })
+
+    it('moves the whole selection back to TOP LEVEL', () => {
+      const state = seedBatch()
+
+      const next = moveNodes(state, ['ws-1', 'ws-2'], { parentId: null })
+
+      expect(displayIds(next)).toEqual(['g-1', 'g-2', 'ws-3', 'ws-1', 'ws-2'])
+      expect(next.workspaces.find((w) => w.id === 'ws-1')?.groupId).toBeUndefined()
+      expect(next.workspaces.find((w) => w.id === 'ws-2')?.groupId).toBeUndefined()
+    })
+
+    it('skips a cycle member (group into its own subtree) without aborting the rest', () => {
+      let state = seedBatch()
+      state = moveNode(state, 'g-2', { parentId: 'g-1' }) // g-1 → g-2
+
+      // Drag g-1 (whose subtree now CONTAINS g-2) together with ws-3 into
+      // g-2: the group's move is a cycle and is skipped; ws-3 still lands.
+      const next = moveNodes(state, ['g-1', 'ws-3'], { parentId: 'g-2' })
+
+      expect(next.groups.find((g) => g.id === 'g-1')?.parentId).toBeUndefined()
+      expect(next.workspaces.find((w) => w.id === 'ws-3')?.groupId).toBe('g-2')
+    })
+
+    it('ignores unknown ids', () => {
+      const state = seedBatch()
+      const next = moveNodes(state, ['ws-3', 'ghost'], { parentId: 'g-2' })
+      expect(displayIds(next)).toEqual(['g-1', 'ws-1', 'ws-2', 'g-2', 'ws-3'])
+    })
+  })
+
+  describe('closeWorkspaces', () => {
+    it('closes every selected workspace, keeping definitions; groups are ignored', () => {
+      const state = seedBatch()
+
+      const next = closeWorkspaces(state, ['ws-1', 'g-1', 'ws-3'])
+
+      expect(next.openIds).toEqual(['ws-2'])
+      expect(next.workspaces.map((w) => w.id)).toEqual(['ws-1', 'ws-2', 'ws-3'])
+    })
+
+    it('hands activation to a survivor when the active workspace closes', () => {
+      const state = seedBatch() // active: ws-3 (last created)
+
+      const next = closeWorkspaces(state, ['ws-3', 'ws-2'])
+
+      expect(next.activeId).toBe('ws-1')
+    })
+  })
+
+  describe('deleteNodes', () => {
+    it('deletes a mixed selection: groups with their subtree, workspaces alone', () => {
+      const state = seedBatch()
+
+      // g-1 takes ws-1+ws-2 with it; ws-3 dies alone. Nothing survives.
+      const next = deleteNodes(state, ['g-1', 'ws-3'])
+
+      expect(next.workspaces).toEqual([])
+      expect(next.groups.map((g) => g.id)).toEqual(['g-2'])
+    })
+
+    it('never double-deletes a workspace both selected directly and inside a selected group', () => {
+      const state = seedBatch()
+
+      // ws-1 is selected AND lives inside selected g-1.
+      const next = deleteNodes(state, ['g-1', 'ws-1'])
+
+      expect(next.workspaces.map((w) => w.id)).toEqual(['ws-3'])
+      expect(next.groups.map((g) => g.id)).toEqual(['g-2'])
+      expect(displayIds(next)).toEqual(['g-2', 'ws-3'])
+    })
+
+    it('cleans activation and open set when the selection removes everything active', () => {
+      const state = seedBatch()
+
+      const next = deleteNodes(state, ['ws-3', 'g-1'])
+
+      // ws-3 died directly and g-1 took ws-1+ws-2 with it — NOTHING survives,
+      // so activation falls all the way back to null (EmptyState).
+      expect(next.workspaces).toEqual([])
+      expect(next.activeId).toBeNull()
+      expect(next.openIds).toEqual([])
+    })
+  })
+
+  describe('setNodesPinned', () => {
+    it('pins every selected node (groups and workspaces), each leading its own level', () => {
+      const state = seedBatch()
+
+      const next = setNodesPinned(state, ['ws-2', 'g-2'], true)
+
+      // ws-2 leads INSIDE g-1 (pinning moves it to the head of its pinned
+      // block); g-2 leads the top level.
+      expect(displayIds(next)).toEqual(['g-2', 'g-1', 'ws-2', 'ws-1', 'ws-3'])
+      expect(next.workspaces.find((w) => w.id === 'ws-2')?.pinned).toBe(true)
+      expect(next.groups.find((g) => g.id === 'g-2')?.pinned).toBe(true)
+    })
+
+    it('unpins every selected node and drops the flags', () => {
+      let state = seedBatch()
+      state = setNodesPinned(state, ['ws-2', 'g-2'], true)
+
+      const next = setNodesPinned(state, ['ws-2', 'g-2'], false)
+
+      expect(next.workspaces.find((w) => w.id === 'ws-2')?.pinned).toBeUndefined()
+      expect(next.groups.find((g) => g.id === 'g-2')?.pinned).toBeUndefined()
+    })
+
+    it('skips members already in the target state without jumping the list', () => {
+      let state = seedBatch()
+      state = setWorkspacePinned(state, 'ws-1', true) // ws-1 already pinned
+
+      const next = setNodesPinned(state, ['ws-1', 'ws-2'], true)
+
+      // ws-1 stays the head of g-1's pinned block; ws-2 joins behind it.
+      expect(displayIds(next)).toEqual(['g-1', 'ws-1', 'ws-2', 'g-2', 'ws-3'])
+    })
+  })
+
+  describe('batchDeleteWorkspaceCount', () => {
+    it('counts selected workspaces plus everything inside selected groups', () => {
+      const state = seedBatch()
+      expect(batchDeleteWorkspaceCount(state, ['g-1', 'ws-3'])).toBe(3)
+    })
+
+    it('dedupes a workspace both selected directly and inside a selected group', () => {
+      const state = seedBatch()
+      expect(batchDeleteWorkspaceCount(state, ['g-1', 'ws-1'])).toBe(2)
+    })
+
+    it('ignores unknown ids and empty groups', () => {
+      const state = seedBatch()
+      expect(batchDeleteWorkspaceCount(state, ['g-2', 'ghost'])).toBe(0)
+    })
   })
 })
