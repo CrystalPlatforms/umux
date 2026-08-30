@@ -1,0 +1,18 @@
+[package]
+name = "store_core"
+version = "1.0.2"
+description = "umux shared store library: workspace/settings model, persistence, config paths"
+edition = "2021"
+rust-version = "1.77.2"
+
+# StoreCore is deliberately Tauri-free (#58): both the Tauri app and the
+# upcoming `umux` CLI write the same files through this one implementation,
+# so neither can corrupt the other's store. No I/O beyond plain std::fs.
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

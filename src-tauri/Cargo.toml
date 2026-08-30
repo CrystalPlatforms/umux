@@ -10,6 +10,12 @@ rust-version = "1.77.2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# Cargo workspace (#58): the app package is the root member; StoreCore lives
+# beside it so both build in one workspace. The Tauri CLI keeps invoking cargo
+# from this directory as before.
+[workspace]
+members = [".", "store_core"]
+
 [lib]
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -25,6 +31,7 @@ tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 portable-pty = "0.8"
 tauri-plugin-aptabase = "1.0.0"
+store_core = { path = "store_core" }
 
 [dev-dependencies]
 tempfile = "3"
