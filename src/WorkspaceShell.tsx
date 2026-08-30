@@ -1304,7 +1304,12 @@ export function WorkspaceShell() {
       try {
         await snapshotAndPersist()
       } finally {
-        void getCurrentWindow().destroy()
+        // A denied destroy (#57: the allow-destroy capability was missing, so
+        // the prevented close silently became "X does nothing") must reach the
+        // console — the same rule persist() follows for a rejected save.
+        void getCurrentWindow()
+          .destroy()
+          .catch((e) => console.error('window destroy failed:', e))
       }
     })
     return () => {
