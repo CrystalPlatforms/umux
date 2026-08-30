@@ -1,6 +1,6 @@
 // SettingsDialog — the feature-toggle screen (v0.2 Phase 3 / #27).
 //
-// Presentational modal: it owns no state and makes no Tauri calls. The
+// Presentational modal: it owns no Tauri calls and no app state. The
 // settings object and the invoke('save_settings') flow live in WorkspaceShell
 // (UI glue, verified manually by Adam); this component is the small,
 // testable surface: it renders one switch per toggle (AC1) and reports
@@ -12,12 +12,18 @@
 // field lives on in settings.json for Phase 6's initialization, defaulting
 // to true.
 //
+// Import row (#59, HITL rework 2026-08-30): the "from cmux" item now OPENS
+// the import wizard (CmuxImportWizard — scan → choose with a live preview →
+// apply) instead of applying immediately; this dialog only reports the
+// outcome through its status line. Hidden on Windows (v1.2.0 decision #4).
+//
 // Accessibility: each switch is a real <button role="switch"> with
 // aria-checked mirroring the state, so assistive tech announces it as a
 // toggle. Escape and the header X close the dialog.
 
 import { useEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
+import { isWindowsPlatform } from './importWizard'
 
 type ToggleProps = {
   label: string
@@ -52,8 +58,7 @@ export function SettingsDialog({
   onChange,
   onClose,
   onOpenSettingsFile,
-  onImportCmux,
-  importStatus,
+  onImportWizard,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -62,11 +67,11 @@ export function SettingsDialog({
   // parent to open the file with the platform's default editor (the Tauri
   // invoke lives in WorkspaceShell — this component stays invoke-free).
   onOpenSettingsFile?: () => void
-  // The one-shot cmux import (#54): clicking asks the parent to read cmux's
-  // files (read-only, via the backend) and apply the import plan to the live
-  // tree. The status line reports the outcome either way.
-  onImportCmux?: () => void
-  importStatus?: string | null
+  // The "from cmux" menu item (#59): clicking asks the parent to OPEN the
+  // import wizard (scan → choose → live preview → apply). The wizard itself
+  // renders from WorkspaceShell; Apply closes BOTH dialogs, so this
+  // component stays invoke-free with no outcome line of its own.
+  onImportWizard?: () => void
 }) {
   // Escape closes the dialog — the same dismissal key the rename/create
   // inputs use, so the app has one "back out" reflex everywhere.
@@ -156,12 +161,11 @@ export function SettingsDialog({
           onToggle={(next) => onChange({ portsTooltipEnabled: next })}
         />
 
-        {/* Import row (HITL round): same layout as the switches — label on
-            the left, the action on the right. "Import" (the Create button's
-            style) unfolds a dropdown; today the only source is cmux. The
-            import is one-shot and never overwrites: colliding names get a
-            ` from cmux` suffix. */}
-        {onImportCmux != null && (
+        {/* Import row: same layout as the switches — label on the left, the
+            action on the right. "Import" unfolds a dropdown; its "from cmux"
+            item opens the import WIZARD (#59 rework). Hidden on Windows
+            (v1.2.0 decision #4). */}
+        {onImportWizard != null && !isWindowsPlatform() && (
           <>
             <div className="settings-row">
               <div className="settings-row__text">
@@ -187,7 +191,7 @@ export function SettingsDialog({
                       data-testid="import-cmux"
                       onClick={() => {
                         setImportOpen(false)
-                        onImportCmux()
+                        onImportWizard()
                       }}
                     >
                       from cmux
@@ -196,11 +200,6 @@ export function SettingsDialog({
                 )}
               </div>
             </div>
-            {importStatus != null && (
-              <div className="settings-import__status" role="status">
-                {importStatus}
-              </div>
-            )}
           </>
         )}
 

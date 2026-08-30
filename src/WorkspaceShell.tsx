@@ -91,8 +91,8 @@ import { AgentStatusMachine, type AgentStatus } from './agentStatus'
 import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
+import { CmuxImportWizard } from './CmuxImportWizard'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
-import { parseCmuxSources, applyImportPlan } from './cmuxImport'
 import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
 import { formatPorts, localPtyIds, unionPorts } from './tabPorts'
 
@@ -583,6 +583,44 @@ export function WorkspaceShell() {
   // Windows right-click, macOS Ctrl+click) — those must not close it again.
   const menuOpenedAtRef = useRef(0)
   const [collapsed, setCollapsed] = useState(false)
+
+  // --- Sidebar resize (HITL 2026-08-30) --------------------------------------
+  // The sidebar's right edge is a drag handle: the user widens/narrows it
+  // (collapse/expand stays a separate gesture). Width is RUNTIME-ONLY (like
+  // collapse itself): null = the CSS default. Floor is the default width
+  // (narrower never helps — that's what collapse is for), ceiling ~3/4 of
+  // the window so the terminal area always keeps a working slice.
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(null)
+  const [resizingSidebar, setResizingSidebar] = useState(false)
+  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  const SIDEBAR_MIN_WIDTH = 240
+  const sidebarMaxWidth = () => Math.floor(window.innerWidth * 0.75)
+  const onSidebarResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    sidebarDragRef.current = {
+      startX: e.clientX,
+      startWidth: sidebarWidth ?? SIDEBAR_MIN_WIDTH,
+    }
+    setResizingSidebar(true)
+  }
+  const onSidebarResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = sidebarDragRef.current
+    if (drag == null) return
+    const next = drag.startWidth + (e.clientX - drag.startX)
+    setSidebarWidth(Math.min(Math.max(next, SIDEBAR_MIN_WIDTH), sidebarMaxWidth()))
+  }
+  const onSidebarResizeEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (sidebarDragRef.current == null) return
+    sidebarDragRef.current = null
+    setResizingSidebar(false)
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      // The capture may already be gone (pointerup outside) — nothing to do.
+    }
+  }
 
   // Multi-select (#53): an ordered list of sidebar node ids — workspaces and
   // groups, mixed. RUNTIME-ONLY (never persisted, like the active tab); the
@@ -1219,61 +1257,19 @@ export function WorkspaceShell() {
     )
   }
 
-  // --- One-shot cmux import (#54) -------------------------------------------
-  // The minimal apply path: the backend hands over cmux's two files (read
-  // only), the pure importer parses them into a plan and applies it to the
-  // live tree through the existing ops. No wizard, no preview — the plan is
-  // additive by construction (nothing overwrites; colliding names get a
-  // ` from cmux` suffix), and the status line reports the outcome. A
-  // malformed source throws BEFORE apply, so state stays untouched.
-  const [importStatus, setImportStatus] = useState<string | null>(null)
-  // The status line is transient (HITL): it clears itself after 10 seconds —
-  // one timer at a time, re-armed per message, and cancelled on unmount.
-  const importStatusTimer = useRef<number | null>(null)
-  const showImportStatus = (message: string) => {
-    setImportStatus(message)
-    if (importStatusTimer.current != null) {
-      window.clearTimeout(importStatusTimer.current)
-    }
-    importStatusTimer.current = window.setTimeout(() => {
-      importStatusTimer.current = null
-      setImportStatus(null)
-    }, 10_000)
-  }
-  useEffect(
-    () => () => {
-      if (importStatusTimer.current != null) {
-        window.clearTimeout(importStatusTimer.current)
-      }
-    },
-    [],
-  )
-  const runCmuxImport = () => {
-    void invoke<{ config: string | null; session: string | null }>(
-      'read_cmux_import_sources',
-    )
-      .then((sources) => {
-        try {
-          const plan = parseCmuxSources(sources.config ?? null, sources.session ?? null)
-          if (plan.workspaces.length === 0 && plan.groups.length === 0) {
-            showImportStatus('Nothing to import — no cmux data found.')
-            return
-          }
-          const next = applyImportPlan(stateRef.current, plan)
-          persist(next)
-          showImportStatus(
-            `Imported ${plan.workspaces.length} workspace${plan.workspaces.length === 1 ? '' : 's'} and ${plan.groups.length} group${plan.groups.length === 1 ? '' : 's'} from cmux. Open a workspace to start a shell in it.`,
-          )
-        } catch (e) {
-          showImportStatus(
-            `Import failed: ${e instanceof Error ? e.message : String(e)} State was left untouched.`,
-          )
-        }
-      })
-      .catch((e) => {
-        console.error('read_cmux_import_sources failed:', e)
-        showImportStatus('Import failed: could not read the cmux files.')
-      })
+  // --- cmux import wizard (#59, HITL rework 2026-08-30) -----------------------
+  // Settings → Import → "from cmux" opens the CmuxImportWizard dialog:
+  // scan (read-only) → choose categories with a LIVE preview → apply. The
+  // shell's glue is exactly two things: the read-only source read, and the
+  // persist for Apply — which ALSO closes the Settings dialog (PO call:
+  // Apply = done, straight back to the app; the imported rows in the
+  // sidebar are the confirmation).
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const readWizardSources = () =>
+    invoke<{ config: string | null; session: string | null }>('read_cmux_import_sources')
+  const applyWizardState = (planned: WorkspaceState) => {
+    persist(planned)
+    setSettingsOpen(false)
   }
 
   const muted = !settings.notificationsEnabled
@@ -2405,7 +2401,19 @@ export function WorkspaceShell() {
   return (
     // is-sidebar-collapsed (#39 follow-up): carried on the shell so the tab
     // bar can reserve room for the expand toggle seated before the tabs.
-    <div className={collapsed ? 'shell is-sidebar-collapsed' : 'shell'}>
+    // is-sidebar-resizing (drag resize): col-resize cursor + no text
+    // selection for the whole shell while the edge is being dragged.
+    <div
+      className={
+        collapsed
+          ? resizingSidebar
+            ? 'shell is-sidebar-collapsed is-sidebar-resizing'
+            : 'shell is-sidebar-collapsed'
+          : resizingSidebar
+            ? 'shell is-sidebar-resizing'
+            : 'shell'
+      }
+    >
       {collapsed && (
         <button
           className="sidebar-expand"
@@ -2417,9 +2425,13 @@ export function WorkspaceShell() {
         </button>
       )}
       {/* #39: the sidebar is ALWAYS mounted — collapsing animates its width to
-          zero (is-collapsed) instead of unmounting, so the slide is possible. */}
+          zero (is-collapsed) instead of unmounting, so the slide is possible.
+          The drag handle (HITL 2026-08-30) sits on its right edge; a dragged
+          width is applied inline ONLY while expanded, so it can never win
+          against is-collapsed's width: 0. */}
       <aside
-        className={collapsed ? 'sidebar is-collapsed' : 'sidebar'}
+        className={collapsed ? 'sidebar is-collapsed' : resizingSidebar ? 'sidebar is-resizing' : 'sidebar'}
+        style={!collapsed && sidebarWidth != null ? { width: sidebarWidth } : undefined}
         onContextMenu={(e) => openMenu(e, false)}
         onMouseDown={(e) => {
           if (isMenuPress(e)) openMenu(e, false)
@@ -2436,9 +2448,29 @@ export function WorkspaceShell() {
           }
         }}
       >
+        {/* Drag handle on the right edge (HITL 2026-08-30): widen/narrow the
+            sidebar. Separate gesture from collapse/expand; runtime-only. */}
+        {!collapsed && (
+          <div
+            className="sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            title="Drag to resize the sidebar"
+            data-testid="sidebar-resizer"
+            onPointerDown={onSidebarResizeStart}
+            onPointerMove={onSidebarResizeMove}
+            onPointerUp={onSidebarResizeEnd}
+            onPointerCancel={onSidebarResizeEnd}
+          />
+        )}
         {/* Fixed-width inner column (#39): the sidebar animates its width;
-            this wrapper holds 240px so contents never reflow mid-slide. */}
-        <div className="sidebar-inner">
+            this wrapper holds 240px so contents never reflow mid-slide — it
+            follows a dragged width so rows use the full sidebar. */}
+        <div
+          className="sidebar-inner"
+          style={!collapsed && sidebarWidth != null ? { width: sidebarWidth } : undefined}
+        >
           <div
             className="sidebar-header"
             onContextMenu={(e) => openMenu(e, true)}
@@ -3078,8 +3110,21 @@ export function WorkspaceShell() {
           onChange={applySettings}
           onClose={() => setSettingsOpen(false)}
           onOpenSettingsFile={openSettingsFile}
-          onImportCmux={runCmuxImport}
-          importStatus={importStatus}
+          onImportWizard={() => setWizardOpen(true)}
+        />
+      )}
+
+      {/* The "from cmux" import wizard (#59): scan → choose + live preview →
+          apply. stateRef.current is captured at open time — the modal blocks
+          the app behind it, so the preview cannot race the live tree. Apply
+          persists AND closes Settings (applyWizardState), so both dialogs
+          leave together. */}
+      {wizardOpen && (
+        <CmuxImportWizard
+          liveState={stateRef.current}
+          onReadSources={readWizardSources}
+          onApply={applyWizardState}
+          onClose={() => setWizardOpen(false)}
         />
       )}
 

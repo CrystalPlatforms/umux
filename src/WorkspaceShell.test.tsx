@@ -975,9 +975,13 @@ describe('WorkspaceShell', () => {
       // Fills the tab: percent sizing, not a carved rect.
       expect(zoomed.style.width).toBe('100%')
       expect(zoomed.style.height).toBe('100%')
-      // The covered pane stays in the DOM but hidden; no divider shows.
+      // The covered pane stays in the DOM but hidden; no divider shows
+      // (scoped to the pane area — the sidebar's resize handle is a
+      // separate, always-present separator).
       expect(panes[0].classList.contains('is-hidden')).toBe(true)
-      expect(screen.queryByRole('separator')).toBeNull()
+      expect(
+        within(panes[0].parentElement as HTMLElement).queryByRole('separator'),
+      ).toBeNull()
     })
 
     it('the same button restores the previous layout', async () => {
@@ -3136,20 +3140,29 @@ describe('cmux import (#54)', () => {
     })
   })
 
-  it('the Settings button applies the import plan and reports the outcome (#54)', async () => {
+  it('the wizard applies the import plan on Apply and reports the outcome (#54, #59)', async () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
 
-    // Open Settings (header gear), unfold the Import dropdown, pick cmux.
+    // Open Settings (header gear), unfold the Import dropdown, pick cmux —
+    // the WIZARD opens (scan → choose → apply), nothing imports inline.
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
     fireEvent.click(await screen.findByTestId('import-toggle'))
     fireEvent.click(await screen.findByTestId('import-cmux'))
 
-    // The read went through the read-only backend command…
+    // The scan went through the read-only backend command…
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith('read_cmux_import_sources'),
     )
-    // …the plan applied (one config write), and the status line says so.
+    // …the preview is up; nothing is written before Apply.
+    await screen.findByTestId('wizard-preview-tree')
+    expect(
+      invokeMock.mock.calls.some((c) => c[0] === 'save_workspaces'),
+    ).toBe(false)
+
+    fireEvent.click(screen.getByTestId('wizard-apply'))
+
+    // The plan applied (one config write)…
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith(
         'save_workspaces',
@@ -3159,12 +3172,15 @@ describe('cmux import (#54)', () => {
         }),
       ),
     )
-    expect(await screen.findByRole('status').then((el) => el.textContent)).toContain(
-      'Imported 1 workspace and 1 group',
-    )
+    // …and Apply means DONE: the wizard and the Settings dialog behind it
+    // both close — straight back to the app (PO call, 2026-08-30).
+    await waitFor(() => {
+      expect(screen.queryByTestId('import-wizard-dialog')).toBeNull()
+      expect(screen.queryByTestId('settings-dialog')).toBeNull()
+    })
   })
 
-  it('a malformed cmux file reports the error and writes NOTHING (#54)', async () => {
+  it('a malformed cmux file shows the wizard error and writes NOTHING (#54, #59)', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
       if (cmd === 'read_cmux_import_sources')
@@ -3178,42 +3194,16 @@ describe('cmux import (#54)', () => {
     fireEvent.click(await screen.findByTestId('import-toggle'))
     fireEvent.click(await screen.findByTestId('import-cmux'))
 
-    const status = await screen.findByRole('status')
-    expect(status.textContent).toContain('Import failed')
-    expect(status.textContent).toContain('not valid JSON')
+    const error = await screen.findByTestId('wizard-error')
+    expect(error.textContent).toContain('Import failed')
+    expect(error.textContent).toContain('not valid JSON')
     // State untouched: no config write happened.
     expect(invokeMock.mock.calls.some((c) => c[0] === 'save_workspaces')).toBe(false)
   })
 
-  it('the import status clears itself after 10 seconds (#54, HITL)', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    try {
-      render(<WorkspaceShell />)
-      await vi.waitFor(() =>
-        expect(invokeMock).toHaveBeenCalledWith('load_workspaces'),
-      )
-
-      fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
-      fireEvent.click(await screen.findByTestId('import-toggle'))
-      fireEvent.click(await screen.findByTestId('import-cmux'))
-
-      await vi.waitFor(() =>
-        expect(invokeMock).toHaveBeenCalledWith(
-          'save_workspaces',
-          expect.objectContaining({ workspaces: expect.any(Array) }),
-        ),
-      )
-      expect(screen.getByRole('status')).toBeInTheDocument()
-
-      // Ten seconds later the status is gone on its own.
-      await act(async () => {
-        vi.advanceTimersByTime(10_000)
-      })
-      expect(screen.queryByRole('status')).toBeNull()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
+  // The transient "imported" status line (#54) is GONE since the wizard
+  // rework: Apply closes the Settings dialog with it — there is no outcome
+  // line left to clear itself, so its old 10-second test went with it.
 })
 
 describe('keyboard handoff on switch (HITL, #53 fix round)', () => {

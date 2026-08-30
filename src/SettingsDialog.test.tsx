@@ -154,3 +154,48 @@ describe('SettingsDialog', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 })
+
+
+// --- Import dropdown → wizard (#59 rework) -----------------------------------
+//
+// The "from cmux" item now OPENS the import wizard (rendered by the shell);
+// this dialog only reports upward. The item is absent on Windows (v1.2.0
+// decision #4). The wizard's own behavior lives in CmuxImportWizard.test.tsx.
+describe('SettingsDialog import dropdown (#59 rework)', () => {
+  it('the "from cmux" item reports upward instead of importing inline', () => {
+    const onImportWizard = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onImportWizard={onImportWizard}
+      />,
+    )
+
+    fireEvent.click(getByTestId('import-toggle'))
+    fireEvent.click(getByTestId('import-cmux'))
+
+    expect(onImportWizard).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides the whole import row on Windows', () => {
+    Object.defineProperty(window.navigator, 'platform', {
+      value: 'Win32',
+      configurable: true,
+    })
+    try {
+      const { queryByTestId } = render(
+        <SettingsDialog
+          settings={defaultSettings}
+          onChange={() => {}}
+          onClose={() => {}}
+          onImportWizard={() => {}}
+        />,
+      )
+      expect(queryByTestId('import-toggle')).toBeNull()
+    } finally {
+      delete (window.navigator as { platform?: string }).platform
+    }
+  })
+})

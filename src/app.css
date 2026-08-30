@@ -100,6 +100,7 @@ body {
 }
 
 .sidebar {
+  position: relative;
   width: 240px;
   flex: 0 0 auto;
   background: var(--bg-sidebar);
@@ -108,6 +109,38 @@ body {
      contents are clipped, never reflowed. */
   overflow: hidden;
   transition: width 0.25s ease, border-color 0.25s ease;
+}
+
+/* Drag resize (HITL 2026-08-30): the sidebar follows the pointer 1:1, so the
+   width animation is suspended for the duration of the drag. */
+.sidebar.is-resizing {
+  transition: none;
+}
+
+/* Thin drag handle on the sidebar's right edge — invisible until hovered,
+   then a hairline accent with the col-resize cursor. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+
+.sidebar-resizer:hover,
+.sidebar.is-resizing .sidebar-resizer {
+  background: var(--accent-line);
+  opacity: 0.6;
+}
+
+/* While the edge is dragged, the whole shell signals the gesture: resize
+   cursor everywhere and no accidental text selection. */
+.shell.is-sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* Collapsed (#39): visibility flips at the END of the slide (0s .25s delay)
@@ -1332,8 +1365,122 @@ body.is-dragging * {
   flex-shrink: 0;
 }
 
-.settings-import__status {
-  margin-top: 4px;
+/* Import wizard (#59, HITL rework 2026-08-30): its own dialog, opened from
+   Settings → Import → "from cmux". Scan state first; then categories on the
+   LEFT and the LIVE preview tree on the RIGHT; Apply in the footer. */
+.import-wizard {
+  width: min(640px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.import-wizard__state {
+  padding: 18px 2px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.import-wizard__state.is-error {
+  color: var(--text);
+}
+
+.import-wizard__body {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.import-wizard__scope {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.import-wizard__scope-title {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.import-wizard__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.import-wizard__check input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* The preview half: a fixed-height scroll area so a long cmux capture never
+   stretches the dialog. */
+.import-wizard__preview {
+  min-height: 180px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  padding: 8px 10px;
+}
+
+.import-wizard__preview-empty {
+  color: var(--text-faint);
+  font-size: var(--text-sm);
+  padding: 8px 2px;
+}
+
+.import-wizard__tree,
+.import-wizard__children {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+/* Grouped workspaces sit a step to the RIGHT of their group header — the
+   same nesting picture the sidebar shows after Apply. */
+.import-wizard__children {
+  padding-left: 20px;
+}
+
+.import-wizard__group-name {
+  font-weight: 600;
+}
+
+.import-wizard__group-count {
+  margin-left: 8px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.import-wizard__tabs {
+  margin-left: 8px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.import-wizard__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+}
+
+.import-wizard__hint {
   color: var(--text-faint);
   font-size: var(--text-xs);
 }
