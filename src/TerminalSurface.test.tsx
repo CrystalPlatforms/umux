@@ -119,6 +119,27 @@ describe('TerminalSurface', () => {
     )
   })
 
+  // Bug (2026-08-30, Windows/ConPTY screenshot): a fit that runs between the
+  // first fit and the onResize registration (the ResizeObserver's initial
+  // callback fires before pty_open resolves) changes xterm's geometry but
+  // sends NO resize — the handler does not exist yet — so the shell stays at
+  // stale open-time dimensions forever: lines cut off at the right edge,
+  // output overwriting mid-screen, `clear` clearing only part of the view.
+  // Contract: AFTER the open resolves, the component must send one explicit
+  // resize with the CURRENT dimensions, so shell and renderer agree no matter
+  // what happened while the open was in flight.
+  it('sends an explicit pty_resize with current dimensions after open', async () => {
+    render(<TerminalSurface />)
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('pty_resize', {
+        id: PANEL_ID,
+        cols: 80,
+        rows: 24,
+      }),
+    )
+  })
+
   it('writes matching-id PTY output to xterm', async () => {
     render(<TerminalSurface />)
     await waitFor(() => expect(outputHandler).not.toBeNull())

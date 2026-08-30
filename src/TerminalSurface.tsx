@@ -259,7 +259,17 @@ export function TerminalSurface({
         void invoke(resizeCmd, { id: panelId, cols, rows })
       })
 
+      // Re-fit now that resize reporting is live, then force one explicit
+      // resize with the CURRENT dimensions. Any fit that ran between the first
+      // fit (before open) and the onResize registration above changed xterm's
+      // geometry without reaching the shell — the handler did not exist yet —
+      // leaving it at stale open-time dimensions for the panel's whole life
+      // (Windows/ConPTY showed it as lines cut off at the right edge, output
+      // overwriting mid-screen, and `clear` clearing only part of the view).
+      // The explicit call closes that race: after open, shell and renderer
+      // agree, whatever happened while the open was in flight.
       fitIfVisible()
+      void invoke(resizeCmd, { id: panelId, cols: term.cols, rows: term.rows })
     }).catch((e: unknown) => {
       // Synchronous failure (bad target, empty host/user, spawn error): the
       // backend rejects ssh_open with a friendly message. Catch it so the panel
