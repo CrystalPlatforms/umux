@@ -38,7 +38,17 @@ pub fn windows_config_dir(appdata: &std::path::Path) -> PathBuf {
 ///    location; umux never ran on Windows before, so there is no legacy
 ///    directory to migrate and migrate_legacy_config no-ops)
 ///  - Linux and everything else: `$XDG_CONFIG_HOME/umux` or `~/.config/umux`
+///
+/// `UMUX_CONFIG_DIR` (when set and non-empty) moves the whole store root —
+/// the escape hatch the `umux` CLI test suite uses to point spawned binaries
+/// at a tempdir (#60; the app never sets it). Tested via spawned processes:
+/// an env var is process-global, so in-process unit tests would race.
 pub fn config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("UMUX_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     if cfg!(target_os = "macos") {
         std::env::var("HOME")
             .map(|h| macos_config_dir(std::path::Path::new(&h)))
@@ -108,6 +118,27 @@ pub fn config_path() -> PathBuf {
 /// #27 — same directory, same corruption fallback as workspaces).
 pub fn settings_path() -> PathBuf {
     config_dir().join("settings.json")
+}
+
+/// The terminal-UI store root (#60 assumption): a `term/` sibling under the
+/// same config root, so the `--desk` and `--term` stores can never be
+/// confused yet live in one place a user can find. The TUI that reads it
+/// ships in v1.3.0; the CLI manages it offline today.
+pub fn term_config_dir() -> PathBuf {
+    config_dir().join("term")
+}
+
+/// Where the terminal-UI workspace config lives:
+/// `<config_dir>/term/workspaces.json` — same file name as the desktop
+/// store, same format, different directory.
+pub fn term_config_path() -> PathBuf {
+    term_config_dir().join("workspaces.json")
+}
+
+/// Where the terminal-UI settings live:
+/// `<config_dir>/term/settings.json`.
+pub fn term_settings_path() -> PathBuf {
+    term_config_dir().join("settings.json")
 }
 
 #[cfg(test)]

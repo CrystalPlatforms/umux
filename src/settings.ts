@@ -14,6 +14,10 @@ export type Settings = {
   sessionRestoreEnabled: boolean
   analyticsEnabled: boolean
   portsTooltipEnabled: boolean
+  // #60: written by `umux config set default-launch-mode`; the v1.3.0 TUI
+  // launcher reads it. Carried through here so an app save never erases a
+  // CLI-written value. Defaults to "gui" (Rust Settings::default).
+  defaultLaunchMode: string
 }
 
 export const defaultSettings: Settings = {
@@ -22,6 +26,7 @@ export const defaultSettings: Settings = {
   sessionRestoreEnabled: true,
   analyticsEnabled: true,
   portsTooltipEnabled: true,
+  defaultLaunchMode: 'gui',
 }
 
 /// Coerce an unknown invoke payload into a complete Settings object: missing
@@ -35,5 +40,6 @@ export function coerceSettings(raw: unknown): Settings {
     sessionRestoreEnabled: r.sessionRestoreEnabled ?? defaultSettings.sessionRestoreEnabled,
     analyticsEnabled: r.analyticsEnabled ?? defaultSettings.analyticsEnabled,
     portsTooltipEnabled: r.portsTooltipEnabled ?? defaultSettings.portsTooltipEnabled,
+    defaultLaunchMode: r.defaultLaunchMode ?? defaultSettings.defaultLaunchMode,
   }
 }

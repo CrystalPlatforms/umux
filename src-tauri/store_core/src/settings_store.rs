@@ -58,6 +58,18 @@ pub struct Settings {
     /// query and no tooltip.
     #[serde(default = "default_true")]
     pub ports_tooltip_enabled: bool,
+    /// What to launch when the user starts "umux": `"gui"` (the desktop app,
+    /// today's only reality) or `"tui"` (the terminal UI, v1.3.0 / #60).
+    /// Written today by `umux config set default-launch-mode`; nothing reads
+    /// it until the TUI launcher lands, and a pre-#60 file loads as `"gui"`.
+    #[serde(default = "default_launch_mode")]
+    pub default_launch_mode: String,
+}
+
+/// Serde default for `default_launch_mode`: the GUI is what umux launches
+/// until the TUI exists (v1.3.0).
+fn default_launch_mode() -> String {
+    "gui".into()
 }
 
 impl Default for Settings {
@@ -68,6 +80,7 @@ impl Default for Settings {
             session_restore_enabled: true,
             analytics_enabled: true,
             ports_tooltip_enabled: true,
+            default_launch_mode: default_launch_mode(),
         }
     }
 }
@@ -172,6 +185,7 @@ mod tests {
             session_restore_enabled: false,
             analytics_enabled: false,
             ports_tooltip_enabled: false,
+            default_launch_mode: "tui".into(),
         };
 
         let text = serialize_settings(&s);
@@ -228,6 +242,7 @@ mod tests {
             session_restore_enabled: true,
             analytics_enabled: false,
             ports_tooltip_enabled: true,
+            default_launch_mode: "gui".into(),
         };
 
         SettingsStore::new(path.clone()).save(&s).unwrap();
@@ -279,5 +294,34 @@ mod tests {
         let msg = settings_fallback_warning(ConfigStatus::Corrupted);
         assert!(msg.is_some(), "Corrupted must yield a warning");
         assert!(msg.unwrap().to_lowercase().contains("settings"));
+    }
+
+    // T-S9 (#60 — default-launch-mode: `umux config set default-launch-mode`
+    // persists the launch choice the v1.3.0 TUI launcher will read; until
+    // then nothing consumes it, and the GUI stays the default).
+    #[test]
+    fn default_launch_mode_defaults_to_gui_and_round_trips() {
+        assert_eq!(
+            Settings::default().default_launch_mode,
+            "gui",
+            "the GUI is the launch mode until the TUI exists"
+        );
+
+        let s = Settings {
+            default_launch_mode: "tui".into(),
+            ..Settings::default()
+        };
+        let text = serialize_settings(&s);
+        assert!(
+            text.contains("\"defaultLaunchMode\""),
+            "wire key is camelCase like the rest, got: {text}"
+        );
+        assert_eq!(parse_settings(&text).default_launch_mode, "tui");
+
+        // A file written before the field existed (or hand-trimmed) loads
+        // with the gui default, same as the other defaulted fields.
+        let (back, status) = parse_settings_with_status("{\"notificationsEnabled\":false}");
+        assert_eq!(back.default_launch_mode, "gui");
+        assert_eq!(status, ConfigStatus::Ok, "valid JSON shape — no fallback");
     }
 }

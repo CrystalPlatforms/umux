@@ -1,0 +1,17 @@
+[package]
+name = "umux"
+version = "1.0.2"
+description = "umux command-line interface: offline workspace/config CRUD against the shared store"
+edition = "2021"
+rust-version = "1.77.2"
+
+# The CLI is store_core-only (#60): it knows the store library's API, never
+# the file format, so a CLI write and an app write are the same code path.
+
+[dependencies]
+store_core = { path = "../store_core" }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+store_core = { path = "../store_core" }

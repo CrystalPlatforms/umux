@@ -47,4 +47,15 @@ describe('coerceSettings', () => {
     expect(Object.values(next)).toEqual(expect.arrayContaining([expect.any(Boolean)]))
     expect(Object.values(next).length).toBe(Object.keys(defaultSettings).length)
   })
+
+  // #60: `umux config set default-launch-mode tui` writes defaultLaunchMode
+  // straight into settings.json. coerceSettings is the app's load path — if
+  // it dropped the key, the next app save would silently erase the CLI's
+  // value, so it must carry through and default to "gui" (the Rust
+  // Settings::default) when absent.
+  it('carries a CLI-written defaultLaunchMode through and defaults to gui (#60)', () => {
+    expect(coerceSettings({ defaultLaunchMode: 'tui' }).defaultLaunchMode).toBe('tui')
+    expect(coerceSettings({}).defaultLaunchMode).toBe('gui')
+    expect(defaultSettings.defaultLaunchMode).toBe('gui')
+  })
 })
