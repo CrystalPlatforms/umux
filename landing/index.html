@@ -6,6 +6,17 @@
   <title>umux — terminal workspaces for Linux, Windows & macOS</title>
   <meta name="description" content="umux is an open-source terminal workspace manager: group terminals into workspaces, split them into panels, and get a desktop notification when your AI CLI finishes a task.">
   <link rel="icon" href="assets/umux-favicon.ico">
+  <!-- Link-preview cards (X, Discord, LinkedIn, Slack) render these. -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="umux">
+  <meta property="og:title" content="umux — terminal workspaces for Linux, Windows &amp; macOS">
+  <meta property="og:description" content="Group terminals into workspaces, split them into panels, and get a desktop notification when your AI CLI finishes a task.">
+  <meta property="og:url" content="https://umux.pages.dev/">
+  <meta property="og:image" content="https://umux.pages.dev/assets/og.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The umux main window: workspaces sidebar, terminal tab and the umux logo">
+  <meta name="twitter:card" content="summary_large_image">
   <style>
     :root {
       --bg: #0d1117;
@@ -135,22 +146,129 @@
     .first-run p, .first-run li { color: var(--muted); font-size: 0.95rem; }
     .first-run ul { padding-left: 20px; display: grid; gap: 4px; }
     .first-run a, footer a { color: var(--accent); text-decoration: none; }
-    /* Install-the-CLI section (#65): one command, one code block, quiet note. */
+    /* Install-the-CLI section (#65): centered, terminal-styled, one-click copy. */
     .install-cli { padding-top: 48px; padding-bottom: 24px; }
+    .install-cli .cli-inner { max-width: 640px; margin: 0 auto; text-align: center; }
     .install-cli h2 { font-size: 1.05rem; margin-bottom: 8px; }
     .install-cli p { color: var(--muted); font-size: 0.95rem; }
-    .install-cli pre {
-      margin: 12px 0;
-      padding: 12px 14px;
+    .install-cli .note { font-size: 0.85rem; margin-top: 12px; }
+    .install-cli a { color: var(--accent); text-decoration: none; }
+    .install-cli p code, .feature code {
+      color: var(--accent);
+      font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .terminal {
+      margin: 16px auto 0;
+      text-align: left;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow-x: auto;
-      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
     }
-    .install-cli code { font: inherit; color: var(--accent); }
-    .install-cli .note { font-size: 0.85rem; }
-    .install-cli a { color: var(--accent); text-decoration: none; }
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 12px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .terminal-bar .dot { width: 11px; height: 11px; border-radius: 50%; }
+    .dot-red { background: #ff5f57; }
+    .dot-yellow { background: #febc2e; }
+    .dot-green { background: #28c840; }
+    .terminal-bar .term-title {
+      margin-left: 6px;
+      color: var(--muted);
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .copy-btn {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 4px 12px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--text); border-color: #3b4552; }
+    .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
+    .terminal pre {
+      margin: 0;
+      padding: 14px 16px;
+      overflow-x: auto;
+      font: 13.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .terminal .prompt { color: var(--accent); user-select: none; }
+    .terminal code { color: var(--text); }
+
+    /* New feature tiles carry an icon instead of a screenshot. */
+    .feature-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .feature-head h2 { margin: 0; }
+    .feature-head svg { width: 18px; height: 18px; color: var(--accent); flex: none; }
+    .soon {
+      flex: none;
+      margin-left: auto;
+      padding: 2px 9px;
+      border-radius: 999px;
+      background: rgba(52, 211, 153, 0.12);
+      color: var(--accent);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    /* Final call-to-action band. */
+    .cta { text-align: center; padding-top: 56px; padding-bottom: 8px; }
+    .cta h2 { font-size: clamp(1.3rem, 3vw, 1.7rem); letter-spacing: -0.01em; }
+    .cta p { color: var(--muted); margin-top: 8px; }
+    .cta-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
+
+    /* Motion: subtle, JS-gated (no JS = everything visible), reduced-motion
+       users get content instantly with zero transitions. */
+    html { scroll-behavior: smooth; }
+    .js .reveal {
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+    .js .reveal.in { opacity: 1; transform: none; }
+    .js .reveal-delay-1 { transition-delay: 0.08s; }
+    .js .reveal-delay-2 { transition-delay: 0.16s; }
+    .js .reveal-delay-3 { transition-delay: 0.24s; }
+    .feature, .btn, .icon-btn, .copy-btn {
+      transition: transform 0.18s ease, border-color 0.18s ease,
+                  box-shadow 0.18s ease, background 0.18s ease, color 0.18s ease;
+    }
+    .feature:hover {
+      transform: translateY(-3px);
+      border-color: #3b4552;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    }
+    .btn:hover, .icon-btn:hover { border-color: #3b4552; }
+    .btn:active, .icon-btn:active, .copy-btn:active { transform: scale(0.98); }
+    .btn:focus-visible, .icon-btn:focus-visible, .copy-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .dropdown[open] .menu { animation: menu-in 0.16s ease; }
+    }
+    @keyframes menu-in {
+      from { opacity: 0; transform: translate(-50%, -4px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .js .reveal { opacity: 1; transform: none; transition: none; }
+      .feature:hover, .btn:active, .icon-btn:active { transform: none; }
+    }
     footer { text-align: center; color: var(--muted); font-size: 0.9rem; padding-top: 24px; padding-bottom: 40px; }
     .visually-hidden {
       position: absolute;
@@ -193,6 +311,7 @@
       .hero { padding-top: 32px; }
     }
   </style>
+  <script>document.documentElement.classList.add("js");</script>
 </head>
 <body>
   <header class="top">
@@ -209,13 +328,13 @@
 
   <section class="hero">
     <h1>Terminal workspaces for Linux, Windows &amp; macOS</h1>
-    <p class="pitch">Group your terminals into named workspaces, split them into as many resizable panels as you need, and get a desktop notification the moment your AI CLI finishes a long-running task.</p>
-    <div class="badges">
+    <p class="pitch reveal">Group your terminals into named workspaces, split them into as many resizable panels as you need, and get a desktop notification the moment your AI CLI finishes a long-running task.</p>
+    <div class="badges reveal reveal-delay-1">
       <img src="https://img.shields.io/github/v/release/CrystalPlatforms/umux?label=release" alt="Latest release" height="20">
       <img src="https://img.shields.io/github/license/CrystalPlatforms/umux" alt="License: MIT" height="20">
       <img src="https://img.shields.io/github/downloads/CrystalPlatforms/umux/total" alt="Total downloads" height="20">
     </div>
-    <div class="downloads">
+    <div class="downloads reveal reveal-delay-2">
       <a class="btn btn-primary" data-platform="macos" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_universal.dmg">Download for macOS</a>
       <a class="btn btn-primary" data-platform="windows" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_x64-setup.exe">Download for Windows</a>
       <details class="dropdown">
@@ -229,7 +348,7 @@
       <a class="btn btn-ghost" href="https://github.com/CrystalPlatforms/umux/releases/latest">All releases</a>
     </div>
 
-    <figure class="demo-frame">
+    <figure class="demo-frame reveal reveal-delay-3">
       <img src="assets/umux-first.png" alt="umux — workspaces, tabs and resizable panels"
            onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
       <figcaption class="visually-hidden">umux main window — workspaces, tabs and panels</figcaption>
@@ -237,32 +356,64 @@
   </section>
 
   <section class="features">
-    <div class="feature">
+    <div class="feature reveal">
       <h2>Workspaces &amp; panels</h2>
       <p>One workspace per project, tabs inside it, and any tab splits into as many resizable panels as you need — with a minimum size enforced so nothing collapses. Workspaces persist across restarts and can be pinned to stay on top.</p>
     </div>
-    <div class="feature">
+    <div class="feature reveal">
       <img class="feature-img" loading="lazy" src="assets/umux-agent.png" alt="Agent status indicators in umux panels"
            onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
       <h2>Agent status &amp; notifications</h2>
       <p>umux reads the standard OSC completion signals emitted by AI CLIs (Claude Code, Codex, Gemini CLI, Aider…) and fires a native desktop notification when a long-running task finishes. Each panel shows a live agent status — working, needs-attention, idle — detected from escape sequences and process names, never from your terminal content.</p>
     </div>
-    <div class="feature">
+    <div class="feature reveal">
       <img class="feature-img" loading="lazy" src="assets/umux-session.png" alt="Restored umux session with workspaces and panels"
            onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
       <h2>Session restore</h2>
       <p>Close the app, come back tomorrow: your workspaces, tabs and panel layouts are restored exactly as you left them.</p>
     </div>
+    <div class="feature reveal">
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <h2>Import from cmux</h2>
+      </div>
+      <p>Moving over from cmux? One command — <code>umux import cmux</code> — or the in-app wizard carries your workspaces, groups, working directories and tabs across. Nothing is overwritten: colliding names get a <code>from cmux</code> suffix, and cmux's own files stay read-only.</p>
+    </div>
+    <div class="feature reveal">
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <h2>Import from herdr</h2>
+        <span class="soon">Coming soon</span>
+      </div>
+      <p>On the roadmap: the same one-step import for herdr — workspaces, layout and agent sessions carried over, so switching costs you nothing.</p>
+    </div>
+    <div class="feature reveal">
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <h2>Embedded terminal</h2>
+        <span class="soon">Coming soon</span>
+      </div>
+      <p>In the works: a true terminal surface — colors, cursor movement, alternate screen — so vim, htop and fzf render exactly right, opening your own shell (<code>$SHELL</code>; PowerShell on Windows).</p>
+    </div>
   </section>
 
-  <section class="install-cli" id="install-cli">
-    <h2>Install the CLI</h2>
-    <p>Prefer the terminal? This drops the <code>umux</code> command-line tool into <code>~/.local/bin</code> — it reads and writes the same store as the desktop app.</p>
-    <pre><code>curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh</code></pre>
-    <p class="note">macOS and Linux (x86_64). Look before you leap: append <code>-- --dry-run</code> to preview what it would do. The desktop installers already carry the CLI too — details in the <a href="https://github.com/CrystalPlatforms/umux#umux-on-your-path" target="_blank" rel="noopener">README</a>.</p>
+  <section class="install-cli reveal" id="install-cli">
+    <div class="cli-inner">
+      <h2>Install the CLI</h2>
+      <p>Prefer the terminal? This drops the <code>umux</code> command-line tool into <code>~/.local/bin</code> — it reads and writes the same store as the desktop app.</p>
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="dot dot-red"></span><span class="dot dot-yellow"></span><span class="dot dot-green"></span>
+          <span class="term-title">sh</span>
+          <button class="copy-btn" type="button" data-copy aria-label="Copy the install command">Copy</button>
+        </div>
+        <pre><span class="prompt" aria-hidden="true">$ </span><code>curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh</code></pre>
+      </div>
+      <p class="note">Look before you leap: append <code>-- --dry-run</code> to preview what it would do. The CLI manages umux's saved store — it can't control a running app live yet; that's on the roadmap for a future version. macOS and Linux (x86_64). The desktop installers already carry the CLI too — details in the <a href="https://github.com/CrystalPlatforms/umux#umux-on-your-path" target="_blank" rel="noopener">README</a>.</p>
+    </div>
   </section>
 
-  <section class="first-run">
+  <section class="first-run reveal">
     <h2>First run — unsigned builds</h2>
     <p>umux is free &amp; open source and ships without a paid code-signing certificate, so your system may ask for confirmation once:</p>
     <ul>
@@ -271,6 +422,15 @@
       <li><strong>Linux:</strong> AppImage needs <code>chmod +x</code> once; .deb/.rpm install normally.</li>
     </ul>
     <p><a href="https://github.com/CrystalPlatforms/umux#installation">Full installation instructions →</a></p>
+  </section>
+
+  <section class="cta reveal">
+    <h2>Ready to run your terminals in umux?</h2>
+    <p>Free &amp; open source — no accounts, no telemetry, no cookies.</p>
+    <div class="cta-actions">
+      <a class="btn btn-primary" id="cta-download" href="https://github.com/CrystalPlatforms/umux/releases/latest">Download umux</a>
+      <a class="btn btn-ghost" href="https://github.com/CrystalPlatforms/umux" target="_blank" rel="noopener">Star on GitHub</a>
+    </div>
   </section>
 
   <footer>
@@ -324,6 +484,75 @@
           openDialog("Installing umux on Linux", (install[key] || "") + extra);
         });
       });
+
+      // Scroll-reveal: hide only when JS is running (html.js), show each
+      // section as it enters the viewport; no-JS and reduced-motion users
+      // see everything instantly (CSS handles both).
+      var revealEls = document.querySelectorAll(".reveal");
+      if ("IntersectionObserver" in window) {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (en) {
+            if (en.isIntersecting) {
+              en.target.classList.add("in");
+              io.unobserve(en.target);
+            }
+          });
+        }, { threshold: 0.12, rootMargin: "0px 0px -40px 0px" });
+        revealEls.forEach(function (el) { io.observe(el); });
+      } else {
+        revealEls.forEach(function (el) { el.classList.add("in"); });
+      }
+
+      // One-click copy of the CLI install command.
+      var copyBtn = document.querySelector("[data-copy]");
+      if (copyBtn) {
+        copyBtn.addEventListener("click", function () {
+          var cmd = document.querySelector(".terminal code");
+          if (!cmd) return;
+          var done = function () {
+            copyBtn.classList.add("copied");
+            copyBtn.textContent = "Copied!";
+            setTimeout(function () {
+              copyBtn.classList.remove("copied");
+              copyBtn.textContent = "Copy";
+            }, 1600);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(cmd.textContent).then(done, function () {});
+          } else {
+            try {
+              var range = document.createRange();
+              range.selectNodeContents(cmd);
+              var sel = window.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+              document.execCommand("copy");
+              sel.removeAllRanges();
+              done();
+            } catch (e) { /* clipboard unavailable — the user can still select manually */ }
+          }
+        });
+      }
+
+      // Final CTA: point the single button at the visitor's platform.
+      // Linux/unknown goes to the release page to pick a package format.
+      var cta = document.getElementById("cta-download");
+      if (cta) {
+        var ua = navigator.userAgent;
+        var pick = /Win/i.test(ua)
+          ? ["windows", "Download for Windows"]
+          : /Mac/i.test(ua)
+            ? ["macos", "Download for macOS"]
+            : null;
+        var source = pick && document.querySelector('a[data-platform="' + pick[0] + '"]');
+        if (source) {
+          cta.href = source.href;
+          cta.textContent = pick[1];
+          cta.setAttribute("data-platform", pick[0]);
+        } else {
+          cta.textContent = "Download for Linux";
+        }
+      }
     })();
   </script>
 

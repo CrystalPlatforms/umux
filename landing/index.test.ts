@@ -222,14 +222,16 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(html).not.toMatch(/demo\.gif|screenshot-(linux|macos|windows)\.png/);
     });
 
-    it("leads with the one-line pitch and the three v1 feature highlights", () => {
-        // Issue #35 content list: hero pitch + exactly three highlights —
-        // workspaces & panels, agent status & notifications, session restore.
+    it("leads with the one-line pitch and the six feature tiles", () => {
+        // Hero pitch + six tiles: the three v1 highlights (workspaces & panels,
+        // agent status & notifications, session restore) plus import from cmux
+        // (shipped), import from herdr and embedded terminal (both announced as
+        // not-yet-available).
         const doc = parse();
         expect(doc.querySelector("h1")?.textContent ?? "").toMatch(/terminal workspace/i);
 
         const features = [...doc.querySelectorAll(".feature")];
-        expect(features, "expected exactly three feature highlights").toHaveLength(3);
+        expect(features, "expected six feature tiles").toHaveLength(6);
         const text = features
             .map((f) => f.textContent?.toLowerCase() ?? "")
             .join("\n");
@@ -238,6 +240,34 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(text).toMatch(/agent status/);
         expect(text).toMatch(/notification/);
         expect(text).toMatch(/session restore/);
+        expect(text).toMatch(/import from cmux/);
+        expect(text).toMatch(/import from herdr/);
+        expect(text).toMatch(/embedded terminal/);
+        // Unbuilt features must say so up front on their tiles.
+        const byHeading = (re: RegExp) =>
+            features.find((f) => re.test(f.querySelector("h2")?.textContent ?? ""));
+        for (const tile of [byHeading(/herdr/i), byHeading(/embedded terminal/i)]) {
+            expect(tile?.textContent ?? "").toMatch(/coming soon/i);
+        }
+    });
+
+    it("renders link-preview meta (Open Graph / Twitter card)", () => {
+        // Sharing the URL on X/Discord/LinkedIn must produce a rich card:
+        // title, description and the 1200x630 preview image served from the
+        // Pages domain.
+        const doc = parse();
+        expect(
+            doc.querySelector('meta[property="og:title"]')?.getAttribute("content"),
+        ).toMatch(/umux/i);
+        expect(
+            doc.querySelector('meta[property="og:description"]')?.getAttribute("content"),
+        ).toBeTruthy();
+        expect(doc.querySelector('meta[property="og:image"]')?.getAttribute("content")).toBe(
+            "https://umux.pages.dev/assets/og.jpg",
+        );
+        expect(doc.querySelector('meta[name="twitter:card"]')?.getAttribute("content")).toBe(
+            "summary_large_image",
+        );
     });
 
     it("warns about unsigned builds and links to the install docs", () => {
@@ -356,6 +386,7 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         // The section must carry the EXACT command a visitor copies — piped
         // straight from the repo's main branch, matching where install.sh
         // actually lives. No vanity text may replace the copyable line.
+        // The terminal-styled block must also expose the one-click copy button.
         const doc = parse();
         const section = doc.querySelector("section.install-cli");
         expect(section, "install-cli section missing").toBeTruthy();
@@ -364,6 +395,10 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(code).toBe(
             "curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh",
         );
+        expect(
+            section!.querySelector("button[data-copy]"),
+            "one-click copy button missing",
+        ).toBeTruthy();
     });
 
     it("tells visitors how to preview the script before running it", () => {
@@ -372,5 +407,38 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         const doc = parse();
         const text = doc.querySelector("section.install-cli")?.textContent ?? "";
         expect(text).toMatch(/--dry-run/);
+    });
+
+    it("is upfront that the CLI cannot live-control a running app yet", () => {
+        // The CLI manages the saved store only; live control of a running app
+        // is roadmap (future version). The section must set that expectation
+        // so nobody installs the CLI expecting a remote control.
+        const doc = parse();
+        const text = doc.querySelector("section.install-cli")?.textContent ?? "";
+        expect(text).toMatch(/future version/i);
+    });
+
+    it("closes with a final call-to-action pointing at the downloads", () => {
+        // After all the content, a closing band with one primary download
+        // button (JS swaps it to the visitor's platform) and a GitHub link.
+        const doc = parse();
+        const cta = doc.querySelector(".cta");
+        expect(cta, "cta section missing").toBeTruthy();
+        const primary = cta!.querySelector("a.btn-primary");
+        expect(primary?.getAttribute("href")).toMatch(
+            /^https:\/\/github\.com\/CrystalPlatforms\/umux\/releases\/latest/,
+        );
+    });
+
+    it("gates animations behind JS and honors reduced motion", () => {
+        // Reveal-hiding may only apply under `html.js` (set by a tiny head
+        // script), so a no-JS visitor never sees blank sections. A
+        // prefers-reduced-motion block must undo the motion for people who
+        // opt out of animations.
+        const doc = parse();
+        expect(doc.querySelector("script")?.textContent).toContain('classList.add("js")');
+        const style = doc.querySelector("style")?.textContent ?? "";
+        expect(style).toMatch(/\.js \.reveal\s*\{/);
+        expect(style).toContain("prefers-reduced-motion: reduce");
     });
 });

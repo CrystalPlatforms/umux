@@ -23,6 +23,7 @@ samymi nazwami. **Podmiana = skopiowanie nowego pliku pod tą samą nazwą**
 | `assets/umux-first.png` | duży obraz w hero (główne okno: workspaces, taby, panele) |
 | `assets/umux-agent.png` | karta „Agent status & notifications" |
 | `assets/umux-session.png` | karta „Session restore" |
+| `assets/og.jpg` | podgląd linku na X/Discord/LinkedIn (meta `og:image`, 1200×630) |
 | `assets/umux-logo.png` | logo w nagłówku |
 | `assets/umux-favicon.ico` | ikona karty przeglądarki |
 
@@ -34,6 +35,11 @@ Jeśli obrazek nie istnieje, w jego miejscu pojawia się ładny placeholder
   dialog z komendą instalacji (chmod +x / apt install / dnf install).
 - „Download for Windows" i „Download for macOS" po kliknięciu pokazują
   dialog z podziękowaniem i życzeniami.
+- Sekcja „Install the CLI": przycisk **Copy** kopiuje komendę (feedback
+  „Copied!"), a finalny przycisk CTA na dole sam dobiera platformę
+  (Windows/macOS z przeglądarki; Linux → strona release'u).
+- Animacje: sekcje delikatnie wjeżdżają przy scrollu (klasa `.reveal`);
+  bez JS i przy `prefers-reduced-motion` wszystko widać od razu.
 Teksty dialogów edytujesz w `landing/index.html` w bloku `<script>` na dole
 (zmienne `thanks` i `install`).
 
@@ -72,15 +78,16 @@ darmowy plan wymaga niekomercyjnego użytku (do 100 tys. wejść/mies.).
 
 Linki używają wzorca GitHuba `releases/latest/download/<nazwa>` — zawsze
 wskazują najnowszy release, ale **nazwy plików zawierają numer wersji**.
-Po każdym release podmień numer w 5 miejscach w `index.html`
-(na dziś: `1.0.2` → np. `1.0.3`):
+Po każdym release podmień numer w `index.html`
+(na dziś: `1.0.4` → np. `1.0.5`) — w linkach download **i w tekstach
+dialogów** dla Linuksa (te same nazwy plików):
 
 ```
-umux_1.0.2_amd64.AppImage
-umux_1.0.2_amd64.deb
-umux-1.0.2-1.x86_64.rpm
-umux_1.0.2_universal.dmg
-umux_1.0.2_x64-setup.exe
+umux_1.0.4_amd64.AppImage
+umux_1.0.4_amd64.deb
+umux-1.0.4-1.x86_64.rpm
+umux_1.0.4_universal.dmg
+umux_1.0.4_x64-setup.exe
 ```
 
 Test Ci przypomni, jeśli któraś nazwa się rozjedzie z tym, co produkuje CI
