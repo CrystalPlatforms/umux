@@ -135,6 +135,22 @@
     .first-run p, .first-run li { color: var(--muted); font-size: 0.95rem; }
     .first-run ul { padding-left: 20px; display: grid; gap: 4px; }
     .first-run a, footer a { color: var(--accent); text-decoration: none; }
+    /* Install-the-CLI section (#65): one command, one code block, quiet note. */
+    .install-cli { padding-top: 48px; padding-bottom: 24px; }
+    .install-cli h2 { font-size: 1.05rem; margin-bottom: 8px; }
+    .install-cli p { color: var(--muted); font-size: 0.95rem; }
+    .install-cli pre {
+      margin: 12px 0;
+      padding: 12px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow-x: auto;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .install-cli code { font: inherit; color: var(--accent); }
+    .install-cli .note { font-size: 0.85rem; }
+    .install-cli a { color: var(--accent); text-decoration: none; }
     footer { text-align: center; color: var(--muted); font-size: 0.9rem; padding-top: 24px; padding-bottom: 40px; }
     .visually-hidden {
       position: absolute;
@@ -200,14 +216,14 @@
       <img src="https://img.shields.io/github/downloads/CrystalPlatforms/umux/total" alt="Total downloads" height="20">
     </div>
     <div class="downloads">
-      <a class="btn btn-primary" data-platform="macos" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_universal.dmg">Download for macOS</a>
-      <a class="btn btn-primary" data-platform="windows" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_x64-setup.exe">Download for Windows</a>
+      <a class="btn btn-primary" data-platform="macos" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_universal.dmg">Download for macOS</a>
+      <a class="btn btn-primary" data-platform="windows" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_x64-setup.exe">Download for Windows</a>
       <details class="dropdown">
         <summary class="btn btn-primary">Download for Linux</summary>
         <div class="menu">
-          <a data-install="AppImage" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_amd64.AppImage">.AppImage — any distro</a>
-          <a data-install=".deb" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.2_amd64.deb">.deb — Ubuntu / Debian</a>
-          <a data-install=".rpm" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux-1.0.2-1.x86_64.rpm">.rpm — Fedora / openSUSE</a>
+          <a data-install="AppImage" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_amd64.AppImage">.AppImage — any distro</a>
+          <a data-install=".deb" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_amd64.deb">.deb — Ubuntu / Debian</a>
+          <a data-install=".rpm" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux-1.0.4-1.x86_64.rpm">.rpm — Fedora / openSUSE</a>
         </div>
       </details>
       <a class="btn btn-ghost" href="https://github.com/CrystalPlatforms/umux/releases/latest">All releases</a>
@@ -237,6 +253,13 @@
       <h2>Session restore</h2>
       <p>Close the app, come back tomorrow: your workspaces, tabs and panel layouts are restored exactly as you left them.</p>
     </div>
+  </section>
+
+  <section class="install-cli" id="install-cli">
+    <h2>Install the CLI</h2>
+    <p>Prefer the terminal? This drops the <code>umux</code> command-line tool into <code>~/.local/bin</code> — it reads and writes the same store as the desktop app.</p>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh</code></pre>
+    <p class="note">macOS and Linux (x86_64). Look before you leap: append <code>-- --dry-run</code> to preview what it would do. The desktop installers already carry the CLI too — details in the <a href="https://github.com/CrystalPlatforms/umux#umux-on-your-path" target="_blank" rel="noopener">README</a>.</p>
   </section>
 
   <section class="first-run">
@@ -280,13 +303,13 @@
       var install = {
         "AppImage":
           "<p>No install needed — make it executable and run:</p>" +
-          "<code>chmod +x umux_1.0.2_amd64.AppImage &amp;&amp; ./umux_1.0.2_amd64.AppImage</code>",
+          "<code>chmod +x umux_1.0.4_amd64.AppImage &amp;&amp; ./umux_1.0.4_amd64.AppImage</code>",
         ".deb":
           "<p>Install from the downloaded file:</p>" +
-          "<code>sudo apt install ./umux_1.0.2_amd64.deb</code>",
+          "<code>sudo apt install ./umux_1.0.4_amd64.deb</code>",
         ".rpm":
           "<p>Install from the downloaded file:</p>" +
-          "<code>sudo dnf install ./umux-1.0.2-1.x86_64.rpm</code> (openSUSE: <code>zypper in</code>)",
+          "<code>sudo dnf install ./umux-1.0.4-1.x86_64.rpm</code> (openSUSE: <code>zypper in</code>)",
       };
       document.querySelectorAll("[data-platform]").forEach(function (a) {
         a.addEventListener("click", function () {

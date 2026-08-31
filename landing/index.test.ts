@@ -84,9 +84,9 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
             a.getAttribute("href"),
         );
         for (const asset of [
-            "umux_1.0.2_amd64.AppImage",
-            "umux_1.0.2_amd64.deb",
-            "umux-1.0.2-1.x86_64.rpm",
+            "umux_1.0.4_amd64.AppImage",
+            "umux_1.0.4_amd64.deb",
+            "umux-1.0.4-1.x86_64.rpm",
         ]) {
             expect(
                 menuHrefs.some((h) => h?.endsWith(asset)),
@@ -138,11 +138,11 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         );
         const base = "https://github.com/CrystalPlatforms/umux/releases/latest/download";
         const assets = [
-            "umux_1.0.2_amd64.AppImage", // Linux
-            "umux_1.0.2_amd64.deb", // Linux
-            "umux-1.0.2-1.x86_64.rpm", // Linux
-            "umux_1.0.2_universal.dmg", // macOS (universal)
-            "umux_1.0.2_x64-setup.exe", // Windows (NSIS only — no .msi)
+            "umux_1.0.4_amd64.AppImage", // Linux
+            "umux_1.0.4_amd64.deb", // Linux
+            "umux-1.0.4-1.x86_64.rpm", // Linux
+            "umux_1.0.4_universal.dmg", // macOS (universal)
+            "umux_1.0.4_x64-setup.exe", // Windows (NSIS only — no .msi)
         ];
         for (const asset of assets) {
             expect(
@@ -294,9 +294,9 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         // Picking a package in the dropdown starts the download AND opens a
         // dialog with the install command matching that exact format.
         const cases: [string, RegExp, string][] = [
-            ["AppImage", /chmod \+x/, "umux_1.0.2_amd64.AppImage"],
-            [".deb", /apt install/, "umux_1.0.2_amd64.deb"],
-            [".rpm", /dnf install/, "umux-1.0.2-1.x86_64.rpm"],
+            ["AppImage", /chmod \+x/, "umux_1.0.4_amd64.AppImage"],
+            [".deb", /apt install/, "umux_1.0.4_amd64.deb"],
+            [".rpm", /dnf install/, "umux-1.0.4-1.x86_64.rpm"],
         ];
         for (const [format, command, file] of cases) {
             const doc = pageWithScripts();
@@ -348,5 +348,29 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         const doc = parse();
         const style = doc.querySelector("style")?.textContent ?? "";
         expect(style).toMatch(/\.btn\s*{[^}]*min-height:\s*44px/);
+    });
+
+    // --- Install-the-CLI section (#65, Phase 6) -----------------------------
+
+    it("shows the Install-the-CLI section with the curl | sh one-liner", () => {
+        // The section must carry the EXACT command a visitor copies — piped
+        // straight from the repo's main branch, matching where install.sh
+        // actually lives. No vanity text may replace the copyable line.
+        const doc = parse();
+        const section = doc.querySelector("section.install-cli");
+        expect(section, "install-cli section missing").toBeTruthy();
+        expect(section!.querySelector("h2")?.textContent).toMatch(/install the cli/i);
+        const code = section!.querySelector("pre code")?.textContent ?? "";
+        expect(code).toBe(
+            "curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh",
+        );
+    });
+
+    it("tells visitors how to preview the script before running it", () => {
+        // Running piped scripts blind is bad practice — the section must show
+        // the --dry-run form so the cautious path is the documented one.
+        const doc = parse();
+        const text = doc.querySelector("section.install-cli")?.textContent ?? "";
+        expect(text).toMatch(/--dry-run/);
     });
 });

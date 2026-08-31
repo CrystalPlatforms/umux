@@ -328,7 +328,13 @@ ln -sf "$PWD/squashfs-root/usr/bin/umux" ~/.local/bin/umux
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 ```
 
-Build it from source instead (it is part of the Cargo workspace). Note for contributors: `src-tauri/binaries/` (the sidecar copy used by the installers) is a gitignored build artifact — if `tauri dev` ever complains about it, generate it once with `node scripts/bundle-cli.mjs`:
+Build it from source instead (it is part of the Cargo workspace). Or install it **without the app** straight from the latest release (macOS, Linux x86_64 — review with `-- --dry-run` appended):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh
+```
+
+Note for contributors: `src-tauri/binaries/` (the sidecar copy used by the installers) is a gitignored build artifact — if `tauri dev` ever complains about it, generate it once with `node scripts/bundle-cli.mjs`:
 
 ```bash
 cd src-tauri
