@@ -61,8 +61,8 @@ if (triple === 'universal-apple-darwin') {
   for (const arch of ['aarch64-apple-darwin', 'x86_64-apple-darwin']) {
     run(`cargo build --release -p umux --target ${arch}`)
   }
-  const fat = path.join(outDir, 'umux-universal-apple-darwin')
   mkdirSync(outDir, { recursive: true })
+  const fat = path.join(outDir, 'umux-universal-apple-darwin')
   rmSync(fat, { force: true })
   run(
     'lipo -create ' +
@@ -70,7 +70,17 @@ if (triple === 'universal-apple-darwin') {
       'target/x86_64-apple-darwin/release/umux ' +
       `-output ${path.relative(srcTauri, fat)}`,
   )
-  console.log(`[bundle-cli] sidecar ready: ${fat} (universal)`)
+  // The BUNDLER wants the fat binary, but tauri-build validates the sidecar
+  // per single-arch triple while it compiles each half of the universal app
+  // (CI failure 2026-08-31: "resource path binaries/umux-aarch64-apple-darwin
+  // doesn't exist") — so the lipo output is published under all three names.
+  for (const name of [
+    'umux-aarch64-apple-darwin',
+    'umux-x86_64-apple-darwin',
+  ]) {
+    copyFileSync(fat, path.join(outDir, name))
+  }
+  console.log(`[bundle-cli] sidecar ready: ${fat} (+ per-arch copies)`)
 } else {
   run(`cargo build --release -p umux --target ${triple}`)
   const exe = triple.includes('windows') ? '.exe' : ''
