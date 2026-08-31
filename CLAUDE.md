@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 umux is an open-source terminal workspace manager (a "cmux alternative") for **Linux (Ubuntu/Wayland), Windows, and macOS**. It's a single Tauri v2 desktop app with its own embedded terminal surface — not a tool that manipulates external windows. Users group terminals into named **workspaces** (typically one per project), each holding **terminal tabs** (separate terminal windows, since issue #37's rework) that split into **any number of resizable panels** (unlimited from v0.2.0; originally capped at two). The app inspects the terminal byte stream for AI-CLI completion signals (OSC 9;9 / OSC 99 / OSC 777 escape sequences, which Claude Code emits automatically) and fires a native desktop notification when a long-running task finishes.
 
-The formal spec is the PRD at `plans/umux-prd.md` (user stories, constraints, Roadmap); `README.md` is the user-facing guide (install, build). Keep both in sync when scope changes; discovery decisions from August 2026 live in `plans/umux-2.0-plan.md`. **Implementation status: v0.1 shipped** (Linux; all core modules exist — see "Repo layout notes"). Cross-platform builds, unlimited panels, agent status, Settings, and session restore are planned per the PRD Roadmap (v0.2.0/v1.0.0).
+The formal spec is the master PRD at `plans/umux-prd.md` (user stories, constraints, Roadmap); `README.md` is the user-facing guide (install, build). Keep both in sync when scope changes. Each roadmap version also has a per-version PRD extract at `plans/umux-vX.Y.Z-prd.md` (v0.2.0, v1.0.0, v1.2.0, v1.3.0, v1.4.0, v1.5.0, v2.0 — shipped ones are marked historical). **Implementation status: the v1.2.0 roadmap scope is fully shipped** (latest release v1.0.4, 2026-08-31 — Linux, Windows, macOS; unlimited panels, agent status, Settings, session restore, cmux import, offline `umux` CLI, in-app updates). **Next build target: v1.3.0** (umux Terminal TUI + live CLI/socket at full parity + herdr importer — the release is gated on the TUI working on all three platforms), followed by v1.4.0 (agent UX + native menus) and v1.5.0 (Windows shell picker + sidebar polish) per the PRD Roadmap.
 
 ## Commands
 
@@ -62,7 +62,7 @@ The modules marked *(deep)* are intended to have small interfaces hiding large, 
 
 - Frontend sources: `src/` — entry `main.tsx` → `App.tsx` (currently renders `<EmptyState />`).
 - Backend sources: `src-tauri/src/` — `main.rs` calls `app_lib::run()` in `lib.rs`. The Cargo package is named `app` (lib `app_lib`).
-- Planning artifacts: `plans/` (`umux-prd.md` = formal PRD with Roadmap, `umux-plan.md` = implementation plan from `/carve`, `umux-2.0-plan.md` = discovery decisions, Aug 2026). The PRD drives `/carve` and `/dispatch` — **check what is actually implemented before assuming any planned component exists.**
+- Planning artifacts: `plans/` — `umux-prd.md` is the master PRD (source of truth) and each roadmap version has a per-version extract `umux-vX.Y.Z-prd.md` (v0.2.0 → v2.0). Implementation plans from `/carve` land in `plans/` when created. Discovery decisions are merged into the PRDs — the old standalone discovery/plan files were removed in the 2026-08-31 cleanup. The PRD drives `/carve` and `/dispatch` — **check what is actually implemented before assuming any planned component exists.**
 - `dist/`, `vite.config.js`, and `*.tsbuildinfo` are generated artifacts and gitignored — don't hand-edit them.
 
 ## Working on this repo
