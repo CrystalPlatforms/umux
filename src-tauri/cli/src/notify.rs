@@ -71,6 +71,15 @@ fn platform_show(summary: &str, body: &str) -> Result<(), String> {
     run_tool(command, "notify-send")
 }
 
+// macOS attribution (issue #68, deliberate decision): a bare CLI process
+// cannot post through UNUserNotificationCenter — the system refuses unbundled
+// processes, so the banner keeps the "Script Editor" attribution. The
+// alternative (a terminal-notifier-style helper .app) was evaluated and
+// deferred: it means shipping and locating a second bundle next to every CLI
+// install path (dmg / .deb / NSIS) plus a notification-permission prompt for
+// an unsigned helper — heavy packaging for a cosmetic gain, since title and
+// body are already correct. The BUNDLED APP does show umux attribution (see
+// lib.rs, BundledNotifier); this binary keeps osascript. Revisit on demand.
 #[cfg(target_os = "macos")]
 fn platform_show(summary: &str, body: &str) -> Result<(), String> {
     let mut command = std::process::Command::new("osascript");

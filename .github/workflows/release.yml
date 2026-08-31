@@ -44,11 +44,20 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Issue #66: klucz podpisujący aktualizacje (HITL — Adam generuje
+          # `tauri signer generate` i wpisuje sekrety). Bez tych sekretów
+          # build się nie powiedzie, bo tauri.conf.json włącza
+          # createUpdaterArtifacts — bundle aktualizacji MUSI być podpisany.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.event.release.tag_name }}
           releaseName: ${{ github.event.release.name }}
           releaseDraft: false
           prerelease: false
+          # Issue #66: dołącz latest.json (manifest aktualizacji); tauri-action
+          # scala platformy, gdy kolejne joby publikują swoje wpisy.
+          includeUpdaterJson: true
           # budujemy tylko pakiet Linux (deb + AppImage)
           args: --target x86_64-unknown-linux-gnu
 
@@ -77,11 +86,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Issue #66: podpisywanie bundle'a aktualizacji (.app.tar.gz) —
+          # jsame sekrety co na Linux/Windows (HITL: Adam generuje klucz).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.event.release.tag_name }}
           releaseName: ${{ github.event.release.name }}
           releaseDraft: false
           prerelease: false
+          # Issue #66: latest.json w release — wpis darwin (uniwersalny)
+          includeUpdaterJson: true
           # .app + .dmg uniwersalny (Apple Silicon i Intel w jednym)
           args: --target universal-apple-darwin
 
@@ -109,10 +124,18 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Issue #66: podpisywanie bundle'a aktualizacji (NSIS) — te same
+          # sekrety co na Linux/macOS (HITL: Adam generuje klucz).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.event.release.tag_name }}
           releaseName: ${{ github.event.release.name }}
           releaseDraft: false
           prerelease: false
+          # Issue #66: latest.json w release — wpis windows-x86_64
+          includeUpdaterJson: true
+          # Aktualizacje Windows biorą instalator NSIS (nie .msi) jako bundle
+          updaterJsonPreferNsis: true
           # Instalator NSIS: umux_<wersja>_x64-setup.exe
           args: --bundles nsis

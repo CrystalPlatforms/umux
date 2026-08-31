@@ -95,6 +95,15 @@ import { CmuxImportWizard } from './CmuxImportWizard'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
 import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
 import { formatPorts, localPtyIds, unionPorts } from './tabPorts'
+import {
+  defaultUpdaterApi,
+  downloadProgressText,
+  runCheck,
+  runInstall,
+  UpdateFlowError,
+  type UpdateState,
+  type UpdateResource,
+} from './updater'
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
@@ -1256,6 +1265,73 @@ export function WorkspaceShell() {
       console.error('open_settings_file failed:', e),
     )
   }
+
+  // --- App updates (issue #66) -----------------------------------------------
+  // GitHub Releases is the ONLY source (zero-cost policy); the flows live in
+  // updater.ts, the plugin in Rust. The startup check is deliberately QUIET:
+  // offline, a release without latest.json, or an unconfigured pubkey never
+  // surface at boot — only a FOUND update becomes visible (the banner). The
+  // Settings row shows the same state machine, including its error states.
+  const [updateState, setUpdateState] = useState<UpdateState>({ kind: 'idle' })
+  // The plugin's Update handle survives between check and install; null means
+  // nothing was found yet (and keeps the banner hidden even in error states).
+  const [updateResource, setUpdateResource] = useState<UpdateResource | null>(null)
+  const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false)
+
+  const settleCheck = (result: { state: UpdateState; update: UpdateResource | null }) => {
+    setUpdateResource(result.update)
+    setUpdateState(result.state)
+  }
+
+  const checkForUpdates = () => {
+    setUpdateState({ kind: 'checking' })
+    runCheck(defaultUpdaterApi)
+      .then(settleCheck)
+      .catch((e) =>
+        setUpdateState(
+          e instanceof UpdateFlowError
+            ? e.state
+            : { kind: 'error', errorKind: 'unknown', message: String(e) },
+        ),
+      )
+  }
+
+  const installUpdate = () => {
+    if (updateResource == null) return
+    setUpdateState({ kind: 'downloading', received: 0, total: null })
+    runInstall(defaultUpdaterApi, updateResource, (received, total) =>
+      setUpdateState({ kind: 'downloading', received, total }),
+    )
+      .then(() => {
+        // One click = download + apply + relaunch; the new process takes over
+        // after the updater swaps the bundle.
+        defaultUpdaterApi.relaunch()
+      })
+      .catch((e) =>
+        setUpdateState(
+          e instanceof UpdateFlowError
+            ? e.state
+            : { kind: 'error', errorKind: 'unknown', message: String(e) },
+        ),
+      )
+  }
+
+  // The quiet startup check (#66): one fire-and-forget probe after boot. Only
+  // a FOUND update becomes visible (the banner); every error — offline, no
+  // latest.json, unconfigured pubkey — stays invisible here, while the same
+  // probe run from Settings reports its state honestly.
+  useEffect(() => {
+    runCheck(defaultUpdaterApi)
+      .then((result) => {
+        if (result.update != null) {
+          setUpdateResource(result.update)
+          setUpdateState(result.state)
+        }
+      })
+      .catch(() => {
+        // Quiet at boot, by design.
+      })
+  }, [])
 
   // --- cmux import wizard (#59, HITL rework 2026-08-30) -----------------------
   // Settings → Import → "from cmux" opens the CmuxImportWizard dialog:
@@ -3111,7 +3187,63 @@ export function WorkspaceShell() {
           onClose={() => setSettingsOpen(false)}
           onOpenSettingsFile={openSettingsFile}
           onImportWizard={() => setWizardOpen(true)}
+          updates={{
+            state: updateState,
+            onCheck: checkForUpdates,
+            onInstall: installUpdate,
+          }}
         />
+      )}
+
+      {/* Update banner (issue #66): appears only when a check FOUND an update
+          (updateResource != null) — quiet states never raise it. It follows
+          the same state machine as the Settings row: the one-click install,
+          its progress, and a failure readout with retry. */}
+      {updateResource != null && !updateBannerDismissed && (
+        <div className="update-banner" role="status" data-testid="update-banner">
+          {updateState.kind === 'downloading' ? (
+            <span>
+              Downloading update —{' '}
+              {downloadProgressText(updateState.received, updateState.total)}
+            </span>
+          ) : updateState.kind === 'error' ? (
+            <>
+              <span className="update-banner__error">{updateState.message}</span>
+              <button type="button" className="btn-primary" onClick={installUpdate}>
+                Retry
+              </button>
+            </>
+          ) : (
+            <>
+              <span>
+                umux {updateState.kind === 'available' ? updateState.version : ''} is
+                available.
+              </span>
+              <button type="button" className="btn-primary" onClick={installUpdate}>
+                Download &amp; restart
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="Dismiss update banner"
+            title="Dismiss"
+            onClick={() => setUpdateBannerDismissed(true)}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
       )}
 
       {/* The "from cmux" import wizard (#59): scan → choose + live preview →

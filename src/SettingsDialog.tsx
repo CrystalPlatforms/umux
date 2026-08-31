@@ -24,6 +24,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
 import { isWindowsPlatform } from './importWizard'
+import { downloadProgressText, type UpdateState } from './updater'
 
 type ToggleProps = {
   label: string
@@ -53,12 +54,43 @@ function SettingsToggle({ label, checked, testId, onToggle }: ToggleProps) {
   )
 }
 
+// The one-line status under the "App updates" row (issue #66). Every settled
+// state reads as a human sentence; the idle state renders nothing at all.
+function UpdatesStatus({ state }: { state: UpdateState }) {
+  switch (state.kind) {
+    case 'idle':
+      return null
+    case 'checking':
+      return <p className="settings-status">Checking for updates…</p>
+    case 'up-to-date':
+      return <p className="settings-status">umux is up to date.</p>
+    case 'no-release':
+      return (
+        <p className="settings-status">
+          No update information published yet — new releases appear here once they
+          ship an update file.
+        </p>
+      )
+    case 'available':
+      return <p className="settings-status">umux {state.version} is available.</p>
+    case 'downloading':
+      return (
+        <p className="settings-status">
+          Downloading update — {downloadProgressText(state.received, state.total)}
+        </p>
+      )
+    case 'error':
+      return <p className="settings-status settings-status--error">{state.message}</p>
+  }
+}
+
 export function SettingsDialog({
   settings,
   onChange,
   onClose,
   onOpenSettingsFile,
   onImportWizard,
+  updates,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -72,6 +104,14 @@ export function SettingsDialog({
   // renders from WorkspaceShell; Apply closes BOTH dialogs, so this
   // component stays invoke-free with no outcome line of its own.
   onImportWizard?: () => void
+  // The update row (issue #66): presentational only — the plugin flows live
+  // in updater.ts and the glue in WorkspaceShell. Absent = the row is not
+  // rendered at all.
+  updates?: {
+    state: UpdateState
+    onCheck: () => void
+    onInstall: () => void
+  }
 }) {
   // Escape closes the dialog — the same dismissal key the rename/create
   // inputs use, so the app has one "back out" reflex everywhere.
@@ -160,6 +200,42 @@ export function SettingsDialog({
           testId="toggle-ports-tooltip"
           onToggle={(next) => onChange({ portsTooltipEnabled: next })}
         />
+
+        {/* App updates (issue #66): check on demand + one-click install.
+            Both buttons live in the same right-hand slot as the Import
+            button; the busy states (checking/downloading) disable them so
+            two updates can never race. */}
+        {updates != null && (
+          <>
+            <div className="settings-row">
+              <div className="settings-row__text">
+                <span className="settings-row__label">App updates</span>
+              </div>
+              <div className="settings-import">
+                {updates.state.kind === 'available' && (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    data-testid="update-install"
+                    onClick={updates.onInstall}
+                  >
+                    Download &amp; restart
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn-primary"
+                  data-testid="update-check"
+                  disabled={updates.state.kind === 'checking' || updates.state.kind === 'downloading'}
+                  onClick={updates.onCheck}
+                >
+                  Check for updates
+                </button>
+              </div>
+            </div>
+            <UpdatesStatus state={updates.state} />
+          </>
+        )}
 
         {/* Import row: same layout as the switches — label on the left, the
             action on the right. "Import" unfolds a dropdown; its "from cmux"

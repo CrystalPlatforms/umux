@@ -1515,6 +1515,40 @@ button.settings-footnote__path:hover {
   color: var(--text);
 }
 
+/* The update-status line under the "App updates" row (issue #66). Reads like
+   the footnote: small, quiet; failures get the error tone. */
+.settings-status {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.settings-status--error {
+  color: var(--danger);
+}
+
+/* The update banner (issue #66): a small card pinned bottom-right, raised
+   only when a check found an update. Never blocks the app. */
+.update-banner {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated, var(--bg-panel));
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  font-size: var(--text-xs);
+}
+
+.update-banner__error {
+  color: var(--danger);
+}
+
 /* Confirm-dialog buttons (v0.2 Phase 4 / #28) — siblings of .btn-primary. */
 .btn-secondary {
   height: var(--control-height);

@@ -32,6 +32,10 @@ tauri-plugin-log = "2"
 portable-pty = "0.8"
 tauri-plugin-aptabase = "1.0.0"
 store_core = { path = "store_core" }
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-notification = "2.3.3"
+reqwest = "0.13.3"
 
 [dev-dependencies]
 tempfile = "3"

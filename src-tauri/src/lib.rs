@@ -6,6 +6,7 @@ pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_service;
 pub mod ssh_manager;
+pub mod updater_probe;
 
 // The workspace/settings store (model, WorkspaceStore, SettingsStore, config
 // paths) is shared library code since #58: StoreCore (`store_core` crate)
@@ -119,7 +120,7 @@ fn pty_open(
     std::thread::spawn(move || {
         let mut parser = OscParser::new();
         let service = NotificationService::with_mute(
-            Box::new(NativeNotifier),
+            platform_notifier(&emit_app),
             Some("umux".to_string()),
             mute_flag,
         );
@@ -390,7 +391,7 @@ fn ssh_open(
     std::thread::spawn(move || {
         let mut parser = OscParser::new();
         let service = NotificationService::with_mute(
-            Box::new(NativeNotifier),
+            platform_notifier(&emit_app),
             Some("umux".to_string()),
             mute_flag,
         );
@@ -479,11 +480,28 @@ impl Notifier for NativeNotifier {
     }
 }
 
+// macOS (issue #68): every notification used to go through `osascript`, so
+// macOS attributed the banner to **Script Editor** — the AppleScript runtime —
+// no matter who sent it. Two paths now live behind the same `Notifier` trait:
+//  - Bundled app (running from umux.app/…/MacOS/umux): post through
+//    UNUserNotificationCenter via tauri-plugin-notification, so the banner
+//    carries the umux name and icon. UNUserNotificationCenter refuses to post
+//    from an UNBUNDLED process — that is exactly why the split exists. On any
+//    error (permission denied/revoked, runtime refusal) we fall back to
+//    osascript, so a notification is never lost.
+//  - Unbundled binary (`tauri dev`): straight to osascript — the pre-#68
+//    behavior, which keeps the zero-cost policy (no codesign requirement).
+// Linux and Windows keep their single `NativeNotifier` path, unchanged.
 #[cfg(target_os = "macos")]
-struct NativeNotifier;
+fn is_bundled_app(exe: &std::path::Path) -> bool {
+    exe.to_string_lossy().contains(".app/Contents/MacOS")
+}
 
 #[cfg(target_os = "macos")]
-impl Notifier for NativeNotifier {
+struct OsascriptNotifier;
+
+#[cfg(target_os = "macos")]
+impl Notifier for OsascriptNotifier {
     fn show(&self, summary: &str, body: &str) {
         let script = apple_notification_script(summary, body);
         let result = std::process::Command::new("osascript")
@@ -500,6 +518,40 @@ impl Notifier for NativeNotifier {
                 String::from_utf8_lossy(&out.stderr)
             ),
             Err(e) => log::error!("[notify] failed to spawn osascript: {e}"),
+        }
+    }
+}
+
+/// Bundled-app notifier: UNUserNotificationCenter through the notification
+/// plugin (needs the AppHandle, hence the field). Not unit-tested — its
+/// behavior is Adam's HITL check on macOS (umux attribution in the banner).
+#[cfg(target_os = "macos")]
+struct BundledNotifier {
+    app: AppHandle,
+}
+
+#[cfg(target_os = "macos")]
+impl Notifier for BundledNotifier {
+    fn show(&self, summary: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        let result = self
+            .app
+            .notification()
+            .builder()
+            .title(summary)
+            .body(body)
+            .show();
+        match result {
+            Ok(()) => log::info!("[notify] dispatched (UNUserNotificationCenter): summary={summary:?} body={body:?}"),
+            Err(e) => {
+                // Fallback, not failure: attribution is cosmetic, delivery is
+                // the contract. osascript always works (it is what `tauri dev`
+                // uses), so the notification still arrives.
+                log::warn!(
+                    "[notify] UNUserNotificationCenter failed ({e}); falling back to osascript"
+                );
+                OsascriptNotifier.show(summary, body);
+            }
         }
     }
 }
@@ -570,6 +622,41 @@ fn windows_toast_script(summary: &str, body: &str) -> String {
         ps(summary),
         ps(body)
     )
+}
+
+/// The pre-flight the frontend runs BEFORE touching the updater plugin
+/// (issue #66). One invoke answers, in order: is the signer key configured
+/// at all, is GitHub reachable, does a release feed (latest.json) exist.
+/// Only "ok" makes the frontend call the plugin — so "offline" can no longer
+/// be shown while the real situation is simply "no feed published yet".
+#[tauri::command]
+async fn updater_status(app: AppHandle) -> updater_probe::UpdaterStatus {
+    if !updater_probe::pubkey_configured(&app) {
+        return updater_probe::UpdaterStatus::Unconfigured;
+    }
+    updater_probe::probe_latest_json(&app).await
+}
+
+/// Pick the notifier for a panel's output thread (issue #68 on macOS; other
+/// platforms keep their single path). The platform swap stays behind the
+/// `Notifier` trait — call sites and the service never care which backend is
+/// live, and tests exercise each path through that same boundary.
+fn platform_notifier(app: &AppHandle) -> Box<dyn Notifier + Send> {
+    #[cfg(target_os = "macos")]
+    {
+        let bundled = std::env::current_exe()
+            .map(|exe| is_bundled_app(&exe))
+            .unwrap_or(false);
+        if bundled {
+            return Box::new(BundledNotifier { app: app.clone() });
+        }
+        Box::new(OsascriptNotifier)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Box::new(NativeNotifier)
+    }
 }
 
 /// Payload for the `config_fallback` event (Phase 18 / Issue #19, AC3).
@@ -822,6 +909,7 @@ pub fn run() {
             load_settings,
             save_settings,
             open_settings_file,
+            updater_status,
             cmux_import::read_cmux_import_sources,
         ]);
 
@@ -834,6 +922,20 @@ pub fn run() {
     } else {
         builder
     };
+
+    // Issue #66: in-app updates. The updater plugin serves `check()` to the
+    // frontend (GitHub Releases latest.json is the only endpoint — zero-cost
+    // policy); the process plugin provides `relaunch()` so "download + apply +
+    // restart" is one click. Signature verification is enforced by the plugin
+    // itself against `plugins.updater.pubkey` — an unsigned or tampered bundle
+    // is rejected before anything is written to disk.
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        // Issue #68: the bundled macOS notifier posts through this plugin
+        // (UNUserNotificationCenter); on Linux/Windows the plugin is idle —
+        // their notifiers shell out as before, behavior unchanged.
+        .plugin(tauri_plugin_notification::init());
 
     builder
         .setup(move |app| {
@@ -1037,6 +1139,22 @@ mod tests {
     }
 
     // --- macOS notifier script (v0.2 Phase 2 / #26) -------------------------
+
+    // Issue #68 — which macOS path a process takes is decided by ONE pure
+    // predicate on current_exe: a binary inside an .app bundle posts through
+    // UNUserNotificationCenter (umux attribution), everything else (the
+    // `tauri dev` binary under target/, cargo test itself) uses osascript.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundled_app_detected_by_exe_path() {
+        assert!(is_bundled_app(std::path::Path::new(
+            "/Applications/umux.app/Contents/MacOS/umux"
+        )));
+        assert!(!is_bundled_app(std::path::Path::new(
+            "/Users/dev/projects/umux/src-tauri/target/debug/umux"
+        )));
+        assert!(!is_bundled_app(std::path::Path::new("/usr/local/bin/umux")));
+    }
 
     // T7 (plain text needs no escaping — the notification reaches AppleScript
     // verbatim):

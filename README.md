@@ -20,6 +20,7 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 - **Agent status** — each panel shows a live status indicator: **working** while an AI CLI (Claude Code, Codex, Gemini CLI, Aider…) streams or thinks, **needs-attention** the moment it waits for you (opened, finished a task, or asking a question), and idle once you exit it. Detected from OSC completion signals plus the panel's foreground process name — never from terminal content.
 - **Settings & toggles** — turn optional features (agent status, notifications) on or off; your choices persist across restarts.
 - **Session restore** — reopening umux brings back your workspaces, panels, layout, working directories, and shells.
+- **In-app updates** — umux checks quietly on startup and via **Settings → App updates → Check for updates**. When a new release is found, one click downloads, applies, and relaunches. Updates come from GitHub Releases only and are signature-verified — a tampered or unsigned bundle is rejected.
 - **Keyboard-first** — switch workspaces, split/close panels, and more without leaving the keyboard.
 
 ---
@@ -204,7 +205,7 @@ For a **production / release build** (an installable Ubuntu package):
 npm run tauri build
 ```
 
-Artifacts land in `src-tauri/target/release/bundle/`. Install the `.deb` with:
+Artifacts land in `src-tauri/target/release/bundle/`. **Note:** because releases now carry signed update bundles, a local `tauri build` requires the signing key — export `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` first (one-time setup: [Updates → Maintainers](#maintainers-signing-keys-and-secrets)). `tauri dev` needs no key. Install the `.deb` with:
 
 ```bash
 sudo apt install ./src-tauri/target/release/bundle/deb/*.deb
@@ -329,7 +330,7 @@ umux notify "build finished"        # desktop notification, no app needed
 
 `umux notify` uses the same notification mechanism as the app (`notify-send` on Linux, Notification Center via `osascript` on macOS, a Windows toast). If the platform's notification system is unavailable, it prints a clear error and exits non-zero. Point `UMUX_CONFIG_DIR` at a directory to move the whole store root (handy for testing).
 
-> **macOS note:** the banner is attributed to **Script Editor** — a macOS limitation of the system's AppleScript bridge, which owns every `osascript` notification (the umux app itself shows the same attribution on macOS). The title and text are correct; on Linux the sender shows as **umux**.
+> **macOS note (CLI only):** a banner from `umux notify` is attributed to **Script Editor** — macOS attributes every AppleScript-sent notification to its runtime, and a bare CLI process cannot use the native Notification Center (the system refuses unbundled processes). Title and text are correct; on Linux the sender shows as **umux**. **The umux app itself shows proper umux attribution on macOS** (native Notification Center from the bundled app, with an automatic `osascript` fallback during `tauri dev`). Shipping a tiny helper `.app` for the CLI (the terminal-notifier approach) was evaluated and deliberately deferred — it adds a second bundle to every install path plus a permission prompt for a cosmetic gain.
 
 ### Exchange format
 
@@ -354,6 +355,54 @@ umux notify "build finished"        # desktop notification, no app needed
 `umux import umux <file> [--desk|--term]` **replaces** the chosen store with the document's state — export → import into a fresh store reproduces the original state exactly (id for id). Use `--dry-run` to preview. Malformed documents and unknown versions are refused with a clear error and the store is left untouched.
 
 `umux import cmux` reads the cmux app's saved files (its `cmux.json` config and live session store) and imports them into the chosen store: workspaces, sidebar order, groups with membership, working directories, and one named tab per cmux surface. Nothing is ever overwritten — a name that already exists gets a ` from cmux` suffix (numbered further when taken: `X from cmux`, `X from cmux 2`, …). The cmux files are read strictly read-only. `--dry-run` prints the plan (the collision-resolved tree) and writes nothing. Not available on Windows in v1.2.0. The same import powers the in-app wizard (Settings → Import from cmux); a shared-fixture test suite keeps the two implementations at parity.
+
+---
+
+## Updates
+
+umux keeps itself current through **GitHub Releases only** — there is no update server (zero-cost policy). The flow:
+
+1. **Startup check (quiet).** On launch, umux asks the release feed whether a newer version exists. Nothing is downloaded without your consent; offline, a release without update metadata, or a missing configuration never surfaces as an error at startup.
+2. **Manual check.** **Settings → App updates → Check for updates** runs the same check on demand and reports honestly: up to date, update available, offline, a missing feed ("No update information published yet"), or — until the signing key below is set up — **"Updates are not configured yet"** (the expected state before the maintainer step runs; the app never mistakes that for being offline).
+3. **One-click install.** When an update is found, a small banner appears and the Settings row offers **Download & restart**. One click downloads, applies, and relaunches the app at the new version.
+
+Signature verification is **enforced**: every update bundle is signed, and umux refuses to install anything whose signature does not verify against its built-in public key. This is why update bundles can be trusted even though the regular installers are unsigned (first-run warnings still apply to those — see [A.3](#a3--windows--macos)).
+
+Supported update channels per platform: **macOS** (universal `.app` bundle), **Windows** (NSIS installer), **Linux** (`.AppImage`). The `.deb` package updates the classic way — install the newer `.deb` over the old one.
+
+### Maintainers: signing keys and secrets
+
+The release pipeline signs update bundles automatically. One-time setup (done once per machine that builds releases):
+
+1. Generate the free signing key (no paid certificate involved):
+
+   ```bash
+   npm run tauri signer generate -- -w ~/.tauri/umux.key
+   ```
+
+   This prints a **public key** and writes the private key to `~/.tauri/umux.key` (the public key is saved right next to it as `~/.tauri/umux.key.pub`, so it is never lost). The password is optional — an empty password keeps CI simpler. Re-running the command needs `--force` (Tauri refuses to overwrite an existing key).
+
+2. Paste the **public key** into `src-tauri/tauri.conf.json` under `plugins.updater.pubkey` (it replaces the `PASTE_PUBLIC_KEY_FROM_TAURI_SIGNER_GENERATE` placeholder).
+
+3. Add two repository secrets on GitHub (**Settings → Secrets and variables → Actions**):
+
+   - `TAURI_SIGNING_PRIVATE_KEY` — the *contents* of `~/.tauri/umux.key`
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password (empty is fine, set it to the empty string's secret)
+
+   Until these exist, the release workflow fails at the signing step — that is intentional; an unsigned update bundle would be rejected by every client.
+
+4. **Local `tauri build` also needs the key** (bundling now produces signed update artifacts). Export both variables in your shell before building locally:
+
+   ```bash
+   export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/umux.key)"
+   export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+   ```
+
+   `npm run tauri dev` needs no key — development never bundles.
+
+### Staged-release test (how to verify an update end-to-end)
+
+With the secrets in place: publish release `vX`, then cut `vX+1` as a draft/prerelease and install `vX` from it. The `vX` app should detect `vX+1` on startup and from Settings, apply it in one click, and relaunch showing `vX+1` (About/window title). Going offline and pressing **Check for updates** must show a clear offline message, not a crash.
 
 ---
 
