@@ -1,0 +1,263 @@
+{
+  "plan": {
+    "workspaces": [
+      {
+        "id": "18123738-b7a1-47c0-8875-0be5bf89597f",
+        "title": "Project A",
+        "cwd": "~/Documents/project-a",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-a"
+          }
+        ]
+      },
+      {
+        "id": "b4f46c84-6cfc-4f90-9c68-6df882df3a90",
+        "title": "Project C",
+        "cwd": "~/Documents/project-c",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-c"
+          },
+          {
+            "name": "Panel 2",
+            "directory": "~/Documents/project-c"
+          }
+        ]
+      },
+      {
+        "id": "0378053d-b71c-4a67-aa1c-4010dbee8c03",
+        "title": "Project D",
+        "cwd": "~/Documents/project-d",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-d"
+          },
+          {
+            "name": "Panel 2",
+            "directory": "~/Documents/project-d"
+          }
+        ]
+      },
+      {
+        "id": "abef0fce-de76-463d-82dd-03ebedf88bb1",
+        "title": "Project F",
+        "cwd": "~/Documents/project-f",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-f"
+          },
+          {
+            "name": "Panel 2",
+            "directory": "~/Documents/project-f"
+          }
+        ]
+      },
+      {
+        "id": "c421395a-9b36-48b0-a4bc-2d45b282769d",
+        "title": "Project G",
+        "cwd": "~/Documents/project-g",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-g"
+          },
+          {
+            "name": "Panel 2",
+            "directory": "~/Documents/project-g"
+          }
+        ]
+      },
+      {
+        "id": "2f44481b-5991-4b76-9db5-db05d1d9a900",
+        "title": "Project H",
+        "cwd": "~/Documents/project-h",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-h"
+          },
+          {
+            "name": "Panel 2",
+            "directory": "~/Documents/project-h"
+          },
+          {
+            "name": "Panel 3",
+            "directory": "~/Documents/project-h"
+          }
+        ]
+      },
+      {
+        "id": "2d58a2a3-0473-4478-bdc5-b1e3a513bed0",
+        "title": "Project I",
+        "cwd": "~/Documents/project-i",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-i"
+          },
+          {
+            "name": "Panel 2",
+            "directory": "~/Documents/project-i"
+          }
+        ]
+      },
+      {
+        "id": "1cf9c998-1313-4412-8e2a-ffb83d6223b9",
+        "title": "Project J",
+        "cwd": "~/Documents/project-j",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-j"
+          },
+          {
+            "name": "Panel 2",
+            "directory": "~/Documents/project-j"
+          }
+        ]
+      },
+      {
+        "id": "1422cd2e-d197-4b72-b135-a0a1caf740aa",
+        "title": "Project L",
+        "cwd": "~/Documents/project-l",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-l"
+          }
+        ]
+      },
+      {
+        "id": "76654f00-c7a1-4ead-ae6a-f6d469c287bf",
+        "title": "Project M",
+        "cwd": "~/Documents/project-m",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-m"
+          }
+        ]
+      },
+      {
+        "id": "action-4-0",
+        "title": "Project N",
+        "cwd": "~/Documents/project-n",
+        "tabs": [
+          {
+            "name": "Panel 1",
+            "directory": "~/Documents/project-n"
+          }
+        ]
+      }
+    ],
+    "groups": [
+      {
+        "id": "d5c501c1-9264-46ed-ac7b-77373f3d9dac",
+        "name": "Group One",
+        "collapsed": true,
+        "pinned": false,
+        "memberIds": [
+          "b4f46c84-6cfc-4f90-9c68-6df882df3a90",
+          "0378053d-b71c-4a67-aa1c-4010dbee8c03"
+        ]
+      },
+      {
+        "id": "9b6a3687-477b-42a4-9749-6af5884af141",
+        "name": "Group Two",
+        "collapsed": false,
+        "pinned": false,
+        "memberIds": [
+          "abef0fce-de76-463d-82dd-03ebedf88bb1",
+          "c421395a-9b36-48b0-a4bc-2d45b282769d"
+        ]
+      },
+      {
+        "id": "b2fc102f-bddd-489d-baa5-7ed082c7f129",
+        "name": "Group Three",
+        "collapsed": true,
+        "pinned": false,
+        "memberIds": [
+          "1422cd2e-d197-4b72-b135-a0a1caf740aa",
+          "76654f00-c7a1-4ead-ae6a-f6d469c287bf"
+        ]
+      }
+    ]
+  },
+  "preview": [
+    {
+      "kind": "group",
+      "name": "Group One from cmux",
+      "childCount": 2,
+      "children": [
+        {
+          "name": "Project C",
+          "tabCount": 2
+        },
+        {
+          "name": "Project D",
+          "tabCount": 2
+        }
+      ]
+    },
+    {
+      "kind": "group",
+      "name": "Group Two",
+      "childCount": 2,
+      "children": [
+        {
+          "name": "Project F",
+          "tabCount": 2
+        },
+        {
+          "name": "Project G",
+          "tabCount": 2
+        }
+      ]
+    },
+    {
+      "kind": "group",
+      "name": "Group Three",
+      "childCount": 2,
+      "children": [
+        {
+          "name": "Project L",
+          "tabCount": 1
+        },
+        {
+          "name": "Project M",
+          "tabCount": 1
+        }
+      ]
+    },
+    {
+      "kind": "workspace",
+      "name": "Project A from cmux 2",
+      "tabCount": 1
+    },
+    {
+      "kind": "workspace",
+      "name": "Project H",
+      "tabCount": 3
+    },
+    {
+      "kind": "workspace",
+      "name": "Project I",
+      "tabCount": 2
+    },
+    {
+      "kind": "workspace",
+      "name": "Project J",
+      "tabCount": 2
+    },
+    {
+      "kind": "workspace",
+      "name": "Project N",
+      "tabCount": 1
+    }
+  ]
+}

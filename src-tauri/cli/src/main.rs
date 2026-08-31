@@ -10,7 +10,10 @@
 //! tempdir.
 
 use clap::{CommandFactory, Parser};
-use store_core::exchange::{to_exchange, ExchangeKind};
+use store_core::cmux_import::{
+    apply_import_plan, build_import_preview, build_preview_tree, parse_cmux_sources,
+};
+use store_core::exchange::{from_exchange, to_exchange, ExchangeKind};
 use store_core::settings_store::{serialize_settings, Settings, SettingsStore};
 use store_core::workspace_store::{
     serialize_config, LayoutNode, Orientation, Tab, Workspace, WorkspaceStore,
@@ -53,6 +56,11 @@ enum Command {
         /// The notification text (passed through as-is)
         text: String,
     },
+    /// Import workspaces into the chosen store (#63)
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+    },
     /// Create a new empty workspace
     New { name: String },
     /// Delete a workspace by name
@@ -82,6 +90,32 @@ enum ConfigAction {
     Get { key: Option<String> },
     /// Change one setting
     Set { key: String, value: String },
+}
+
+#[derive(clap::Subcommand)]
+enum ImportAction {
+    /// Import from the cmux app's saved files (read strictly read-only) —
+    /// full import, collisions suffixed ` from cmux`
+    Cmux {
+        /// Print the plan (the collision-resolved tree) and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Read this file instead of cmux's standard cmux.json location
+        #[arg(long, value_name = "FILE")]
+        config: Option<std::path::PathBuf>,
+        /// Read this file instead of cmux's standard session store
+        #[arg(long, value_name = "FILE")]
+        session: Option<std::path::PathBuf>,
+    },
+    /// Restore an umux exchange document written by `umux export` —
+    /// REPLACES the chosen store with the document's state
+    Umux {
+        /// The exchange document to import
+        file: std::path::PathBuf,
+        /// Print what would land and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Which store a command operates on — required for every store-touching
@@ -128,6 +162,146 @@ fn settings_store_for(target: Target) -> SettingsStore {
         Target::Desk => SettingsStore::new(store_core::paths::settings_path()),
         Target::Term => SettingsStore::new(store_core::paths::term_settings_path()),
     }
+}
+
+// --- import (#63) ------------------------------------------------------------
+
+/// cmux's source files for the CLI importer — the SAME locations the app's
+/// wizard bridge reads (src-tauri/src/cmux_import.rs), kept in step BY
+/// CONVENTION (the app crate pulls in Tauri, which the CLI must not):
+/// `~/.config/cmux/cmux.json` plus the live `session-*.json` under cmux's
+/// per-OS data directory. `--config`/`--session` override a source; an absent
+/// flag falls back to the standard location. Read STRICTLY read-only
+/// (`read_to_string`); a missing or unreadable file reads as `None` — a flat
+/// import from whatever exists.
+fn cmux_source_texts(
+    config: Option<&std::path::Path>,
+    session: Option<&std::path::Path>,
+) -> (Option<String>, Option<String>) {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let config_path = match config {
+        Some(path) => Some(path.to_path_buf()),
+        None => home.as_deref().map(|h| {
+            h.join(".config")
+                .join("cmux")
+                .join("cmux.json")
+        }),
+    };
+    let session_path = match session {
+        Some(path) => Some(path.to_path_buf()),
+        None => home.as_deref().and_then(cmux_session_path),
+    };
+    let read = |path: Option<std::path::PathBuf>| {
+        path.and_then(|p| std::fs::read_to_string(p).ok())
+    };
+    (read(config_path), read(session_path))
+}
+
+/// Pick the LIVE cmux session store out of cmux's data directory:
+/// `session-*.json`, skipping backups (`*-previous.json`), alphabetically
+/// first otherwise — the app bridge's pick, mirrored.
+fn cmux_session_path(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support").join("cmux")
+    } else if cfg!(target_os = "windows") {
+        home.join("AppData").join("Roaming").join("cmux")
+    } else {
+        home.join(".local").join("share").join("cmux")
+    };
+    let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("session-") && name.ends_with(".json") && !name.contains("previous")
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+/// The `umux import cmux` pipeline: parse → plan → apply through store_core.
+/// A malformed source errors before the store is touched; `--dry-run` prints
+/// the collision-resolved preview tree (the parity golden's shape) and writes
+/// nothing.
+#[cfg(not(windows))]
+fn run_cmux_import(
+    target: Target,
+    config_text: Option<String>,
+    session_text: Option<String>,
+    dry_run: bool,
+) {
+    let plan = match parse_cmux_sources(config_text.as_deref(), session_text.as_deref()) {
+        Ok(plan) => plan,
+        Err(message) => {
+            eprintln!("cmux import failed: {message}");
+            std::process::exit(1);
+        }
+    };
+    let store = workspace_store_for(target);
+    let live = store.load();
+    let mut ids = Ids::new();
+    let planned = apply_import_plan(&live, &plan, &mut || ids.next());
+    if dry_run {
+        let preview = build_import_preview(&live, &planned);
+        let tree = build_preview_tree(&preview);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tree).expect("preview tree is always serializable")
+        );
+        return;
+    }
+    store.save(&planned).expect("save workspace store");
+    println!(
+        "Imported {} workspaces and {} groups from cmux.",
+        plan.workspaces.len(),
+        plan.groups.len()
+    );
+}
+
+/// The `umux import umux <file>` restore: the exchange document REPLACES the
+/// chosen store (the round-trip semantic). A malformed document errors
+/// naming the file, store untouched.
+fn run_umux_import(target: Target, file: &std::path::Path, dry_run: bool) {
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("could not read {}: {e}", file.display());
+            std::process::exit(1);
+        }
+    };
+    let data = match from_exchange(&text) {
+        Ok((_, data)) => data,
+        Err(message) => {
+            eprintln!("{}: {message}", file.display());
+            std::process::exit(1);
+        }
+    };
+    let store = workspace_store_for(target);
+    if dry_run {
+        println!(
+            "Would replace the {} store with {} workspaces, {} groups (order entries: {}). \
+             Run without --dry-run to apply.",
+            match target {
+                Target::Desk => "desktop",
+                Target::Term => "terminal-UI",
+            },
+            data.workspaces.len(),
+            data.groups.len(),
+            data.order.len()
+        );
+        return;
+    }
+    store.save(&data).expect("save workspace store");
+    println!(
+        "Imported {} workspaces and {} groups from {}.",
+        data.workspaces.len(),
+        data.groups.len(),
+        file.display()
+    );
 }
 
 /// Read one setting by its kebab-case CLI key, or `None` for an unknown key.
@@ -308,6 +482,31 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Command::Import { action }) => match action {
+            ImportAction::Cmux {
+                dry_run,
+                config,
+                session,
+            } => {
+                // Windows import is deliberately refused in v1.2.0 (decision
+                // #4 — cmux's own files were never observed there).
+                #[cfg(windows)]
+                {
+                    let _ = (config, session, dry_run);
+                    eprintln!("cmux import is not available in v1.2.0 on Windows.");
+                    std::process::exit(1);
+                }
+                #[cfg(not(windows))]
+                {
+                    let (config_text, session_text) =
+                        cmux_source_texts(config.as_deref(), session.as_deref());
+                    run_cmux_import(target.unwrap(), config_text, session_text, dry_run);
+                }
+            }
+            ImportAction::Umux { file, dry_run } => {
+                run_umux_import(target.unwrap(), &file, dry_run)
+            }
+        },
         Some(Command::New { name }) => {
             let store = workspace_store_for(target.unwrap());
             let mut data = store.load();

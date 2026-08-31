@@ -320,6 +320,10 @@ umux config set notifications-enabled true --desk
 umux export --desk -o backup.json   # export the store (see Exchange format below)
 umux export --desk                  # …or print the document to stdout
 
+umux import cmux                    # import from the cmux app's saved files
+umux import cmux --dry-run          #   …preview the plan, write nothing
+umux import umux backup.json --desk # restore an export (REPLACES the store)
+
 umux notify "build finished"        # desktop notification, no app needed
 ```
 
@@ -329,7 +333,7 @@ umux notify "build finished"        # desktop notification, no app needed
 
 ### Exchange format
 
-`umux export` writes a **neutral, self-describing JSON document** — the format `umux import` (v1.2.0) and Desktop↔Terminal transfer (v1.3.0) both read back. Settings are deliberately not part of it: they are per-app configuration, not state you move between surfaces.
+`umux export` writes a **neutral, self-describing JSON document** — the format `umux import umux` restores and Desktop↔Terminal transfer (v1.3.0) reads back. Settings are deliberately not part of it: they are per-app configuration, not state you move between surfaces.
 
 ```json
 {
@@ -346,6 +350,10 @@ umux notify "build finished"        # desktop notification, no app needed
 | `version`  | Format version, currently `1`. **Readers must refuse unknown versions with a clear message** — never guess.            |
 | `kind`     | What `data` holds: `"workspaces"` (the store's workspace state: workspaces, groups, order).                            |
 | `data`     | The store's own serialized shape — the exact JSON `workspaces.json` uses — so export → import round-trips unchanged.   |
+
+`umux import umux <file> [--desk|--term]` **replaces** the chosen store with the document's state — export → import into a fresh store reproduces the original state exactly (id for id). Use `--dry-run` to preview. Malformed documents and unknown versions are refused with a clear error and the store is left untouched.
+
+`umux import cmux` reads the cmux app's saved files (its `cmux.json` config and live session store) and imports them into the chosen store: workspaces, sidebar order, groups with membership, working directories, and one named tab per cmux surface. Nothing is ever overwritten — a name that already exists gets a ` from cmux` suffix (numbered further when taken: `X from cmux`, `X from cmux 2`, …). The cmux files are read strictly read-only. `--dry-run` prints the plan (the collision-resolved tree) and writes nothing. Not available on Windows in v1.2.0. The same import powers the in-app wizard (Settings → Import from cmux); a shared-fixture test suite keeps the two implementations at parity.
 
 ---
 

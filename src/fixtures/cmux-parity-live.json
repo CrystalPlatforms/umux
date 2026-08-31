@@ -1,0 +1,30 @@
+{
+  "workspaces": [
+    {
+      "id": "live-1",
+      "name": "Project A",
+      "panels": [],
+      "tabs": [
+        { "id": "live-1-t1", "layout": { "kind": "leaf", "id": "live-1-p1" }, "name": "Tab 1" }
+      ]
+    },
+    {
+      "id": "live-2",
+      "name": "Project A from cmux",
+      "panels": [],
+      "tabs": [
+        { "id": "live-2-t1", "layout": { "kind": "leaf", "id": "live-2-p1" }, "name": "Tab 1" }
+      ]
+    },
+    {
+      "id": "live-3",
+      "name": "My stuff",
+      "panels": [],
+      "tabs": [
+        { "id": "live-3-t1", "layout": { "kind": "leaf", "id": "live-3-p1" }, "name": "Tab 1" }
+      ]
+    }
+  ],
+  "groups": [{ "id": "live-g1", "name": "Group One" }],
+  "order": ["live-1", "live-g1", "live-2", "live-3"]
+}

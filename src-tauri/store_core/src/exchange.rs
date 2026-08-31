@@ -28,7 +28,7 @@
 //!   `WorkspaceStore` saves), so export→import round-trips without a
 //!   second translation layer.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::workspace_store::WorkspaceData;
 
@@ -75,6 +75,45 @@ pub fn to_exchange(kind: ExchangeKind, data: &WorkspaceData) -> String {
         data,
     };
     serde_json::to_string_pretty(&document).expect("ExchangeDocument is always serializable")
+}
+
+/// The envelope as it parses back (owned — the reader takes the data with it).
+#[derive(Deserialize)]
+struct ExchangeEnvelope {
+    format: String,
+    version: u32,
+    kind: String,
+    data: WorkspaceData,
+}
+
+/// Parse an exchange document into its kind and data. The documented reader
+/// rule, enforced: invalid JSON, a missing/wrong envelope, an unknown FORMAT,
+/// an unknown VERSION, or an unknown KIND each refuse with a clear message —
+/// a reader never guesses (README, Exchange format).
+pub fn from_exchange(text: &str) -> Result<(ExchangeKind, WorkspaceData), String> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|_| "the document is not valid JSON".to_string())?;
+    let envelope: ExchangeEnvelope = serde_json::from_value(value)
+        .map_err(|_| "the document is not an umux exchange document".to_string())?;
+    if envelope.format != EXCHANGE_FORMAT {
+        return Err(format!(
+            "not an umux exchange document (format \"{}\")",
+            envelope.format
+        ));
+    }
+    if envelope.version != EXCHANGE_VERSION {
+        return Err(format!(
+            "unsupported exchange version {} — this umux reads version {}",
+            envelope.version, EXCHANGE_VERSION
+        ));
+    }
+    let kind = match envelope.kind.as_str() {
+        "workspaces" => ExchangeKind::Workspaces,
+        other => {
+            return Err(format!("unsupported exchange kind \"{other}\""));
+        }
+    };
+    Ok((kind, envelope.data))
 }
 
 #[cfg(test)]
@@ -173,5 +212,55 @@ mod tests {
     #[test]
     fn kind_wire_names_are_stable() {
         assert_eq!(ExchangeKind::Workspaces.wire(), "workspaces");
+    }
+
+    // T-X5 (the reader round-trips the writer — the property `umux import
+    // umux` and the export→import round-trip hang on):
+    #[test]
+    fn from_exchange_round_trips_to_exchange() {
+        let data = sample_data();
+
+        let (kind, back) =
+            from_exchange(&to_exchange(ExchangeKind::Workspaces, &data)).unwrap();
+
+        assert_eq!(kind, ExchangeKind::Workspaces);
+        assert_eq!(back, data);
+    }
+
+    // T-X6 (the documented reader rule — every alien document refuses with a
+    // clear message instead of guessing):
+    //   invalid JSON / wrong shape / unknown format / unknown version /
+    //   unknown kind → Err naming the problem.
+    #[test]
+    fn from_exchange_refuses_alien_documents() {
+        let err = from_exchange("{ not json").unwrap_err();
+        assert!(err.contains("not valid JSON"), "{err}");
+
+        let err = from_exchange(r#"{"a": 1}"#).unwrap_err();
+        assert!(err.contains("not an umux exchange document"), "{err}");
+
+        let alien = |from: &str, to: &str| {
+            r#"{"format":"umux-exchange","version":1,"kind":"workspaces","data":{}}"#
+                .replacen(from, to, 1)
+        };
+        let err = from_exchange(&alien(
+            r#""format":"umux-exchange""#,
+            r#""format":"someone-else""#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("not an umux exchange document"), "{err}");
+
+        let err = from_exchange(&alien(r#""version":1"#, r#""version":99"#)).unwrap_err();
+        assert!(
+            err.contains("unsupported exchange version 99"),
+            "unknown versions refuse: {err}"
+        );
+
+        let err = from_exchange(&alien(
+            r#""kind":"workspaces""#,
+            r#""kind":"something-else""#,
+        ))
+        .unwrap_err();
+        assert!(err.contains("unsupported exchange kind"), "{err}");
     }
 }

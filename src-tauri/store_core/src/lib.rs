@@ -14,7 +14,9 @@
 //! - [`settings_store`] — feature toggles + persistence.
 //! - [`paths`] — per-OS config directory + the one-time legacy migration.
 //! - [`exchange`] — the neutral exchange format export/import speak (#61).
+//! - [`cmux_import`] — the Rust cmux importer (parse → plan → apply, #63).
 
+pub mod cmux_import;
 pub mod exchange;
 pub mod paths;
 pub mod settings_store;

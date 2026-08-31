@@ -705,3 +705,277 @@ fn notify_with_an_unavailable_backend_fails_with_a_clear_error() {
         "the error names the platform tool: {stderr}"
     );
 }
+
+// --- #63: umux import (cmux second importer + exchange round-trip) ----------
+//
+// Assumptions encoded here (state-before-RED):
+// - `umux import cmux [--dry-run]` targets a store like every store-touching
+//   command (--desk/--term required). Source files come from --config/--session
+//   (any absent flag falls back to cmux's standard location under $HOME —
+//   tests point HOME at an empty tempdir so discovery finds nothing); the
+//   sources are read STRICTLY read-only and stay byte-identical.
+// - `--dry-run` prints the collision-resolved preview tree (the SAME shape
+//   the parity golden carries) and writes NOTHING (file checksum unchanged).
+// - A real import applies the plan: collisions suffixed (` from cmux`,
+//   ` from cmux 2`), members filed into their groups, the store consistent.
+// - `umux import umux <file>` REPLACES the target store with the document's
+//   data (the round-trip semantic: export → import into a fresh store →
+//   identical state). A malformed document errors naming the file, store
+//   untouched. --dry-run prints a summary and writes nothing.
+// - Windows refusal is cfg-gated (not testable on this platform).
+
+/// The shared fixtures' directory (repo-root/src/fixtures), as seen from the
+/// CLI crate.
+fn fixtures_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../src/fixtures")
+}
+
+/// Spawn the binary with arbitrary extra env vars (HOME overrides for
+/// discovery tests).
+fn run_with_env(
+    store_dir: &Path,
+    envs: &[(&str, &Path)],
+    args: &[&str],
+) -> (String, String, Option<i32>) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_umux"));
+    command.args(args).env("UMUX_CONFIG_DIR", store_dir);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().expect("spawn umux binary");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
+/// Seed the desk store with the PARITY live state (collisions on purpose).
+fn seed_parity_live(store_dir: &Path) {
+    let data: WorkspaceData =
+        serde_json::from_str(&std::fs::read_to_string(fixtures_dir().join("cmux-parity-live.json")).unwrap())
+            .unwrap();
+    std::fs::write(
+        store_dir.join("workspaces.json"),
+        serialize_config(&data),
+    )
+    .unwrap();
+}
+
+fn golden() -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(fixtures_dir().join("cmux-plan-golden.json")).unwrap(),
+    )
+    .unwrap()
+}
+
+fn sha1_hex(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap()
+}
+
+#[test]
+fn import_cmux_dry_run_prints_the_plan_and_writes_nothing() {
+    let store = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    seed_parity_live(store.path());
+    let before = std::fs::read(store.path().join("workspaces.json")).unwrap();
+
+    let (stdout, stderr, code) = run_with_env(
+        store.path(),
+        &[("HOME", home.path())],
+        &[
+            "import", "cmux", "--dry-run", "--desk",
+            "--config", fixtures_dir().join("cmux-config.json").to_str().unwrap(),
+            "--session", fixtures_dir().join("cmux-session.json").to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let tree: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("--dry-run prints the plan as JSON ({e}): {stdout}"));
+    assert_eq!(
+        tree,
+        golden()["preview"],
+        "the CLI plan matches the TypeScript reference tree"
+    );
+    let after = std::fs::read(store.path().join("workspaces.json")).unwrap();
+    assert_eq!(before, after, "--dry-run must not touch the store");
+}
+
+#[test]
+fn import_cmux_applies_with_suffixed_collisions_and_consistent_store() {
+    let store = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    seed_parity_live(store.path());
+
+    let (stdout, stderr, code) = run_with_env(
+        store.path(),
+        &[("HOME", home.path())],
+        &[
+            "import", "cmux", "--desk",
+            "--config", fixtures_dir().join("cmux-config.json").to_str().unwrap(),
+            "--session", fixtures_dir().join("cmux-session.json").to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stdout.contains("11 workspaces") && stdout.contains("3 groups"), "{stdout}");
+
+    let data = WorkspaceStore::new(store.path().join("workspaces.json")).load();
+    let names: Vec<&str> = data.workspaces.iter().map(|w| w.name.as_str()).collect();
+    // The store is consistent: the order lists every node exactly once.
+    assert_eq!(
+        data.order.len(),
+        data.workspaces.len() + data.groups.len(),
+        "order covers every node once"
+    );
+    assert!(
+        names.iter().filter(|n| **n == "Project A from cmux 2").count() == 1,
+        "the double collision is numbered: {names:?}"
+    );
+    // The suffixed group holds its three members; flags carried over.
+    let group = data
+        .groups
+        .iter()
+        .find(|g| g.name == "Group One from cmux")
+        .expect("the collided group imports suffixed");
+    assert_eq!(group.collapsed, Some(true));
+    let members = data
+        .workspaces
+        .iter()
+        .filter(|w| w.group_id.as_deref() == Some(group.id.as_str()))
+        .count();
+    assert_eq!(members, 2, "C and D file into the group");
+}
+
+#[test]
+fn import_cmux_leaves_the_cmux_sources_byte_identical() {
+    let store = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let config = sources.path().join("cmux.json");
+    let session = sources.path().join("session-1.json");
+    std::fs::copy(fixtures_dir().join("cmux-config.json"), &config).unwrap();
+    std::fs::copy(fixtures_dir().join("cmux-session.json"), &session).unwrap();
+    let config_before = sha1_hex(&config);
+    let session_before = sha1_hex(&session);
+    // The "hash" is the file's own bytes — read-only means byte-identical.
+
+    let (_, stderr, code) = run_with_env(
+        store.path(),
+        &[("HOME", home.path())],
+        &[
+            "import", "cmux", "--desk",
+            "--config", config.to_str().unwrap(),
+            "--session", session.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(sha1_hex(&config), config_before, "cmux.json untouched");
+    assert_eq!(sha1_hex(&session), session_before, "session store untouched");
+}
+
+#[test]
+fn import_umux_round_trips_an_export_into_a_fresh_store() {
+    let source = tempfile::tempdir().unwrap();
+    seed_workspaces(source.path(), &[("ws-1", "alpha"), ("ws-2", "beta")]);
+    let document = source.path().join("doc.json");
+    let (_, stderr, code) = run(
+        source.path(),
+        &["export", "--desk", "-o", document.to_str().unwrap()],
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+
+    let target = tempfile::tempdir().unwrap();
+    let (_, stderr, code) = run(
+        target.path(),
+        &["import", "umux", document.to_str().unwrap(), "--desk"],
+    );
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let expected = WorkspaceStore::new(source.path().join("workspaces.json")).load();
+    let imported = WorkspaceStore::new(target.path().join("workspaces.json")).load();
+    assert_eq!(
+        imported, expected,
+        "export → import into a fresh store is state-identical"
+    );
+}
+
+#[test]
+fn import_umux_dry_run_prints_a_summary_and_writes_nothing() {
+    let store = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    seed_workspaces(source.path(), &[("ws-1", "alpha")]);
+    let document = source.path().join("doc.json");
+    let (_, _, code) = run(
+        source.path(),
+        &["export", "--desk", "-o", document.to_str().unwrap()],
+    );
+    assert_eq!(code, Some(0));
+
+    let (stdout, stderr, code) = run(
+        store.path(),
+        &["import", "umux", document.to_str().unwrap(), "--desk", "--dry-run"],
+    );
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stdout.contains("alpha") || stdout.contains("1 workspace"), "{stdout}");
+    assert!(
+        !store.path().join("workspaces.json").exists(),
+        "--dry-run writes nothing"
+    );
+}
+
+#[test]
+fn import_umux_malformed_document_names_the_file_and_spares_the_store() {
+    let store = tempfile::tempdir().unwrap();
+    seed_parity_live(store.path());
+    let before = std::fs::read(store.path().join("workspaces.json")).unwrap();
+    let bad = store.path().join("broken.json");
+    std::fs::write(&bad, "{ not an exchange document").unwrap();
+
+    let (_, stderr, code) = run(store.path(), &["import", "umux", bad.to_str().unwrap(), "--desk"]);
+
+    assert_ne!(code, Some(0), "a malformed document must fail");
+    assert!(
+        stderr.contains("broken.json"),
+        "the error names the file: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(store.path().join("workspaces.json")).unwrap(),
+        before,
+        "the store is untouched"
+    );
+}
+
+#[test]
+fn import_cmux_malformed_source_names_the_file_and_spares_the_store() {
+    let store = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    seed_parity_live(store.path());
+    let before = std::fs::read(store.path().join("workspaces.json")).unwrap();
+    let bad = store.path().join("bad-config.json");
+    std::fs::write(&bad, "{ nope").unwrap();
+
+    let (_, stderr, code) = run_with_env(
+        store.path(),
+        &[("HOME", home.path())],
+        &[
+            "import", "cmux", "--desk",
+            "--config", bad.to_str().unwrap(),
+        ],
+    );
+
+    assert_ne!(code, Some(0), "a malformed source must fail");
+    assert!(
+        stderr.contains("cmux.json") && stderr.contains("malformed"),
+        "the error names the file: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(store.path().join("workspaces.json")).unwrap(),
+        before,
+        "the store is untouched"
+    );
+}
