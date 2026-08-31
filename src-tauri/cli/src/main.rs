@@ -10,16 +10,19 @@
 //! tempdir.
 
 use clap::{CommandFactory, Parser};
+use store_core::exchange::{to_exchange, ExchangeKind};
 use store_core::settings_store::{serialize_settings, Settings, SettingsStore};
 use store_core::workspace_store::{
     serialize_config, LayoutNode, Orientation, Tab, Workspace, WorkspaceStore,
 };
 
+mod notify;
+
 #[derive(Parser)]
 #[command(
     name = "umux",
     version,
-    about = "umux — terminal workspace manager (CLI: manage saved workspaces and settings)"
+    about = "umux — terminal workspace manager (CLI: manage saved workspaces, export them, send notifications)"
 )]
 struct Cli {
     /// Operate on the desktop app's store (the saved GUI state)
@@ -38,6 +41,18 @@ struct Cli {
 enum Command {
     /// Print the saved workspaces/tabs/panels as JSON
     List,
+    /// Dump the chosen store as a neutral exchange JSON document (#61; the
+    /// format is documented in the README's Exchange format section)
+    Export {
+        /// Write to FILE instead of stdout
+        #[arg(short = 'o', long = "output", value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Show a desktop notification without the app running (#62)
+    Notify {
+        /// The notification text (passed through as-is)
+        text: String,
+    },
     /// Create a new empty workspace
     New { name: String },
     /// Delete a workspace by name
@@ -88,6 +103,14 @@ impl Cli {
             _ => Err("add --desk or --term"),
         }
     }
+}
+
+/// Whether a subcommand reads or writes a store — only those require
+/// --desk/--term, so a forgotten flag is refused instead of silently writing
+/// the desktop store. `notify` touches no store (it only talks to the OS
+/// notification system), so it runs without a target.
+fn needs_store(command: &Command) -> bool {
+    !matches!(command, Command::Notify { .. })
 }
 
 /// The workspace store file for a target (`--desk` = the desktop app's, the
@@ -250,9 +273,9 @@ fn main() {
         return;
     }
 
-    // Every subcommand touches the store; only the bare launcher (`--term`
-    // with no command, v1.3.0's TUI) and help don't.
-    if cli.command.is_some() {
+    // Every store-touching subcommand requires a target; the bare launcher
+    // (`--term` with no command, v1.3.0's TUI), help and `notify` don't.
+    if cli.command.as_ref().is_some_and(needs_store) {
         if let Err(hint) = cli.target() {
             eprintln!("{hint}");
             std::process::exit(2);
@@ -265,6 +288,25 @@ fn main() {
         Some(Command::List) => {
             let store = workspace_store_for(target.unwrap());
             println!("{}", serialize_config(&store.load()));
+        }
+        Some(Command::Export { output }) => {
+            let store = workspace_store_for(target.unwrap());
+            let json = to_exchange(ExchangeKind::Workspaces, &store.load());
+            match output {
+                Some(path) => {
+                    if let Err(e) = std::fs::write(&path, format!("{json}\n")) {
+                        eprintln!("could not write {}: {e}", path.display());
+                        std::process::exit(1);
+                    }
+                }
+                None => println!("{json}"),
+            }
+        }
+        Some(Command::Notify { text }) => {
+            if let Err(message) = notify::send(&notify::PlatformNotifier, &text) {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
         }
         Some(Command::New { name }) => {
             let store = workspace_store_for(target.unwrap());

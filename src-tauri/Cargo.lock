@@ -4370,6 +4370,7 @@ name = "umux"
 version = "1.0.2"
 dependencies = [
  "clap",
+ "serde_json",
  "store_core",
  "tempfile",
 ]

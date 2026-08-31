@@ -13,7 +13,9 @@
 //! - [`workspace_store`] — workspace model + persistence.
 //! - [`settings_store`] — feature toggles + persistence.
 //! - [`paths`] — per-OS config directory + the one-time legacy migration.
+//! - [`exchange`] — the neutral exchange format export/import speak (#61).
 
+pub mod exchange;
 pub mod paths;
 pub mod settings_store;
 pub mod workspace_store;

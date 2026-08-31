@@ -566,3 +566,142 @@ fn term_writes_touch_only_the_term_store() {
     assert_eq!(code, Some(0));
     assert_eq!(parse_config(&stdout).workspaces[0].name, "termws");
 }
+
+// --- #61: export (neutral exchange format) ---------------------------------
+//
+// Assumptions encoded here (state-before-RED, #61):
+// - `export` writes the envelope documented in the README's Exchange format
+//   section: {format:"umux-exchange", version:1, kind:"workspaces", data}.
+// - `data` is the store's OWN serialized shape — an exported document's data
+//   parses back into the identical WorkspaceData (the round-trip property
+//   import #63 relies on).
+// - `-o FILE` writes the file and leaves stdout empty; without `-o` the
+//   document goes to stdout. A first-run (missing) store exports empty data —
+//   export never refuses.
+// - Like every store-touching command, export demands --desk/--term: a
+//   forgotten flag exits non-zero with the same hint, never a silent write.
+
+/// Parse an exchange document, asserting it IS one (envelope fields present).
+fn exchange_doc(text: &str) -> serde_json::Value {
+    let doc: serde_json::Value = serde_json::from_str(text).expect("valid JSON document");
+    assert_eq!(doc["format"], "umux-exchange", "envelope names the format");
+    assert_eq!(doc["version"], 1, "envelope carries format version 1");
+    assert_eq!(doc["kind"], "workspaces", "envelope names the payload kind");
+    doc
+}
+
+#[test]
+fn export_desk_writes_a_file_matching_the_store() {
+    let store = tempfile::tempdir().unwrap();
+    seed_workspaces(store.path(), &[("ws-1", "alpha"), ("ws-2", "beta")]);
+    let out = store.path().join("out.json");
+
+    let (stdout, stderr, code) =
+        run(store.path(), &["export", "--desk", "-o", out.to_str().unwrap()]);
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.is_empty(),
+        "with -o the document goes to the file, not stdout: {stdout}"
+    );
+
+    let doc = exchange_doc(&std::fs::read_to_string(&out).unwrap());
+    let data: WorkspaceData = serde_json::from_value(doc["data"].clone()).unwrap();
+    // "content equals the store state" — against store_core as the oracle.
+    let expected = WorkspaceStore::new(store.path().join("workspaces.json")).load();
+    assert_eq!(data, expected);
+    assert_eq!(data.workspaces.len(), 2, "both workspaces exported");
+}
+
+#[test]
+fn export_without_output_prints_the_document_to_stdout() {
+    let store = tempfile::tempdir().unwrap();
+    seed_workspaces(store.path(), &[("ws-1", "alpha")]);
+
+    let (stdout, stderr, code) = run(store.path(), &["export", "--desk"]);
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let doc = exchange_doc(&stdout);
+    let data: WorkspaceData = serde_json::from_value(doc["data"].clone()).unwrap();
+    assert_eq!(data.workspaces[0].name, "alpha");
+}
+
+#[test]
+fn export_term_reads_the_terminal_store() {
+    let store = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(store.path().join("term")).unwrap();
+    seed_workspaces(&store.path().join("term"), &[("ws-t", "termws")]);
+
+    let (stdout, stderr, code) = run(store.path(), &["export", "--term"]);
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let doc = exchange_doc(&stdout);
+    let data: WorkspaceData = serde_json::from_value(doc["data"].clone()).unwrap();
+    assert_eq!(data.workspaces[0].name, "termws", "--term exported the term store");
+}
+
+#[test]
+fn export_of_a_missing_store_produces_an_empty_document() {
+    let store = tempfile::tempdir().unwrap();
+
+    let (stdout, stderr, code) = run(store.path(), &["export", "--desk"]);
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let doc = exchange_doc(&stdout);
+    let data: WorkspaceData = serde_json::from_value(doc["data"].clone()).unwrap();
+    assert_eq!(data, WorkspaceData::default(), "a first-run store exports empty data");
+}
+
+#[test]
+fn export_without_a_target_flag_is_refused_with_a_hint() {
+    let store = tempfile::tempdir().unwrap();
+    seed_workspaces(store.path(), &[("ws-1", "alpha")]);
+
+    let (_, stderr, code) = run(store.path(), &["export"]);
+
+    assert_ne!(code, Some(0), "a target-less export must not succeed");
+    assert!(
+        stderr.contains("--desk") && stderr.contains("--term"),
+        "the hint names both flags: {stderr}"
+    );
+    assert!(
+        !store.path().join("out.json").exists(),
+        "a refused export wrote nothing"
+    );
+}
+
+// --- #62: notify without the app running ------------------------------------
+//
+// Assumption: the success path (a real notification appears) is the issue's
+// HITL observable — an automated success test would pop a banner on every
+// `cargo test`, so it is NOT asserted here. The automated contract is the
+// failure path: with no notification tool reachable (PATH emptied), the CLI
+// prints a clear error and exits non-zero — exactly the "unavailable
+// notification system" case from the issue.
+#[test]
+fn notify_with_an_unavailable_backend_fails_with_a_clear_error() {
+    let store = tempfile::tempdir().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_umux"))
+        .args(["notify", "hello world"])
+        .env("UMUX_CONFIG_DIR", store.path())
+        // No PATH = no notify-send / osascript / powershell findable: the
+        // simulated missing notification backend.
+        .env("PATH", "")
+        .output()
+        .expect("spawn umux binary");
+
+    assert!(
+        !output.status.success(),
+        "an unavailable backend must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notification failed"),
+        "the error is clear about what failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("notify-send") || stderr.contains("osascript") || stderr.contains("powershell"),
+        "the error names the platform tool: {stderr}"
+    );
+}

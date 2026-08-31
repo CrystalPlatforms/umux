@@ -296,6 +296,59 @@ umux reports a **single anonymous event** — `app_open` at startup — to [Apta
 
 ---
 
+## CLI (`umux`)
+
+umux ships a small command-line tool for scripting and offline work. It reads and writes the **same store files as the app** through the same library, so a CLI write and an app write can never disagree about the format. Build it from source (it is part of the Cargo workspace):
+
+```bash
+cd src-tauri
+cargo build --release --package umux
+# → src-tauri/target/release/umux
+```
+
+Every command that touches a store needs a target: `--desk` (the desktop app's store) or `--term` (the terminal-UI store, whose TUI ships in v1.3.0).
+
+```bash
+umux list --desk                    # saved workspaces as JSON
+umux new myproject --desk           # create an empty workspace
+umux rename old new --desk          # rename a workspace
+umux rm myproject --desk            # delete a workspace
+umux split myproject --desk         # split its layout side-by-side (add --vertical for top/bottom)
+umux config get --desk              # all settings as JSON
+umux config set notifications-enabled true --desk
+
+umux export --desk -o backup.json   # export the store (see Exchange format below)
+umux export --desk                  # …or print the document to stdout
+
+umux notify "build finished"        # desktop notification, no app needed
+```
+
+`umux notify` uses the same notification mechanism as the app (`notify-send` on Linux, Notification Center via `osascript` on macOS, a Windows toast). If the platform's notification system is unavailable, it prints a clear error and exits non-zero. Point `UMUX_CONFIG_DIR` at a directory to move the whole store root (handy for testing).
+
+> **macOS note:** the banner is attributed to **Script Editor** — a macOS limitation of the system's AppleScript bridge, which owns every `osascript` notification (the umux app itself shows the same attribution on macOS). The title and text are correct; on Linux the sender shows as **umux**.
+
+### Exchange format
+
+`umux export` writes a **neutral, self-describing JSON document** — the format `umux import` (v1.2.0) and Desktop↔Terminal transfer (v1.3.0) both read back. Settings are deliberately not part of it: they are per-app configuration, not state you move between surfaces.
+
+```json
+{
+  "format": "umux-exchange",
+  "version": 1,
+  "kind": "workspaces",
+  "data": { "workspaces": [ ... ], "groups": [ ... ], "order": [ ... ] }
+}
+```
+
+| Field      | Meaning                                                                                                              |
+| ---------- | -------------------------------------------------------------------------------------------------------------------- |
+| `format`   | Always `"umux-exchange"` — anything else is not an umux exchange document.                                            |
+| `version`  | Format version, currently `1`. **Readers must refuse unknown versions with a clear message** — never guess.            |
+| `kind`     | What `data` holds: `"workspaces"` (the store's workspace state: workspaces, groups, order).                            |
+| `data`     | The store's own serialized shape — the exact JSON `workspaces.json` uses — so export → import round-trips unchanged.   |
+
+---
+
 ## Contributing
 
 umux is open source and contributions are welcome. To get started:
