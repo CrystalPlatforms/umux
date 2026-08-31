@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public-assets/umux-logo-hero.png" alt="umux — terminal workspace manager" width="620">
+  <img src="landing/assets/umux-logo-hero.png" alt="umux — terminal workspace manager" width="620">
 </p>
 
 A terminal workspace manager for **Linux, Windows, and macOS** — a lightweight, project-oriented alternative to terminal multiplexers like tmux, built as a single native desktop app. Group your terminals into named **workspaces** (one per project), split each into **multiple resizable panels**, connect to remote machines over **SSH**, and get a **desktop notification** when a long-running task finishes.

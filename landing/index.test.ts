@@ -15,8 +15,8 @@ import { JSDOM } from "jsdom";
 //  - Input: the full HTML text of landing/index.html at the repo root.
 //  - "Auto-latest" downloads use the GitHub Releases pattern
 //    `releases/latest/download/<asset>`; asset names embed the version and
-//    are bumped on each release (names confirmed with CI for v1.0.2 — see
-//    removed-marketing-drafts). Windows ships NSIS only (.exe, no .msi).
+//    are bumped on each release (names confirmed with CI for v1.0.2).
+//    Windows ships NSIS only (.exe, no .msi).
 //  - Badges are dynamic shields.io endpoints (they update themselves); we
 //    assert the endpoint shape, not the current numbers.
 //  - Media (demo GIF, screenshots) live under landing/assets/ and ship with
@@ -57,9 +57,8 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
     });
 
     it("brands the header with the logo and the real favicon", () => {
-        // Real assets copied from public-assets/ into landing/assets/ (Pages
-        // root is landing/). The "❯" prompt glyph in front of the brand is
-        // replaced by the logo image.
+        // Real assets live in landing/assets/ (Pages root is landing/). The
+        // "❯" prompt glyph in front of the brand is replaced by the logo image.
         const doc = parse();
         const brandImg = doc.querySelector(".brand img");
         expect(brandImg?.getAttribute("src")).toBe("assets/umux-logo.png");
@@ -130,7 +129,7 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
     it("points the download buttons at the latest release assets for all three platforms", () => {
         // "Auto-latest" = the GitHub `releases/latest/download/<asset>` pattern,
         // which always resolves to the newest release. Asset names are the ones
-        // CI actually produces (confirmed for v1.0.2 in removed-marketing-drafts);
+        // CI actually produces (confirmed for v1.0.2);
         // on a new release only the version inside these names is bumped.
         const doc = parse();
         const hrefs = new Set(
@@ -190,9 +189,8 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
     it("shows the real product screenshots with a placeholder fallback", () => {
         // Adam's shots (2026-08-27): umux-first is the big hero image,
         // umux-agent illustrates the agent-status feature, umux-session the
-        // session-restore one. All live in landing/assets/ under the same
-        // names as public-assets/. A broken image must still degrade to the
-        // inline placeholder, never a broken-icon.
+        // session-restore one. All live in landing/assets/. A broken image
+        // must still degrade to the inline placeholder, never a broken-icon.
         const doc = parse();
         const hero = doc.querySelector(".demo-frame img");
         expect(hero?.getAttribute("src")).toBe("assets/umux-first.png");

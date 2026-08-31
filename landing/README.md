@@ -14,8 +14,8 @@ zamiast GIF-a/screenshotów — normalne, dopóki nie wrzucisz plików (niżej).
 
 ## 2. Materiały graficzne (już na stronie)
 
-Media żyją w `landing/assets/` — kopie plików z `public-assets/` pod tymi
-samymi nazwami. **Podmiana = skopiowanie nowego pliku pod tą samą nazwą**
+Media żyją w `landing/assets/` pod własnymi nazwami.
+**Podmiana = skopiowanie nowego pliku pod tą samą nazwą**
 (HTML bez zmian):
 
 | Plik | Gdzie się pokazuje |
@@ -91,7 +91,7 @@ umux_1.0.4_x64-setup.exe
 ```
 
 Test Ci przypomni, jeśli któraś nazwa się rozjedzie z tym, co produkuje CI
-(wzorzec potwierdzony w `removed-marketing-drafts`). Archiwum aktualizatora
+(wzorzec potwierdzony z CI przy v1.0.2). Archiwum aktualizatora
 (`umux_universal.app.tar.gz`) celowo nie ma linku — nie linkujemy.
 
 ## 6. Checklist HITL (przed publikacją promocji)
@@ -105,4 +105,4 @@ Test Ci przypomni, jeśli któraś nazwa się rozjedzie z tym, co produkuje CI
 - [ ] Logo w nagłówku i favicon karty się renderują
 - [ ] Badge'y (release / license / downloads) się renderują
 - [ ] Po włączeniu GoatCounter: wejścia widoczne w panelu
-- [ ] Dopiero potem: promocja (`removed-marketing-drafts` — wątek X, dev.to)
+- [ ] Dopiero potem: promocja (wątek X, dev.to)
