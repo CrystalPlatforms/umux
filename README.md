@@ -299,7 +299,36 @@ umux reports a **single anonymous event** — `app_open` at startup — to [Apta
 
 ## CLI (`umux`)
 
-umux ships a small command-line tool for scripting and offline work. It reads and writes the **same store files as the app** through the same library, so a CLI write and an app write can never disagree about the format. Build it from source (it is part of the Cargo workspace):
+umux ships a small command-line tool for scripting and offline work. It reads and writes the **same store files as the app** through the same library, so a CLI write and an app write can never disagree about the format.
+
+### `umux` on your PATH
+
+The CLI ships **inside the same installers as the app** — how you get it on your PATH depends on how you installed umux:
+
+| Install method | `umux` availability |
+| --- | --- |
+| **Windows** (NSIS `.exe`) | **Automatic.** The installer adds the install directory to your user PATH — open a **new** terminal and `umux --version` works. (Terminals that were already open keep their old PATH.) Uninstalling removes the PATH entry. |
+| **Linux** (`.deb`) | **Automatic.** The package installs `/usr/bin/umux` — works in any fresh shell. |
+| **macOS** (`.dmg`) | One line. The CLI lives beside the app binary inside the bundle; add it to your PATH once: |
+| **Linux** (`.AppImage`) | Not persistent by design — an AppImage cannot modify your PATH. See the workaround below. |
+
+macOS PATH setup (then open a new terminal):
+
+```bash
+echo 'export PATH="/Applications/umux.app/Contents/MacOS:$PATH"' >> ~/.zshrc
+```
+
+AppImage workaround (extract once, link the binary somewhere already on your PATH):
+
+```bash
+./umux_*_amd64.AppImage --appimage-extract          # → squashfs-root/
+mkdir -p ~/.local/bin
+ln -sf "$PWD/squashfs-root/usr/bin/umux" ~/.local/bin/umux
+# make sure ~/.local/bin is on your PATH (add to ~/.bashrc if needed):
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+```
+
+Build it from source instead (it is part of the Cargo workspace). Note for contributors: `src-tauri/binaries/` (the sidecar copy used by the installers) is a gitignored build artifact — if `tauri dev` ever complains about it, generate it once with `node scripts/bundle-cli.mjs`:
 
 ```bash
 cd src-tauri

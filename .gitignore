@@ -41,3 +41,4 @@ vite.config.d.ts
 .claude/
 pnpm-lock.yaml
 pnpm-workspace.yaml
+src-tauri/binaries/

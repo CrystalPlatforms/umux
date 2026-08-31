@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build && node scripts/bundle-cli.mjs"
   },
   "plugins": {
     "updater": {
@@ -35,9 +35,13 @@
       "csp": null
     }
   },
+  "mainBinaryName": "umux-app",
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/umux"
+    ],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
@@ -49,6 +53,11 @@
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./installer-hooks.nsh"
+      }
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"
