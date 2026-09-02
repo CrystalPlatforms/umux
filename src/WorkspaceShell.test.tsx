@@ -441,8 +441,10 @@ describe('WorkspaceShell', () => {
   })
 
   // --- Phase 7 / Issue #8: close, reopen, delete, reorder -------------------
+  // HITL round (Adam): the row's × is now the FULL DELETE — nothing left
+  // behind, behind the shared confirmation. Cancel keeps everything.
 
-  it('closing a workspace unmounts its panel but keeps it listed (no persistence)', async () => {
+  it('the row × asks first; cancelling removes nothing', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'load_workspaces')
         return Promise.resolve({
@@ -457,32 +459,44 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
 
-    fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /close/i }))
+    fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /delete alpha/i }))
 
-    // The panel is gone (unmounted -> its shell is torn down via pty_close).
-    expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
-    // The definition stays in the sidebar.
+    // The alert names the workspace; cancelling keeps everything.
+    expect(screen.getByText('Delete this workspace?')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
     expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument()
-    // Close is runtime-only: definitions did not change, so nothing is saved.
-    expect(invokeMock).not.toHaveBeenCalledWith('save_workspaces', expect.anything())
+    expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument()
   })
 
-  it('clicking a closed workspace reopens it', async () => {
+  it('confirming the row × deletes the workspace entirely and persists', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'load_workspaces')
-        return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+        })
       return Promise.resolve(undefined)
     })
 
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
 
-    fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /close/i }))
+    fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /delete alpha/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+
+    // Gone from the sidebar AND the open set — nothing left behind.
+    expect(screen.queryByText('alpha', { selector: '.workspace-name' })).not.toBeInTheDocument()
     expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByText('alpha', { selector: '.workspace-name' }))
-
-    expect(await screen.findByTestId('panel-ws-1')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          workspaces: [expect.objectContaining({ id: 'ws-2', name: 'beta' })],
+        }),
+      ),
+    )
   })
 
   it('deletes a workspace from the row context menu after confirmation', async () => {
@@ -1390,15 +1404,35 @@ describe('WorkspaceShell', () => {
         expect(screen.getAllByTestId('terminal-surface')).toHaveLength(2),
       )
 
-      // Focus the FIRST panel, then close + reopen the workspace so both
+      // Focus the FIRST panel, then delete the workspace through the row ×
+      // (with its confirmation) and recreate "alpha" from scratch — its
       // surfaces remount with a closure that predates the workspace below.
       fireEvent.click(screen.getAllByTestId('terminal-surface')[0])
-      fireEvent.click(within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', { name: /close/i }))
-      await waitFor(() =>
-        expect(screen.queryByTestId('panel-ws-1')).not.toBeInTheDocument(),
+      fireEvent.click(
+        within(screen.getByTestId('workspace-row-ws-1')).getByRole('button', {
+          name: /delete alpha/i,
+        }),
       )
-      fireEvent.click(screen.getByTestId('workspace-row-ws-1'))
-      await waitFor(() => expect(screen.getByTestId('panel-ws-1')).toBeInTheDocument())
+      fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+      await waitFor(() =>
+        expect(screen.queryByText('alpha', { selector: '.workspace-name' })).not.toBeInTheDocument(),
+      )
+
+      fireEvent.click(
+        within(screen.getByRole('complementary')).getByRole('button', {
+          name: /add workspace or group/i,
+        }),
+      )
+      fireEvent.click(
+        await screen.findByRole('menuitem', { name: /new workspace/i }),
+      )
+      fireEvent.change(screen.getByLabelText(/new workspace name/i), {
+        target: { value: 'alpha' },
+      })
+      fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
 
       // Create a second workspace AFTER the remount. Scoped to the sidebar:
       // the tab bar carries its own "+" since #37.
@@ -1416,13 +1450,17 @@ describe('WorkspaceShell', () => {
       fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
       await waitFor(() => expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument())
 
-      // Switch back to alpha and focus its second panel.
-      fireEvent.click(screen.getByTestId('workspace-row-ws-1'))
-      fireEvent.click(screen.getAllByTestId('terminal-surface')[1])
+      // Switch back to the recreated alpha (a FRESH id) and focus its panel.
+      const recreatedRow = screen
+        .getAllByTestId(/^workspace-row-/)
+        .find((row) => row.querySelector('.workspace-name')?.textContent === 'alpha')
+      expect(recreatedRow).toBeDefined()
+      fireEvent.click(recreatedRow as HTMLElement)
+      fireEvent.click(screen.getAllByTestId('terminal-surface')[0])
 
       // Type a letter in that panel — with the stale closure this rewound
       // state to the remount snapshot and deleted "beta" outright.
-      fireEvent.keyDown(screen.getAllByTestId('terminal-surface')[1], { key: 'd' })
+      fireEvent.keyDown(screen.getAllByTestId('terminal-surface')[0], { key: 'd' })
 
       expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument()
       expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument()

@@ -27,7 +27,6 @@ import {
   createWorkspace,
   renameWorkspace,
   openWorkspace,
-  closeWorkspace,
   deleteWorkspace,
   setWorkspacePinned,
   createGroup,
@@ -2229,7 +2228,6 @@ export function WorkspaceShell() {
   type PendingClose =
     | { kind: 'panel'; workspaceId: string; panelId: string; label: string }
     | { kind: 'tab'; workspaceId: string; tabId: string; label: string; busyCount: number }
-    | { kind: 'workspace'; workspaceId: string; busyCount: number }
     // Batch close of a multi-selection (#53): one confirmation for every
     // selected workspace's live processes.
     | { kind: 'batch-close'; workspaceIds: string[]; busyCount: number }
@@ -2280,30 +2278,6 @@ export function WorkspaceShell() {
   /// panels have live processes, when any of them does. With no local panels
   /// to check (e.g. all remote, or none mounted yet) nothing can be busy, so
   /// the close happens synchronously like v0.1.
-  const requestCloseWorkspace = (id: string) => {
-    const locals = panelIdsOf(state, id)
-      .map((pid) => ptyIdsRef.current.get(pid))
-      .filter((e): e is PtyEntry => e != null && e.kind === 'local')
-    if (locals.length === 0) {
-      setState(closeWorkspace(stateRef.current, id))
-      void snapshotAndPersist()
-      return
-    }
-    void Promise.all(
-      locals.map((e) =>
-        invoke<boolean>('pty_is_busy', { id: e.id }).catch(() => false),
-      ),
-    ).then((results) => {
-      const busyCount = results.filter(Boolean).length
-      if (busyCount === 0) {
-        setState(closeWorkspace(stateRef.current, id))
-        void snapshotAndPersist()
-        return
-      }
-      setPendingClose({ kind: 'workspace', workspaceId: id, busyCount })
-    })
-  }
-
   const confirmPendingClose = () => {
     const pc = pendingClose
     setPendingClose(null)
@@ -2315,9 +2289,6 @@ export function WorkspaceShell() {
     } else if (pc.kind === 'batch-close') {
       setState(closeWorkspaces(stateRef.current, pc.workspaceIds))
       setSelectedIds([])
-      void snapshotAndPersist()
-    } else {
-      setState(closeWorkspace(stateRef.current, pc.workspaceId))
       void snapshotAndPersist()
     }
   }
@@ -3027,16 +2998,19 @@ export function WorkspaceShell() {
                           workspace rows — the context menu's "Rename
                           workspace" is the single rename entry point (it
                           drives the same inline edit). Group rows keep their
-                          pencil. */}
+                          pencil. HITL round: the row's × is the DELETE —
+                          nothing is left behind, behind the shared
+                          confirmation. */}
                       <button
                         className="icon-btn"
-                        aria-label={`Close ${entry.workspace.name}`}
-                        title="Close (keep workspace)"
+                        aria-label={`Delete ${entry.workspace.name}`}
+                        title="Delete workspace"
                         onClick={(e) => {
                           e.stopPropagation()
-                          // v0.2 Phase 4 / #28: workspace close asks when ANY
-                          // of its panels has a live process (shared dialog).
-                          requestCloseWorkspace(entry.workspace.id)
+                          setPendingDelete({
+                            id: entry.workspace.id,
+                            name: entry.workspace.name,
+                          })
                         }}
                       >
                         <CloseIcon />
@@ -3417,18 +3391,14 @@ export function WorkspaceShell() {
               ? 'Close this panel?'
               : pendingClose.kind === 'tab'
                 ? 'Close this tab?'
-                : pendingClose.kind === 'batch-close'
-                  ? `Close ${pendingClose.workspaceIds.length} workspaces?`
-                  : 'Close this workspace?'
+                : `Close ${pendingClose.workspaceIds.length} workspaces?`
           }
           message={
             pendingClose.kind === 'panel'
               ? `Panel ${pendingClose.label} has a running process. Closing it now will terminate that process.`
               : pendingClose.kind === 'tab'
                 ? `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in tab ${pendingClose.label} ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
-                : pendingClose.kind === 'batch-close'
-                  ? `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in the selected workspaces ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing them now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
-                  : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in this workspace ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+                : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in the selected workspaces ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing them now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
           }
           confirmLabel="Close anyway"
           onConfirm={confirmPendingClose}
