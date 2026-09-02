@@ -64,6 +64,8 @@ import {
   upsertPanelCwd,
   toggleZoom,
   zoomedPanelOf,
+  setWorkspaceColor,
+  COLOR_PALETTE,
   type Group,
   type Panel,
   type Workspace,
@@ -122,6 +124,16 @@ function PencilIcon({ className }: IconProps) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  )
+}
+
+// Color swatch entry (#69): a half-filled dot — the palette picker's glyph.
+function ColorIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none" />
     </svg>
   )
 }
@@ -288,6 +300,10 @@ type MenuState = {
   // The picker was opened from the BATCH selection menu (#53): picking a
   // group moves EVERY selected node, not the single workspace.
   batchMove?: boolean
+  // Set when the COLOR swatch picker is open for this WORKSPACE (#69):
+  // the whole menu renders the eight palette swatches plus the clear entry
+  // (the same in-place swap the group picker uses).
+  colorPickerFor?: string
 } | null
 
 /// A mouse press that should open the context menu: the right button, or
@@ -1779,6 +1795,27 @@ export function WorkspaceShell() {
     if (ws != null) startRename(ws)
   }
 
+  /// Open the color swatch picker (#69): swaps the menu's contents IN PLACE
+  /// for the eight palette swatches + clear (the "Move to group…" pattern —
+  /// stopPropagation on the entry keeps the close-on-click from firing).
+  const openColorPicker = () => {
+    const wsId = menu?.workspaceId
+    if (wsId == null) return
+    setMenu((m) => (m == null ? m : { ...m, colorPickerFor: wsId }))
+  }
+
+  /// Pick a swatch — or clear (#69). Picking the ALREADY chosen swatch again
+  /// unsets (toggle), as does "Clear color"; the setter drops the key on
+  /// clear so the payload stays byte-identical to a never-colored workspace.
+  const pickWorkspaceColor = (color: string | null) => {
+    const wsId = menu?.colorPickerFor
+    setMenu(null)
+    if (wsId == null) return
+    const current =
+      stateRef.current.workspaces.find((w) => w.id === wsId)?.color ?? null
+    persist(setWorkspaceColor(stateRef.current, wsId, current === color ? null : color))
+  }
+
   // --- Group actions (#48; completed in #51/#52) ------------------------------
   // Inline rename (pencil icon or the group menu), Pin/Unpin (#52), Unpack
   // (#51: dissolve — the children return to top level), and the destructive
@@ -2786,7 +2823,19 @@ export function WorkspaceShell() {
                 } ${drag?.kind === 'sidebar' && drag.ids.includes(entry.workspace.id) ? 'is-dragged' : ''} ${
                   selectedIds.includes(entry.workspace.id) ? 'is-selected' : ''
                 }`}
-                style={entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined}
+                style={{
+                  ...(entry.depth > 0
+                    ? { paddingLeft: 8 + entry.depth * 16 }
+                    : {}),
+                  // Active edge in the workspace's chosen color (#69): ONLY
+                  // while this row is the active one — an inactive colored
+                  // row keeps the stylesheet's invisible (transparent) edge,
+                  // and an uncolored row keeps the default accent.
+                  ...(entry.workspace.color != null &&
+                  entry.workspace.id === state.activeId
+                    ? { borderLeftColor: entry.workspace.color }
+                    : {}),
+                }}
                 onPointerDown={(e) => beginSidebarDrag(e, entry.workspace.id)}
                 onClick={(e) => {
                   // A drag's trailing click must not activate the row.
@@ -2858,6 +2907,15 @@ export function WorkspaceShell() {
                             pinned group always leads its siblings. */}
                         {entry.workspace.pinned === true && (
                           <PinIcon className="row-pin" />
+                        )}
+                        {/* Sidebar color dot (#69): the chosen palette color
+                            beside the name — always visible while set. */}
+                        {entry.workspace.color != null && (
+                          <span
+                            className="row-color-dot"
+                            style={{ background: entry.workspace.color }}
+                            aria-hidden="true"
+                          />
                         )}
                         <span className="workspace-name">{entry.workspace.name}</span>
                       </div>
@@ -3404,6 +3462,48 @@ export function WorkspaceShell() {
                 Create group and move
               </button>
             </div>
+          ) : menu.colorPickerFor != null ? (
+            /* Color swatch picker (#69): the eight fixed palette swatches
+                plus the clear entry, swapped IN PLACE like the group picker.
+                Every row is an ordinary interactive menu-item — the shared
+                class carries the press feedback (story #101 standing rule). */
+            <div className="menu-picker" onClick={(e) => e.stopPropagation()}>
+              <div className="menu-picker-title">Color</div>
+              {(() => {
+                const target = state.workspaces.find(
+                  (w) => w.id === menu.colorPickerFor,
+                )
+                return (
+                  <>
+                    {COLOR_PALETTE.map((c) => (
+                      <button
+                        key={c.hex}
+                        className="menu-item"
+                        role="menuitem"
+                        aria-label={`Set color ${c.name}`}
+                        onClick={() => pickWorkspaceColor(c.hex)}
+                      >
+                        <span
+                          className="menu-color-dot"
+                          style={{ background: c.hex }}
+                        />
+                        {target?.color === c.hex ? `${c.name} (picked — again to clear)` : c.name}
+                      </button>
+                    ))}
+                    <div className="menu-separator" />
+                    <button
+                      className="menu-item"
+                      role="menuitem"
+                      aria-label="Clear color"
+                      onClick={() => pickWorkspaceColor(null)}
+                    >
+                      <span className="menu-color-dot menu-color-dot-none" />
+                      Clear color
+                    </button>
+                  </>
+                )
+              })()}
+            </div>
           ) : (
             <>
           {menu.tabId == null && (
@@ -3567,6 +3667,20 @@ export function WorkspaceShell() {
                 >
                   <PencilIcon />
                   Rename workspace
+                </button>
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  // stopPropagation: this item SWAPS the menu's contents for
+                  // the color picker (#69) instead of closing it — the
+                  // container's close-on-click must not fire over it.
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    openColorPicker()
+                  }}
+                >
+                  <ColorIcon />
+                  Color
                 </button>
                 <button
                   className="menu-item"

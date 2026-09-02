@@ -77,6 +77,13 @@ pub struct Workspace {
     // `groupId` on the TS `Workspace` in workspaces.ts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    // Sidebar color (#69 / v1.5.0): one of the eight fixed palette hexes, or
+    // None (unset). `Option` + `default` + `skip_serializing_if` so
+    // pre-color configs load unchanged and uncolored workspaces re-save
+    // WITHOUT the key — mirrors the optional `color` on the TS `Workspace`
+    // in workspaces.ts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// A group node of the sidebar tree (#48): a named container workspaces can
@@ -266,8 +273,8 @@ mod tests {
     fn serialize_config_round_trips() {
         let data = WorkspaceData {
             workspaces: vec![
-                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![], layout: None, pinned: None, group_id: None, tabs: vec![] },
-                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![], layout: None, pinned: None, group_id: None, tabs: vec![] },
+                Workspace { id: "ws-1".into(), name: "alpha".into(), panels: vec![], layout: None, pinned: None, group_id: None, color: None, tabs: vec![] },
+                Workspace { id: "ws-2".into(), name: "beta".into(), panels: vec![], layout: None, pinned: None, group_id: None, color: None, tabs: vec![] },
             ],
             groups: vec![],
             order: vec![],
@@ -309,7 +316,7 @@ mod tests {
                 }],
                 layout: None,
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -351,7 +358,7 @@ mod tests {
                 panels: vec![],
                 layout: None,
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -384,7 +391,7 @@ mod tests {
                 }],
                 layout: None,
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -495,7 +502,7 @@ mod tests {
                 }],
                 layout: None,
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -553,7 +560,7 @@ mod tests {
                 panels: vec![],
                 layout: Some(nested_tree()),
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -593,7 +600,7 @@ mod tests {
                 panels: vec![],
                 layout: Some(nested_tree()),
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -636,7 +643,7 @@ mod tests {
                 panels: vec![],
                 layout: Some(nested_tree()),
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -663,7 +670,7 @@ mod tests {
                     panels: vec![],
                     layout: None,
                     pinned: None,
-                    group_id: Some("g-1".into()),
+                    group_id: Some("g-1".into()), color: None,
                     tabs: vec![],
                 },
                 Workspace {
@@ -672,7 +679,7 @@ mod tests {
                     panels: vec![],
                     layout: None,
                     pinned: None,
-                    group_id: None,
+                    group_id: None, color: None,
                     tabs: vec![],
                 },
             ],
@@ -798,7 +805,7 @@ mod tests {
                 panels: vec![],
                 layout: None,
                 pinned: None,
-                group_id: None,
+                group_id: None, color: None,
                 tabs: vec![],
             }],
             groups: vec![],
@@ -826,7 +833,7 @@ mod tests {
                 panels: vec![],
                 layout: None,
                 pinned: None,
-                group_id: Some("g-inner".into()),
+                group_id: Some("g-inner".into()), color: None,
                 tabs: vec![],
             }],
             groups: vec![
@@ -892,5 +899,88 @@ mod tests {
         assert_eq!(old.groups[0].parent_id, None);
         assert_eq!(old.groups[0].collapsed, None);
         assert_eq!(old.groups[0].pinned, None);
+    }
+
+    // --- Workspace colors (#69 / v1.5.0, stories 94–97) -----------------------
+
+    /// Helper: a config with ONE workspace, the color passed through.
+    fn single_ws(color: Option<&str>) -> WorkspaceData {
+        WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: None,
+                pinned: None,
+                group_id: None,
+                tabs: vec![],
+                color: color.map(|c| c.into()),
+            }],
+            groups: vec![],
+            order: vec![],
+        }
+    }
+
+    // T-C1 (AC "color round-trips through the Rust store"): a colored
+    // workspace's Option field survives serialize → parse unchanged, and the
+    // wire JSON carries the camelCase `color` key with the hex value.
+    #[test]
+    fn color_round_trips_through_the_pure_layer() {
+        let data = single_ws(Some("#ec4899"));
+
+        let text = serialize_config(&data);
+
+        assert!(
+            text.contains(r##""color":"#ec4899""##),
+            "expected the color hex on the wire, got: {text}"
+        );
+        assert_eq!(parse_config(&text), data);
+    }
+
+    // T-C2 (AC "color round-trips through the Rust store"): the color
+    // survives the FILESYSTEM, not just the pure layer — save() then load().
+    #[test]
+    fn color_survives_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path().join("config.json"));
+        let data = single_ws(Some("#a855f7"));
+
+        store.save(&data).unwrap();
+        let back = store.load();
+
+        assert_eq!(back, data);
+        assert_eq!(back.workspaces[0].color.as_deref(), Some("#a855f7"));
+    }
+
+    // T-C3 (AC "JSON without `color` deserializes unchanged"): a config
+    // written by a PRE-COLOR umux (v1.0.4 and earlier) parses with color
+    // None — never an error, never a crash. Guards `#[serde(default)]`.
+    #[test]
+    fn old_config_without_color_loads_none() {
+        let text = r#"{"workspaces":[{"id":"ws-1","name":"alpha"}]}"#;
+
+        let (data, status) = parse_config_with_status(text);
+
+        assert_eq!(status, ConfigStatus::Ok);
+        assert_eq!(data.workspaces.len(), 1);
+        assert_eq!(data.workspaces[0].color, None);
+    }
+
+    // T-C4 (AC "field omitted when unset"): an UNCOLORED workspace
+    // re-serializes WITHOUT the `color` key — byte-identical to pre-color
+    // saves (same discipline as pinned/groupId). Guards
+    // `skip_serializing_if = "Option::is_none"`.
+    #[test]
+    fn uncolored_workspace_serializes_without_the_key() {
+        let data = single_ws(None);
+
+        let text = serialize_config(&data);
+
+        assert!(
+            !text.contains("color"),
+            "uncolored workspace gained a color key: {text}"
+        );
+        // And that lean JSON parses back into the same data.
+        assert_eq!(parse_config(&text), data);
     }
 }

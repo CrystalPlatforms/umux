@@ -106,6 +106,7 @@ vi.mock('./TerminalSurface', () => ({
 }))
 
 import { WorkspaceShell } from './WorkspaceShell'
+import { COLOR_PALETTE } from './workspaces'
 
 /// Open the sidebar's create form via the header "+" dropdown (round 2:
 /// ONE button unfolds the New workspace / New group choice).
@@ -3345,5 +3346,253 @@ describe('context menu stays fully inside the app bounds (HITL)', () => {
     expect(menuEl.style.left).toBe('100px')
     expect(menuEl.style.top).toBe('100px')
     restore()
+  })
+})
+
+// --- Workspace colors: Color submenu in the row menu (#69 / v1.5.0) ----------
+//
+// Assumptions encoded by these tests:
+//  - The workspace-row context menu gains a "Color" entry; clicking it SWAPS
+//    the menu's contents for a swatch picker (the "Move to group…" pattern)
+//    instead of closing the menu.
+//  - The picker lists exactly the eight fixed palette swatches — named for
+//    their accessible labels ("Set color pink") — plus a "Clear color" entry.
+//  - A swatch click persists through save_workspaces; picking the ALREADY
+//    chosen swatch again unsets (toggle), as does "Clear color".
+//  - The swatch rows are ordinary interactive menu items — the shared
+//    menu-item class, so they carry the same press feedback as the rest of
+//    the menu (story #101 standing rule).
+//  - NOT tested here: dot/edge rendering (separate suite below), Rust side.
+describe('workspace colors: Color submenu in the row menu (#69)', () => {
+  const seedTwo = () => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  const openColorPicker = async () => {
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-2'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /^color$/i }))
+  }
+
+  it('the row menu offers Color; picking it swaps the menu for the swatch picker', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    await openColorPicker()
+
+    // All eight palette swatches, named for their accessible labels, plus
+    // the clear entry.
+    for (const c of COLOR_PALETTE) {
+      expect(
+        await screen.findByRole('menuitem', {
+          name: new RegExp(`set color ${c.name}$`, 'i'),
+        }),
+      ).toBeInTheDocument()
+    }
+    expect(
+      screen.getByRole('menuitem', { name: /clear color/i }),
+    ).toBeInTheDocument()
+  })
+
+  it('picking a swatch sets the color and persists it', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    await openColorPicker()
+    fireEvent.click(await screen.findByRole('menuitem', { name: /set color pink$/i }))
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          workspaces: [
+            expect.objectContaining({ id: 'ws-1', name: 'alpha' }),
+            expect.objectContaining({ id: 'ws-2', name: 'beta', color: '#ec4899' }),
+          ],
+        }),
+      ),
+    )
+  })
+
+  it('picking the SAME swatch again unsets the color (toggle)', async () => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta', color: '#ec4899' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    await openColorPicker()
+    fireEvent.click(await screen.findByRole('menuitem', { name: /set color pink$/i }))
+
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<Record<string, unknown>>
+      }
+      expect(last.workspaces[0]).not.toHaveProperty('color')
+      expect(last.workspaces[1]).not.toHaveProperty('color')
+    })
+  })
+
+  it('"Clear color" unsets the color', async () => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta', color: '#eab308' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    await openColorPicker()
+    fireEvent.click(await screen.findByRole('menuitem', { name: /clear color/i }))
+
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<Record<string, unknown>>
+      }
+      expect(last.workspaces[1]).not.toHaveProperty('color')
+    })
+  })
+
+  it('swatch rows share the interactive menu-item styling (press feedback)', async () => {
+    seedTwo()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    await openColorPicker()
+
+    for (const c of COLOR_PALETTE) {
+      const swatch = screen.getByRole('menuitem', {
+        name: new RegExp(`set color ${c.name}$`, 'i'),
+      })
+      expect(swatch.className).toContain('menu-item')
+    }
+    expect(screen.getByRole('menuitem', { name: /clear color/i }).className).toContain(
+      'menu-item',
+    )
+  })
+})
+
+// --- Workspace colors: dot + active edge on the sidebar row (#69) ------------
+//
+// Assumptions encoded by these tests:
+//  - A colored workspace renders a DOT beside its name (always visible while
+//    set, active or not), painted with the chosen hex.
+//  - The row's LEFT ACTIVE EDGE takes the chosen color ONLY while the row is
+//    the active one (inline borderLeftColor); an inactive colored row keeps
+//    the invisible (transparent) edge, and the ACTIVE-UNCOLORED row keeps
+//    the default accent (no inline override).
+//  - Unset color → no dot, no inline edge: exactly today's rendering.
+describe('workspace colors: dot + active edge (#69)', () => {
+  const seedTwoWithColor = () => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta', color: '#ec4899' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  const dotOf = (rowTestId: string) =>
+    screen.getByTestId(rowTestId).querySelector('.row-color-dot')
+
+  it('a colored workspace shows the dot beside its name, painted with the hex', async () => {
+    seedTwoWithColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    const dot = dotOf('workspace-row-ws-2')
+    expect(dot).not.toBeNull()
+    expect((dot as HTMLElement).style.background).toContain('236, 72, 153')
+
+    // The uncolored sibling stays dot-less (today's rendering).
+    expect(dotOf('workspace-row-ws-1')).toBeNull()
+  })
+
+  it('the active colored row takes the color on its left edge', async () => {
+    // ws-1 (uncolored) is active after boot — activate the colored ws-2.
+    seedTwoWithColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+    fireEvent.click(screen.getByTestId('workspace-row-ws-2'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('workspace-row-ws-2').className).toContain('is-active'),
+    )
+    const row = screen.getByTestId('workspace-row-ws-2') as HTMLElement
+    // jsdom normalizes the inline hex to rgb() on read — #ec4899.
+    expect(row.style.borderLeftColor).toBe('rgb(236, 72, 153)')
+  })
+
+  it('an inactive colored row keeps the edge invisible (no inline color)', async () => {
+    seedTwoWithColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('beta', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // ws-1 boots active; ws-2 is colored but NOT active — the edge must stay
+    // unset (the stylesheet's transparent), the dot still visible.
+    const row = screen.getByTestId('workspace-row-ws-2') as HTMLElement
+    expect(row.className).not.toContain('is-active')
+    expect(row.style.borderLeftColor).toBe('')
+    expect(dotOf('workspace-row-ws-2')).not.toBeNull()
+  })
+
+  it('an active UNCOLORED row gets no inline edge (default accent stays)', async () => {
+    seedTwoWithColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    const row = screen.getByTestId('workspace-row-ws-1') as HTMLElement
+    expect(row.className).toContain('is-active')
+    expect(row.style.borderLeftColor).toBe('')
   })
 })

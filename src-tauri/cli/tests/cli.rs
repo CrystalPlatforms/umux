@@ -13,8 +13,8 @@
 //! - `list` prints the saved store EXACTLY as `store_core` serializes it
 //!   (the saved shape IS the machine-readable shape / future live API shape).
 //! - Workspace names are matched first-match; an unknown name exits non-zero.
-//! - Not tested in this iteration: live commands over a socket (v1.3.0),
-//!   import/export/notify (separate issues), the TUI launcher (v1.3.0).
+//! - Not tested in this iteration: live commands over a socket (v1.7.0),
+//!   import/export/notify (separate issues), the TUI launcher (v1.7.0).
 
 use std::path::Path;
 use std::process::Command;
@@ -120,6 +120,7 @@ fn list_desk_prints_the_saved_store_as_json() {
             }],
             pinned: None,
             group_id: None,
+                color: None,
         }],
         groups: vec![],
         order: vec!["ws-1".into()],
@@ -521,7 +522,7 @@ fn config_get_without_key_prints_all_and_invalid_values_are_refused() {
 
 // Assumption: `umux --term` (no subcommand) is the future TUI launcher. It
 // launches nothing today — it says so on stdout and exits 0, so scripts and
-// muscle memory survive until v1.3.0 wires the real launcher.
+// muscle memory survive until v1.7.0 wires the real launcher.
 #[test]
 fn bare_term_responds_that_the_tui_ships_in_v1_3_0() {
     let store = tempfile::tempdir().unwrap();
@@ -530,7 +531,7 @@ fn bare_term_responds_that_the_tui_ships_in_v1_3_0() {
 
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert!(
-        stdout.contains("v1.3.0") && stdout.to_lowercase().contains("tui"),
+        stdout.contains("v1.7.0") && stdout.to_lowercase().contains("tui"),
         "the message names the TUI and its milestone; got: {stdout}"
     );
     assert!(stderr.is_empty());

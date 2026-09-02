@@ -90,7 +90,27 @@ export type Workspace = {
   // the type so old configs type-check on load; bootState consumes it and
   // removes it. Rust keeps the field for the same round-trip reason.
   layout?: LayoutNode
+  // Sidebar color (#69 / v1.5.0, stories 94–97): one of the eight fixed
+  // COLOR_PALETTE hexes, or absent (unset). Absent = exactly today's model
+  // shape — the persisted payload must not gain the key just by passing
+  // through here (same hygiene as `pinned`), mirrored as an Option field in
+  // the Rust store so pre-color configs load unchanged.
+  color?: string
 }
+
+// The fixed eight-color palette (#69 / v1.5.0, story 94): the ONLY colors the
+// app offers (no custom picking). Dark-theme friendly hexes straight from the
+// PRD; each carries a display name for the menu swatches' accessible label.
+export const COLOR_PALETTE: ReadonlyArray<{ name: string; hex: string }> = [
+  { name: 'light green', hex: '#4ade80' },
+  { name: 'dark green', hex: '#16a34a' },
+  { name: 'light blue', hex: '#60a5fa' },
+  { name: 'dark blue', hex: '#2563eb' },
+  { name: 'yellow', hex: '#eab308' },
+  { name: 'red', hex: '#ef4444' },
+  { name: 'pink', hex: '#ec4899' },
+  { name: 'purple', hex: '#a855f7' },
+]
 
 export type WorkspaceState = {
   workspaces: Workspace[]
@@ -856,6 +876,30 @@ export function renameWorkspace(
     workspaces: state.workspaces.map((w) =>
       w.id === id ? { ...w, name } : w,
     ),
+  }
+}
+
+/// Set or clear a workspace's sidebar color (#69 / v1.5.0, stories 94–97).
+/// A palette hex sets/overwrites the `color` field; `null` DROPS the key so a
+/// cleared workspace persists byte-identical to one that was never colored
+/// (same hygiene as omitPinned). No-op for an unknown id. The UI toggle on
+/// top of this (picking the same swatch again unsets) lives in the menu.
+export function setWorkspaceColor(
+  state: WorkspaceState,
+  id: string,
+  color: string | null,
+): WorkspaceState {
+  if (!state.workspaces.some((w) => w.id === id)) return state
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) => {
+      if (w.id !== id) return w
+      if (color == null) {
+        const { color: _dropped, ...rest } = w
+        return rest
+      }
+      return { ...w, color }
+    }),
   }
 }
 

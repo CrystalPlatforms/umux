@@ -5,7 +5,7 @@
 //!
 //! Store-touching commands require a target: `--desk`/`--desktop` (the GUI
 //! app's store) or `--term`/`--terminal` (the terminal-UI store, which the
-//! v1.3.0 TUI will read). `UMUX_CONFIG_DIR` (see store_core::paths) moves the
+//! v1.7.0 TUI will read). `UMUX_CONFIG_DIR` (see store_core::paths) moves the
 //! whole store root — that is how the test suite points the binary at a
 //! tempdir.
 
@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long, alias = "desktop", global = true, conflicts_with = "term")]
     desk: bool,
 
-    /// Operate on the terminal-UI store (the TUI itself ships in v1.3.0)
+    /// Operate on the terminal-UI store (the TUI itself ships in v1.7.0)
     #[arg(long, alias = "terminal", global = true)]
     term: bool,
 
@@ -439,16 +439,16 @@ fn main() {
     }
     let cli = Cli::parse();
 
-    // The bare `--term` launcher: the TUI itself ships in v1.3.0 — say so,
+    // The bare `--term` launcher: the TUI itself ships in v1.7.0 — say so,
     // launch nothing, touch no store.
     if cli.term && cli.command.is_none() {
-        println!("The umux terminal UI (TUI) ships in v1.3.0 — nothing to launch yet.");
+        println!("The umux terminal UI (TUI) ships in v1.7.0 — nothing to launch yet.");
         println!("Manage saved workspaces for it today: umux list --term, umux new <name> --term");
         return;
     }
 
     // Every store-touching subcommand requires a target; the bare launcher
-    // (`--term` with no command, v1.3.0's TUI), help and `notify` don't.
+    // (`--term` with no command, v1.7.0's TUI), help and `notify` don't.
     if cli.command.as_ref().is_some_and(needs_store) {
         if let Err(hint) = cli.target() {
             eprintln!("{hint}");
@@ -488,12 +488,12 @@ fn main() {
                 config,
                 session,
             } => {
-                // Windows import is deliberately refused in v1.2.0 (decision
+                // Windows import is deliberately refused (decision
                 // #4 — cmux's own files were never observed there).
                 #[cfg(windows)]
                 {
                     let _ = (config, session, dry_run);
-                    eprintln!("cmux import is not available in v1.2.0 on Windows.");
+                    eprintln!("cmux import is not available on Windows.");
                     std::process::exit(1);
                 }
                 #[cfg(not(windows))]
@@ -526,6 +526,7 @@ fn main() {
                 }],
                 pinned: None,
                 group_id: None,
+                color: None,
             };
             data.order.push(workspace.id.clone());
             data.workspaces.push(workspace);

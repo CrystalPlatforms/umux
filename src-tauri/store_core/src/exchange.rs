@@ -1,7 +1,7 @@
-//! The neutral umux exchange format (#61, v1.2.0 Phase 4 / story 71).
+//! The neutral umux exchange format (#61, story 71).
 //!
 //! One self-describing JSON envelope carries a store's state between umux
-//! surfaces: `umux export` writes it, the CLI import (#63) and the v1.3.0
+//! surfaces: `umux export` writes it, the CLI import (#63) and the v1.7.0
 //! Desktop↔Terminal transfer read it. It lives in StoreCore — next to the
 //! model it wraps — so every producer and consumer shares ONE definition,
 //! the same reason the stores themselves are here.
@@ -133,6 +133,7 @@ mod tests {
                     layout: None,
                     pinned: None,
                     group_id: Some("g-1".into()),
+                    color: None,
                     tabs: vec![Tab {
                         id: "tab-1".into(),
                         layout: Some(LayoutNode::Split {

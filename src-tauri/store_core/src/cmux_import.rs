@@ -1,4 +1,4 @@
-//! cmux_import — the SECOND cmux importer, in Rust (#63, v1.2.0 Phase 5).
+//! cmux_import — the SECOND cmux importer, in Rust (#63).
 //!
 //! The FIRST importer is the TypeScript one (`src/cmuxImport.ts`, the wizard's
 //! engine). Per the PO decision of 2026-08-30 it stays untouched — this module
@@ -399,6 +399,7 @@ pub fn apply_import_plan(
             tabs,
             pinned: None,
             group_id: None,
+                color: None,
         });
         next.order.push(ws_id.clone());
 

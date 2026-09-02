@@ -448,6 +448,29 @@ body {
   flex-shrink: 0;
 }
 
+/* Sidebar color swatch (#69 / v1.5.0): the chosen palette color beside the
+   name — always visible while set; the hex itself is the inline background.
+   SQUARE (Adam's correction): a flat chip, not a dot, with lightly rounded
+   corners. The clear entry's swatch is an empty ring, reading as "no color". */
+.row-color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.menu-color-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.menu-color-dot-none {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--text-dim);
+}
+
 /* Collapsed-group badge (#50): the live `● N` — N workspaces in the group's
    subtree have at least one active agent. Sits between the name and the row
    actions, never covering the name (flex shrinks the name instead). */

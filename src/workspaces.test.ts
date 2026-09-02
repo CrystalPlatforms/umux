@@ -64,6 +64,8 @@ import {
   toggleZoom,
   zoomedPanelOf,
   type WorkspaceState,
+  setWorkspaceColor,
+  COLOR_PALETTE,
 } from './workspaces'
 import { leafIds, type LayoutNode } from './PaneLayout'
 
@@ -2132,5 +2134,92 @@ describe('batch actions over a multi-selection (#53)', () => {
       const state = seedBatch()
       expect(batchDeleteWorkspaceCount(state, ['g-2', 'ghost'])).toBe(0)
     })
+  })
+})
+
+// --- Workspace colors (#69 / v1.5.0, stories 94–97) --------------------------
+//
+// Assumptions encoded by these tests:
+//  - `color` is an OPTIONAL `string` on the Workspace model — one of the eight
+//    fixed palette hexes, or absent (unset). Absent = exactly today's model
+//    shape: the persisted payload must not gain the key (same key hygiene as
+//    `pinned`/`collapsed`).
+//  - `setWorkspaceColor(state, id, color | null)` is the single setter: a hex
+//    sets/overwrites, `null` clears (drops the key). Unknown id = no-op.
+//  - `COLOR_PALETTE` is the fixed eight, each with a display name — the menu
+//    swatches and the tests both read it; no other colors exist in the app.
+//  - "Picking the same swatch again unsets" is the UI toggle ON TOP of this
+//    setter, tested in the component suite — the model itself is dumb.
+//  - NOT tested here: Rust-side persistence (store_core suite), rendering.
+describe('workspace colors (#69)', () => {
+  const seedOne = (): WorkspaceState => ({
+    ...emptyState,
+    workspaces: [{ id: 'ws-1', name: 'alpha' }],
+  })
+
+  it('sets a color on the workspace and round-trips through bootState (set → persist → load)', () => {
+    const withColor = setWorkspaceColor(seedOne(), 'ws-1', '#ec4899')
+
+    expect(withColor.workspaces[0].color).toBe('#ec4899')
+
+    // "Persist → load" is bootState in the pure model: the seeded config
+    // must come back with the SAME value, untouched by migration.
+    const booted = bootState(withColor.workspaces)
+    expect(booted.workspaces[0].color).toBe('#ec4899')
+  })
+
+  it('overwrites an existing color with a different swatch', () => {
+    let state = seedOne()
+    state = setWorkspaceColor(state, 'ws-1', '#ec4899')
+    state = setWorkspaceColor(state, 'ws-1', '#eab308')
+
+    expect(state.workspaces[0].color).toBe('#eab308')
+  })
+
+  it('clearing drops the color key — byte-identical to a never-colored workspace', () => {
+    let state = seedOne()
+    state = setWorkspaceColor(state, 'ws-1', '#ec4899')
+    state = setWorkspaceColor(state, 'ws-1', null)
+
+    expect(state.workspaces[0]).not.toHaveProperty('color')
+    // And a workspace that never had a color re-saves without the key.
+    const untouched = bootState(state.workspaces)
+    expect(untouched.workspaces[0]).not.toHaveProperty('color')
+  })
+
+  it('is a no-op for an unknown workspace id', () => {
+    const state = seedOne()
+    expect(setWorkspaceColor(state, 'ghost', '#ec4899')).toBe(state)
+  })
+
+  it('only touches the named workspace', () => {
+    const state: WorkspaceState = {
+      ...emptyState,
+      workspaces: [
+        { id: 'ws-1', name: 'alpha' },
+        { id: 'ws-2', name: 'beta' },
+      ],
+    }
+    const next = setWorkspaceColor(state, 'ws-2', '#60a5fa')
+
+    expect(next.workspaces[0].color).toBeUndefined()
+    expect(next.workspaces[1].color).toBe('#60a5fa')
+  })
+
+  it('COLOR_PALETTE is the fixed eight (dark-theme friendly, PRD hexes)', () => {
+    expect(COLOR_PALETTE.map((c) => c.hex)).toEqual([
+      '#4ade80', // light green
+      '#16a34a', // dark green
+      '#60a5fa', // light blue
+      '#2563eb', // dark blue
+      '#eab308', // yellow
+      '#ef4444', // red
+      '#ec4899', // pink
+      '#a855f7', // purple
+    ])
+    // Every entry carries a display name for the menu's accessible label.
+    for (const c of COLOR_PALETTE) {
+      expect(c.name.trim()).not.toBe('')
+    }
   })
 })
