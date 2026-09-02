@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "umux",
-  "version": "1.0.4",
+  "version": "1.5.0",
   "identifier": "com.umux.app",
   "build": {
     "frontendDist": "../dist",

@@ -1,6 +1,6 @@
 [package]
 name = "umux"
-version = "1.0.4"
+version = "1.5.0"
 description = "umux command-line interface: offline workspace/config CRUD against the shared store"
 edition = "2021"
 rust-version = "1.77.2"
