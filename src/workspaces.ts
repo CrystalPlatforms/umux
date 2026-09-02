@@ -121,6 +121,34 @@ export const COLOR_PALETTE: ReadonlyArray<{ name: string; hex: string }> = [
   { name: 'purple', hex: '#a855f7' },
 ]
 
+/// Map an arbitrary hex color onto the nearest palette entry (#73): cmux
+/// lets the user pick ANY color, umux offers the fixed eight, so an imported
+/// color lands on its closest palette hex (squared Euclidean RGB distance;
+/// a tie picks the earlier palette entry — deterministic). Only strict
+/// `#RRGGBB` (case-insensitive) is accepted; anything else — a named color,
+/// shorthand, garbage — imports as NO color.
+export function nearestPaletteColor(raw: string | null | undefined): string | null {
+  if (raw == null || !/^#[0-9a-fA-F]{6}$/.test(raw)) return null
+  const int = parseInt(raw.slice(1), 16)
+  const r = (int >> 16) & 0xff
+  const g = (int >> 8) & 0xff
+  const b = int & 0xff
+  let best = COLOR_PALETTE[0]
+  let bestDist = Infinity
+  for (const c of COLOR_PALETTE) {
+    const ci = parseInt(c.hex.slice(1), 16)
+    const dr = r - ((ci >> 16) & 0xff)
+    const dg = g - ((ci >> 8) & 0xff)
+    const db = b - (ci & 0xff)
+    const dist = dr * dr + dg * dg + db * db
+    if (dist < bestDist) {
+      bestDist = dist
+      best = c
+    }
+  }
+  return best.hex
+}
+
 export type WorkspaceState = {
   workspaces: Workspace[]
   // The sidebar tree (#48). `groups` holds the group nodes; `order` is ONE

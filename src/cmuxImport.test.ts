@@ -363,3 +363,69 @@ describe('applyImportPlan (#54)', () => {
     }
   })
 })
+
+// --- Colors from cmux (#73) ---------------------------------------------------
+//
+// Assumptions encoded:
+//  - The session store's `customColor` (workspace + group) maps onto the
+//    NEAREST umux palette hex at parse time; strict #RRGGBB only, garbage
+//    imports colorless. cmux.json actions carry no colors.
+//  - Apply lands the mapped color on the created Workspace/Group — the
+//    ordinary persistence flow carries it from there.
+//  - cmux panels have NO colors — tabs import colorless.
+describe('cmux color import (#73)', () => {
+  it('maps customColor to the nearest palette hex; garbage imports colorless', () => {
+    const session = JSON.stringify({
+      windows: [
+        {
+          tabManager: {
+            workspaceGroups: [
+              { id: 'g1', name: 'G', customColor: '#a855f7' },
+              { id: 'g2', name: 'H', customColor: 'nope' },
+            ],
+            workspaces: [
+              {
+                workspaceId: 'w1',
+                customTitle: 'Kolor',
+                customColor: '#ff0000',
+              },
+              { workspaceId: 'w2', customTitle: 'Czysty' },
+            ],
+          },
+        },
+      ],
+    })
+    const plan = parseCmuxSources(null, session)
+
+    // Exact palette hex passes through; off-palette red → palette red.
+    expect(plan.workspaces[0].color).toBe('#ef4444')
+    expect(plan.workspaces[1].color).toBeNull()
+    expect(plan.groups[0].color).toBe('#a855f7')
+    expect(plan.groups[1].color).toBeNull()
+  })
+
+  it('apply lands the color on the created workspace and group', () => {
+    const session = JSON.stringify({
+      windows: [
+        {
+          tabManager: {
+            workspaceGroups: [{ id: 'g1', name: 'G', customColor: '#ec4899' }],
+            workspaces: [
+              {
+                workspaceId: 'w1',
+                customTitle: 'Kolor',
+                customColor: '#ec4899',
+                groupId: 'g1',
+              },
+            ],
+          },
+        },
+      ],
+    })
+    const plan = parseCmuxSources(null, session)
+    const next = applyImportPlan(emptyState, plan, counterGen())
+
+    expect(next.workspaces[0].color).toBe('#ec4899')
+    expect(next.groups[0].color).toBe('#ec4899')
+  })
+})

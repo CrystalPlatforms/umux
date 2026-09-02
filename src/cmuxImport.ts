@@ -33,6 +33,7 @@ import {
   moveNode,
   upsertPanelCwd,
   defaultGenId,
+  nearestPaletteColor,
   type WorkspaceState,
 } from './workspaces'
 
@@ -40,7 +41,8 @@ import {
 /// the workspace's separate terminals — Adam's "tabs" — so each imports as
 /// its own tab (single panel), NAMED from the surface's title, carrying its
 /// own directory. A missing title imports the tab unnamed (positional
-/// "Tab N", umux's default).
+/// "Tab N", umux's default). cmux panels carry NO colors (#73) — nothing to
+/// import for tabs.
 export type CmuxImportTab = { name: string | null; directory: string | null }
 
 export type CmuxImportWorkspace = {
@@ -49,6 +51,9 @@ export type CmuxImportWorkspace = {
   title: string
   cwd: string | null
   tabs: CmuxImportTab[]
+  /// #73: the cmux workspace's `customColor`, ALREADY mapped to the nearest
+  /// umux palette hex at parse time. Absent = cmux had no (readable) color.
+  color?: string | null
 }
 
 export type CmuxImportGroup = {
@@ -58,6 +63,9 @@ export type CmuxImportGroup = {
   collapsed: boolean
   pinned: boolean
   memberIds: string[]
+  /// #73: the group's cmux `customColor` mapped to the umux palette, same as
+  /// the workspace field.
+  color?: string | null
 }
 
 export type CmuxImportPlan = {
@@ -121,6 +129,9 @@ export function parseCmuxSources(
           title: name,
           cwd,
           tabs: surfaces.map((s) => ({ name: s.name, directory: cwd })),
+          // cmux.json actions carry no colors (#73) — explicit null keeps the
+          // plan shape JSON-identical to the Rust importer's output.
+          color: null,
         })
       }
     }
@@ -174,6 +185,10 @@ export function parseCmuxSources(
         collapsed: g['isCollapsed'] === true,
         pinned: g['isPinned'] === true,
         memberIds: [],
+        // #73: the group's cmux accent color → nearest umux palette hex.
+        color: nearestPaletteColor(
+          typeof g['customColor'] === 'string' ? (g['customColor'] as string) : null,
+        ),
       })
     })
 
@@ -205,7 +220,16 @@ export function parseCmuxSources(
               }
             })
           : [{ name: null, directory: cwd }]
-      workspaces.push({ id: wsId, title, cwd, tabs })
+      workspaces.push({
+        id: wsId,
+        title,
+        cwd,
+        tabs,
+        // #73: the workspace's cmux accent color → nearest umux palette hex.
+        color: nearestPaletteColor(
+          typeof w['customColor'] === 'string' ? (w['customColor'] as string) : null,
+        ),
+      })
       sessionTitles.add(title)
       const gid = w['groupId']
       if (typeof gid === 'string' && groupIds.has(gid)) {
@@ -288,6 +312,9 @@ export function applyImportPlan(
               ...x,
               ...(g.collapsed ? { collapsed: true as const } : {}),
               ...(g.pinned ? { pinned: true as const } : {}),
+              // #73: the imported group's palette color (key hygiene —
+              // absent when cmux had none).
+              ...(g.color ? { color: g.color } : {}),
             }
           : x,
       ),
@@ -306,6 +333,17 @@ export function applyImportPlan(
     const created = createWorkspace(next, uniqueName(taken, w.title), genId)
     const wsId = created.workspaces[created.workspaces.length - 1].id
     next = created
+    // #73: the imported workspace's palette color — a definition field, set
+    // straight onto the fresh node (absent when cmux had none).
+    if (w.color != null) {
+      const importedColor: string = w.color
+      next = {
+        ...next,
+        workspaces: next.workspaces.map((x) =>
+          x.id === wsId ? { ...x, color: importedColor } : x,
+        ),
+      }
+    }
 
     // One umux TAB per cmux surface (HITL fix 2026-08-29): the seed tab is
     // surface 1; every further surface adds a tab. Each tab is then NAMED

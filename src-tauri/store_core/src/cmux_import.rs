@@ -49,16 +49,21 @@ pub struct CmuxImportTab {
 }
 
 /// One workspace to import. `id` is the SOURCE id (referencing group
-/// membership) — umux assigns its own ids at apply time.
+/// membership) — umux assigns its own ids at apply time. `color` (#73) is
+/// the cmux workspace's `customColor` ALREADY mapped to the nearest umux
+/// palette hex at parse time; None = cmux had no (readable) color.
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct CmuxImportWorkspace {
     pub id: String,
     pub title: String,
     pub cwd: Option<String>,
     pub tabs: Vec<CmuxImportTab>,
+    pub color: Option<String>,
 }
 
 /// One group to import, with its members' source ids. Flat, like cmux's.
+/// `color` (#73): the group's cmux accent color mapped to the umux palette,
+/// same as the workspace field.
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CmuxImportGroup {
@@ -67,6 +72,55 @@ pub struct CmuxImportGroup {
     pub collapsed: bool,
     pub pinned: bool,
     pub member_ids: Vec<String>,
+    pub color: Option<String>,
+}
+
+/// The umux fixed palette (#69) — the ONLY colors the app offers, mirrored
+/// from the TS `COLOR_PALETTE` in workspaces.ts (order matters for the
+/// nearest-match tie-break).
+const IMPORT_PALETTE: [&str; 8] = [
+    "#4ade80", // light green
+    "#16a34a", // dark green
+    "#60a5fa", // light blue
+    "#2563eb", // dark blue
+    "#eab308", // yellow
+    "#ef4444", // red
+    "#ec4899", // pink
+    "#a855f7", // purple
+];
+
+/// Map a cmux accent color (#73) onto the nearest umux palette hex: cmux
+/// lets the user pick ANY color, umux offers the fixed eight, so an imported
+/// color lands on its closest palette entry (squared Euclidean RGB distance;
+/// a tie picks the earlier palette entry — deterministic, same contract as
+/// the TS `nearestPaletteColor`). Only strict `#RRGGBB` (case-insensitive)
+/// is accepted; anything else imports as NO color.
+fn map_cmux_color(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let bytes = raw.as_bytes();
+    if bytes.len() != 7 || bytes[0] != b'#' {
+        return None;
+    }
+    if !bytes[1..].iter().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let int = u32::from_str_radix(&raw[1..], 16).ok()?;
+    // Signed channels — nearest-RGB differences go negative all the time.
+    let r = ((int >> 16) & 0xff) as i32;
+    let g = ((int >> 8) & 0xff) as i32;
+    let b = (int & 0xff) as i32;
+    let mut best: Option<(i32, &str)> = None;
+    for hex in IMPORT_PALETTE {
+        let pi = u32::from_str_radix(&hex[1..], 16).expect("palette hexes are strict");
+        let dr = r - ((pi >> 16) & 0xff) as i32;
+        let dg = g - ((pi >> 8) & 0xff) as i32;
+        let db = b - (pi & 0xff) as i32;
+        let dist = dr * dr + dg * dg + db * db;
+        if best.map_or(true, |(bd, _)| dist < bd) {
+            best = Some((dist, hex));
+        }
+    }
+    best.map(|(_, hex)| hex.to_string())
 }
 
 /// The parse output: everything the sources describe, in source order.
@@ -142,6 +196,9 @@ pub fn parse_cmux_sources(
                         title: name,
                         cwd,
                         tabs,
+                        // cmux.json actions carry no colors — the session
+                        // store is the only color source (#73).
+                        color: None,
                     });
                     extra += 1;
                 }
@@ -197,6 +254,8 @@ pub fn parse_cmux_sources(
                     collapsed: g.get("isCollapsed") == Some(&Value::Bool(true)),
                     pinned: g.get("isPinned") == Some(&Value::Bool(true)),
                     member_ids: Vec::new(),
+                    // #73: the group's cmux accent color → nearest palette hex.
+                    color: map_cmux_color(g.get("customColor").and_then(Value::as_str)),
                 });
             }
 
@@ -247,7 +306,14 @@ pub fn parse_cmux_sources(
                     // same treatment bootState gives one on load.
                     _ => {}
                 }
-                workspaces.push(CmuxImportWorkspace { id: ws_id, title, cwd, tabs });
+                workspaces.push(CmuxImportWorkspace {
+                    id: ws_id,
+                    title,
+                    cwd,
+                    tabs,
+                    // #73: the workspace's cmux accent color → nearest palette hex.
+                    color: map_cmux_color(w.get("customColor").and_then(Value::as_str)),
+                });
             }
         }
     }
@@ -356,7 +422,8 @@ pub fn apply_import_plan(
             collapsed: g.collapsed.then_some(true),
             pinned: g.pinned.then_some(true),
             parent_id: None,
-            color: None,
+            // #73: the imported group's palette color from the plan.
+            color: g.color.clone(),
         });
         next.order.push(gid.clone());
         group_id_map.insert(g.id.clone(), gid);
@@ -402,7 +469,8 @@ pub fn apply_import_plan(
             tabs,
             pinned: None,
             group_id: None,
-                color: None,
+            // #73: the imported workspace's palette color from the plan.
+            color: w.color.clone(),
         });
         next.order.push(ws_id.clone());
 
@@ -804,5 +872,90 @@ mod tests {
             .count()
             == 2);
         assert_eq!(out.order.len(), out.workspaces.len() + out.groups.len());
+    }
+
+    // --- Colors from cmux (#73) ------------------------------------------------
+
+    #[test]
+    fn debug_json_variants() {
+        println!(
+            "compact: {:?}",
+            serde_json::from_str::<Value>(
+                r##"{"windows": [{"tabManager": {"workspaceGroups": [], "workspaces": []}}]}"##
+            )
+        );
+        println!(
+            "multiline: {:?}",
+            serde_json::from_str::<Value>(r##"{"windows": [{"tabManager": {
+            "workspaceGroups": [
+                {"id": "g1", "name": "g", "customColor": "#ec4899"}
+            ],
+            "workspaces": [
+                {"workspaceId": "w1", "customTitle": "k", "customColor": "#ff0000"}
+            ]
+        }}]}}"##)
+        );
+    }
+
+    // T-C73-1 (map_cmux_color: an exact palette hex imports 1:1, an
+    // off-palette one lands on its NEAREST palette entry, garbage imports as
+    // NO color; case-insensitive):
+    #[test]
+    fn map_cmux_color_matches_and_maps() {
+        // Exact palette entries pass through untouched.
+        assert_eq!(map_cmux_color(Some("#ec4899")).as_deref(), Some("#ec4899"));
+        assert_eq!(map_cmux_color(Some("#EAB308")).as_deref(), Some("#eab308"));
+        // Off-palette: pure red lands on the palette's red (#ef4444).
+        assert_eq!(map_cmux_color(Some("#ff0000")).as_deref(), Some("#ef4444"));
+        // Garbage and non-hex forms import as NO color.
+        assert_eq!(map_cmux_color(Some("red")), None);
+        assert_eq!(map_cmux_color(Some("#fff")), None);
+        assert_eq!(map_cmux_color(Some("")), None);
+        assert_eq!(map_cmux_color(None), None);
+    }
+
+    // T-C73-2 (parse: workspace AND group customColor from the session store
+    // land on the plan, mapped to the palette; a workspace without the field
+    // imports colorless):
+    #[test]
+    fn parse_reads_custom_color_from_session() {
+        let session = r##"{"windows": [{"tabManager": {
+            "workspaceGroups": [
+                {"id": "g1", "name": "Grupa", "customColor": "#ec4899"},
+                {"id": "g2", "name": "Bez", "customColor": "nope"}
+            ],
+            "workspaces": [
+                {"workspaceId": "w1", "customTitle": "Kolorowy", "customColor": "#ff0000"},
+                {"workspaceId": "w2", "customTitle": "Czysty"}
+            ]
+        }}]}"##;
+        let plan = parse_cmux_sources(None, Some(session)).unwrap();
+
+        assert_eq!(plan.groups.len(), 2);
+        assert_eq!(plan.groups[0].color.as_deref(), Some("#ec4899"));
+        assert_eq!(plan.groups[1].color, None, "garbage imports colorless");
+        assert_eq!(plan.workspaces.len(), 2);
+        // Off-palette red → nearest palette entry (red #ef4444).
+        assert_eq!(plan.workspaces[0].color.as_deref(), Some("#ef4444"));
+        assert_eq!(plan.workspaces[1].color, None);
+    }
+
+    // T-C73-3 (apply: the plan color lands on the created Workspace and
+    // Group — persisted by the ordinary save flow):
+    #[test]
+    fn apply_carries_color_onto_the_created_nodes() {
+        let session = r##"{"windows": [{"tabManager": {
+            "workspaceGroups": [{"id": "g1", "name": "Grupa", "customColor": "#a855f7"}],
+            "workspaces": [
+                {"workspaceId": "w1", "customTitle": "Kolorowy",
+                 "customColor": "#ec4899", "groupId": "g1"}
+            ]
+        }}]}"##;
+        let plan = parse_cmux_sources(None, Some(session)).unwrap();
+
+        let out = apply_import_plan(&WorkspaceData::default(), &plan, &mut seq_ids());
+
+        assert_eq!(out.workspaces[0].color.as_deref(), Some("#ec4899"));
+        assert_eq!(out.groups[0].color.as_deref(), Some("#a855f7"));
     }
 }
