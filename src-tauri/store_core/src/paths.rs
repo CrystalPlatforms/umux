@@ -120,10 +120,27 @@ pub fn settings_path() -> PathBuf {
     config_dir().join("settings.json")
 }
 
+/// Factory reset (#74): remove EVERY umux state file from `dir` —
+/// workspaces.json (workspace/layout/tree definitions) and settings.json —
+/// so the next launch boots first-run clean. A missing file is already
+/// reset (normal on first run); anything else in the directory that is not
+/// a umux state file is left alone.
+pub fn reset_store_files(dir: &std::path::Path) -> std::io::Result<()> {
+    for name in ["workspaces.json", "settings.json"] {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            // Already reset — the normal first-run shape.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// The terminal-UI store root (#60 assumption): a `term/` sibling under the
 /// same config root, so the `--desk` and `--term` stores can never be
 /// confused yet live in one place a user can find. The TUI that reads it
-/// ships in v1.3.0; the CLI manages it offline today.
+/// ships in v1.7.0; the CLI manages it offline today.
 pub fn term_config_dir() -> PathBuf {
     config_dir().join("term")
 }
@@ -243,5 +260,37 @@ mod tests {
         // Same path (Linux): returns before touching the filesystem.
         migrate_legacy_config(legacy.path(), legacy.path());
         assert!(legacy.path().is_dir(), "same-dir call left everything alone");
+    }
+
+    // T-R1 (#74 factory reset): reset_store_files removes BOTH state files
+    // and nothing else — a foreign file in the directory survives.
+    #[test]
+    fn reset_store_files_removes_both_and_leaves_others() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("workspaces.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("settings.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("unrelated.txt"), "keep").unwrap();
+
+        reset_store_files(dir.path()).unwrap();
+
+        assert!(!dir.path().join("workspaces.json").exists());
+        assert!(!dir.path().join("settings.json").exists());
+        assert!(
+            dir.path().join("unrelated.txt").is_file(),
+            "foreign files are never touched"
+        );
+    }
+
+    // T-R2 (#74): an already-reset directory is fine — missing files are the
+    // normal first-run shape, not an error.
+    #[test]
+    fn reset_store_files_tolerates_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        reset_store_files(dir.path()).unwrap();
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(entries.is_empty(), "nothing was created by the reset");
     }
 }

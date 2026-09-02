@@ -12,7 +12,7 @@ pub mod updater_probe;
 // paths) is shared library code since #58: StoreCore (`store_core` crate)
 // owns it so the upcoming `umux` CLI can write the same files through the
 // same implementation. The app just consumes it here.
-use store_core::paths::{config_dir, config_path, legacy_config_dir, migrate_legacy_config, settings_path};
+use store_core::paths::{config_dir, config_path, legacy_config_dir, migrate_legacy_config, reset_store_files, settings_path};
 use store_core::settings_store::{settings_fallback_warning, Settings, SettingsStore};
 use store_core::workspace_store::{fallback_warning, Group, Workspace, WorkspaceData, WorkspaceStore};
 
@@ -743,6 +743,15 @@ fn save_settings(state: State<'_, SettingsStore>, settings: Settings) -> Result<
     state.save(&settings).map_err(|e| e.to_string())
 }
 
+/// Factory reset (#74): remove EVERY umux state file — workspaces.json (the
+/// workspace/layout/tree store) and settings.json — so the next launch boots
+/// first-run clean. The frontend restarts the app afterwards (plugin-process
+/// relaunch), so the fresh state is what the user actually sees.
+#[tauri::command]
+fn reset_all() -> Result<(), String> {
+    reset_store_files(&config_dir()).map_err(|e| format!("reset failed: {e}"))
+}
+
 /// Open settings.json with the platform's default handler (Settings footnote
 /// link): the file the toggles persist to, revealed in the user's own editor.
 /// Fire-and-forget spawn — a GUI editor may stay open for hours, so we never
@@ -908,6 +917,7 @@ pub fn run() {
             notifications_muted,
             load_settings,
             save_settings,
+            reset_all,
             open_settings_file,
             updater_status,
             cmux_import::read_cmux_import_sources,

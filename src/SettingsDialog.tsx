@@ -90,6 +90,7 @@ export function SettingsDialog({
   onClose,
   onOpenSettingsFile,
   onImportWizard,
+  onResetAll,
   updates,
 }: {
   settings: Settings
@@ -104,6 +105,12 @@ export function SettingsDialog({
   // renders from WorkspaceShell; Apply closes BOTH dialogs, so this
   // component stays invoke-free with no outcome line of its own.
   onImportWizard?: () => void
+  // Factory reset (#74): clicking asks the parent to wipe EVERY umux state
+  // file and relaunch first-run clean. Presentational here — the invoke and
+  // the relaunch live in WorkspaceShell. The button arms on the FIRST click
+  // (its label changes) and only the SECOND click fires, so a stray press
+  // can never wipe the store on its own.
+  onResetAll?: () => void
   // The update row (issue #66): presentational only — the plugin flows live
   // in updater.ts and the glue in WorkspaceShell. Absent = the row is not
   // rendered at all.
@@ -142,6 +149,11 @@ export function SettingsDialog({
     window.addEventListener('pointerdown', close)
     return () => window.removeEventListener('pointerdown', close)
   }, [importOpen])
+
+  // Reset arming (#74): the first click ARMS (label changes to the confirm
+  // question), only the second fires the reset. Two deliberate clicks — a
+  // stray press can never wipe the store.
+  const [resetArmed, setResetArmed] = useState(false)
 
   return (
     <div
@@ -277,6 +289,38 @@ export function SettingsDialog({
               </div>
             </div>
           </>
+        )}
+
+        {/* Factory reset (#74): removes EVERY umux state file (workspaces,
+            layouts, groups, settings) and relaunches first-run clean. The
+            two-click arm keeps a stray press from wiping the store. */}
+        {onResetAll != null && (
+          <div className="settings-row" data-testid="reset-row">
+            <div className="settings-row__text">
+              <span className="settings-row__label">Reset umux</span>
+              <span className="settings-row__description">
+                Removes all workspaces, layouts and settings, then restarts
+                umux. This cannot be undone.
+              </span>
+            </div>
+            <div className="settings-import">
+              <button
+                type="button"
+                className={resetArmed ? 'btn-danger' : 'btn-secondary'}
+                data-testid="reset-button"
+                onClick={() => {
+                  if (!resetArmed) {
+                    setResetArmed(true)
+                    return
+                  }
+                  setResetArmed(false)
+                  onResetAll()
+                }}
+              >
+                {resetArmed ? 'Really reset everything?' : 'Reset umux…'}
+              </button>
+            </div>
+          </div>
         )}
 
         <div className="settings-footnote">

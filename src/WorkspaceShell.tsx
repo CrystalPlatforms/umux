@@ -20,6 +20,9 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 // Issue #72: clicking a listening port opens http://localhost:{port} in the
 // system browser (the clipboard copy stays).
 import { openUrl } from '@tauri-apps/plugin-opener'
+// Issue #74: after the factory reset wipes the store, the app relaunches so
+// the user actually lands in the fresh first-run state.
+import { relaunch } from '@tauri-apps/plugin-process'
 import { TerminalSurface } from './TerminalSurface'
 import { EmptyState } from './EmptyState'
 import {
@@ -1297,6 +1300,16 @@ export function WorkspaceShell() {
     void invoke('open_settings_file').catch((e) =>
       console.error('open_settings_file failed:', e),
     )
+  }
+
+  // Factory reset (#74): wipe every umux state file (workspaces.json +
+  // settings.json), then relaunch first-run clean. The relaunch is the user-
+  // visible half — a failed wipe surfaces in the console but never leaves a
+  // half-deleted store, because the reset removes whole files only.
+  const resetAllAndRelaunch = () => {
+    void invoke('reset_all')
+      .then(() => relaunch())
+      .catch((e) => console.error('reset_all failed:', e))
   }
 
   // --- App updates (issue #66) -----------------------------------------------
@@ -3311,6 +3324,9 @@ export function WorkspaceShell() {
           onClose={() => setSettingsOpen(false)}
           onOpenSettingsFile={openSettingsFile}
           onImportWizard={() => setWizardOpen(true)}
+          onResetAll={() => {
+            void resetAllAndRelaunch()
+          }}
           updates={{
             state: updateState,
             onCheck: checkForUpdates,

@@ -199,3 +199,57 @@ describe('SettingsDialog import dropdown (#59 rework)', () => {
     }
   })
 })
+
+// --- Factory reset (#74) ------------------------------------------------------
+//
+// Assumptions encoded:
+//  - The Reset row renders only when the parent passes onResetAll.
+//  - Two deliberate clicks: the first ARMS (label changes, onResetAll NOT
+//    called), the second FIRES. A stray press can never wipe the store.
+//  - The invoke + relaunch live in WorkspaceShell — this component only
+//    reports upward (same invoke-free contract as every other row).
+describe('SettingsDialog factory reset (#74)', () => {
+  it('hides the Reset row when no onResetAll is given', () => {
+    const { queryByTestId } = render(
+      <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
+    )
+    expect(queryByTestId('reset-row')).toBeNull()
+  })
+
+  it('the first click only ARMS the button — onResetAll does not fire', () => {
+    const onResetAll = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onResetAll={onResetAll}
+      />,
+    )
+
+    const button = getByTestId('reset-button')
+    expect(button.textContent).toMatch(/reset umux/i)
+    fireEvent.click(button)
+
+    expect(button.textContent).toMatch(/really reset everything/i)
+    expect(onResetAll).not.toHaveBeenCalled()
+  })
+
+  it('the second click fires onResetAll exactly once', () => {
+    const onResetAll = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onResetAll={onResetAll}
+      />,
+    )
+
+    const button = getByTestId('reset-button')
+    fireEvent.click(button) // arm
+    fireEvent.click(button) // confirm
+
+    expect(onResetAll).toHaveBeenCalledTimes(1)
+  })
+})
