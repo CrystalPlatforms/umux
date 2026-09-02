@@ -3528,6 +3528,12 @@ describe('workspace colors: dot + active edge (#69)', () => {
           workspaces: [
             { id: 'ws-1', name: 'alpha' },
             { id: 'ws-2', name: 'beta', color: '#ec4899' },
+            {
+              id: 'ws-3',
+              name: 'gamma',
+              color: '#ec4899',
+              pinned: true,
+            },
           ],
         })
       return Promise.resolve(undefined)
@@ -3550,6 +3556,22 @@ describe('workspace colors: dot + active edge (#69)', () => {
 
     // The uncolored sibling stays dot-less (today's rendering).
     expect(dotOf('workspace-row-ws-1')).toBeNull()
+  })
+
+  it('a colored PINNED workspace shows a tinted pin INSTEAD of the square (HITL round)', async () => {
+    seedTwoWithColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('gamma', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // The pin IS the color marker for a pinned workspace — no square.
+    expect(dotOf('workspace-row-ws-3')).toBeNull()
+    const pin = screen
+      .getByTestId('workspace-row-ws-3')
+      .querySelector('.row-pin') as HTMLElement
+    expect(pin).not.toBeNull()
+    expect(pin.style.color).toBe('rgb(236, 72, 153)')
   })
 
   it('the active colored row takes the color on its left edge', async () => {
@@ -3594,5 +3616,281 @@ describe('workspace colors: dot + active edge (#69)', () => {
     const row = screen.getByTestId('workspace-row-ws-1') as HTMLElement
     expect(row.className).toContain('is-active')
     expect(row.style.borderLeftColor).toBe('')
+  })
+})
+
+// --- Tab + group colors: rendering and menus (#70 / v1.5.0) ------------------
+//
+// Assumptions encoded by these tests:
+//  - Tabs render their names ONLY in the tab bar (post-#37 there are no
+//    sidebar tab rows), so "the dot everywhere the name renders" = the tab
+//    bar. The square swatch (same shape as the sidebar one) sits beside the
+//    name, always visible while set.
+//  - The active tab's edge: tabs have no left edge today — their default
+//    accent is the TOP strip (inset box-shadow on .tab.is-active). A colored
+//    active tab recolors THAT strip (PRD story 95: the edge takes the item's
+//    color "instead of the default accent"); inactive colored tabs keep no
+//    strip at all.
+//  - Groups: no activation concept exists, so the group's edge shows while
+//    the group CONTAINS the active workspace (the group you are working in
+//    lights up — same subtree aggregation the badge uses). Alternative
+//    semantics (selected-only) is a one-line swap if Adam prefers.
+//  - The tab and group context menus reuse the workspace Color picker
+//    (8 named swatches + Clear color); picking persists through save_workspaces
+//    with the color INSIDE tabs[]/groups[]; re-picking the same swatch unsets.
+describe('tab + group colors (#70)', () => {
+  const seedTabsAndGroups = () => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              tabs: [
+                { id: 't-1', layout: { kind: 'leaf', id: 'p-1' }, name: 'Tab 1' },
+                {
+                  id: 't-2',
+                  layout: { kind: 'leaf', id: 'p-2' },
+                  name: 'Tab 2',
+                  color: '#eab308',
+                },
+                {
+                  id: 't-3',
+                  layout: { kind: 'leaf', id: 'p-3' },
+                  name: 'Tab 3',
+                  color: '#eab308',
+                  pinned: true,
+                },
+              ],
+            },
+          ],
+          groups: [{ id: 'g-1', name: 'projekty' }],
+          order: ['g-1', 'ws-1'],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  const tabDot = (tabId: string) =>
+    screen
+      .getByTestId(`tab-ws-1-${tabId}`)
+      .querySelector('.tab-color-dot')
+
+  it('a colored UNPINNED tab shows the swatch; a colored PINNED tab shows a tinted pin INSTEAD', async () => {
+    seedTabsAndGroups()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('Tab 2', { selector: '.tab-name' })).toBeInTheDocument(),
+    )
+
+    // HITL round (Adam): the pin IS the color marker for a pinned tab —
+    // no square next to it. Unpinned colored tabs carry the square.
+    const unpinnedDot = tabDot('t-2')
+    expect(unpinnedDot).not.toBeNull()
+    expect((unpinnedDot as HTMLElement).style.background).toContain('234, 179, 8')
+
+    expect(tabDot('t-3')).toBeNull()
+    const pin = screen
+      .getByTestId('tab-ws-1-t-3')
+      .querySelector('.tab-pin') as HTMLElement
+    expect(pin).not.toBeNull()
+    expect(pin.style.color).toBe('rgb(234, 179, 8)')
+
+    // The uncolored tab stays swatch-less and its (absent) pin unpainted.
+    expect(tabDot('t-1')).toBeNull()
+  })
+
+  it('the ACTIVE colored tab recolors its top accent strip', async () => {
+    seedTabsAndGroups()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('Tab 2', { selector: '.tab-name' })).toBeInTheDocument(),
+    )
+
+    // Tab 1 boots active — switch to the colored Tab 2.
+    fireEvent.click(screen.getByTestId('tab-ws-1-t-2'))
+    await waitFor(() =>
+      expect(screen.getByTestId('tab-ws-1-t-2').getAttribute('aria-selected')).toBe(
+        'true',
+      ),
+    )
+    const tab = screen.getByTestId('tab-ws-1-t-2') as HTMLElement
+    // jsdom keeps box-shadow verbatim (no rgb normalization like colors).
+    expect(tab.style.boxShadow).toContain('#eab308')
+  })
+
+  it('an inactive colored tab keeps no strip; an active uncolored one keeps the default', async () => {
+    seedTabsAndGroups()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('Tab 2', { selector: '.tab-name' })).toBeInTheDocument(),
+    )
+
+    // Tab 1 boots active and uncolored — no inline strip override.
+    const active = screen.getByTestId('tab-ws-1-t-1') as HTMLElement
+    expect(active.getAttribute('aria-selected')).toBe('true')
+    expect(active.style.boxShadow).toBe('')
+
+    // The colored tab is inactive — strip hidden (dot still visible).
+    const inactive = screen.getByTestId('tab-ws-1-t-2') as HTMLElement
+    expect(inactive.getAttribute('aria-selected')).toBe('false')
+    expect(inactive.style.boxShadow).toBe('')
+    expect(tabDot('t-2')).not.toBeNull()
+  })
+
+  it('the tab menu offers Color; picking a swatch persists the tab color', async () => {
+    seedTabsAndGroups()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('Tab 2', { selector: '.tab-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('tab-ws-1-t-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /^color$/i }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /set color yellow$/i }))
+
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+      expect(calls.length).toBeGreaterThan(0)
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<{ tabs?: Array<Record<string, unknown>> }>
+      }
+      expect(last.workspaces[0].tabs?.[0]).toHaveProperty('color', '#eab308')
+    })
+  })
+
+  it('picking the SAME swatch again unsets the tab color', async () => {
+    seedTabsAndGroups()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('Tab 2', { selector: '.tab-name' })).toBeInTheDocument(),
+    )
+
+    // Tab 2 already carries #eab308 (seeded) — re-picking it unsets.
+    fireEvent.contextMenu(screen.getByTestId('tab-ws-1-t-2'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /^color$/i }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /set color yellow$/i }))
+
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+      expect(calls.length).toBeGreaterThan(0)
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<{ tabs?: Array<Record<string, unknown>> }>
+      }
+      expect(last.workspaces[0].tabs?.[1]).not.toHaveProperty('color')
+    })
+  })
+
+  const seedGroupColor = () => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha', groupId: 'g-1' },
+            { id: 'ws-2', name: 'beta' },
+          ],
+          groups: [{ id: 'g-1', name: 'projekty', color: '#a855f7' }],
+          order: ['g-1', 'ws-1', 'ws-2'],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  it('a colored group shows NO square — its FOLDER icon is tinted with the hex (HITL round)', async () => {
+    seedGroupColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    const row = screen.getByTestId('group-row-g-1')
+    expect(row.querySelector('.row-color-dot')).toBeNull()
+    const folder = row.querySelector('.row-folder') as HTMLElement
+    expect(folder).not.toBeNull()
+    expect(folder.style.color).toBe('rgb(168, 85, 247)')
+  })
+
+  it('a colored group shows NO colored edge — not even while holding the active workspace', async () => {
+    seedGroupColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    // HITL round (Adam): groups carry NO edge at all — the tinted folder is
+    // the whole color signal, whether or not the group holds the active ws.
+    const row = screen.getByTestId('group-row-g-1') as HTMLElement
+    expect(row.style.borderLeftColor).toBe('')
+  })
+
+  it('an UNCOLORED group keeps today\'s folder and no square', async () => {
+    // seedGroupColor colors g-1 — assert through the uncolored side instead:
+    // ws-2's row is a workspace row; for the group use a second seed without
+    // color by re-seeding empty groups.
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [{ id: 'ws-1', name: 'alpha' }],
+          groups: [{ id: 'g-1', name: 'bez-koloru' }],
+          order: ['g-1', 'ws-1'],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('bez-koloru', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    const row = screen.getByTestId('group-row-g-1')
+    expect(row.querySelector('.row-color-dot')).toBeNull()
+    const folder = row.querySelector('.row-folder') as HTMLElement
+    expect(folder).not.toBeNull()
+    expect(folder.style.color).toBe('')
+  })
+
+  it('the group menu offers Color; picking a swatch persists the GROUP color', async () => {
+    seedGroupColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /^color$/i }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /set color yellow$/i }))
+
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+      expect(calls.length).toBeGreaterThan(0)
+      const last = calls[calls.length - 1][1] as {
+        groups: Array<Record<string, unknown>>
+      }
+      expect(last.groups[0]).toHaveProperty('color', '#eab308')
+    })
+  })
+
+  it('"Clear color" from the group menu unsets the group color', async () => {
+    seedGroupColor()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('projekty', { selector: '.workspace-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /^color$/i }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /clear color/i }))
+
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+      expect(calls.length).toBeGreaterThan(0)
+      const last = calls[calls.length - 1][1] as {
+        groups: Array<Record<string, unknown>>
+      }
+      expect(last.groups[0]).not.toHaveProperty('color')
+    })
   })
 })

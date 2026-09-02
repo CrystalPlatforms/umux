@@ -13,7 +13,7 @@
 // UI glue verified by Adam on Ubuntu/Wayland; the testable core lives in
 // ./workspaces (pure state) and the Rust WorkspaceStore (persistence).
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -65,6 +65,8 @@ import {
   toggleZoom,
   zoomedPanelOf,
   setWorkspaceColor,
+  setTabColor,
+  setGroupColor,
   COLOR_PALETTE,
   type Group,
   type Panel,
@@ -109,7 +111,9 @@ import {
 
 // --- Icons (inline SVG, no extra dependency) ---------------------------------
 
-type IconProps = { className?: string }
+// Icons accept an inline `style` so color markers (#69/#70 HITL round) can
+// tint the pin/folder glyphs directly — the icon BECOMES the color marker.
+type IconProps = { className?: string; style?: CSSProperties }
 
 function PlusIcon({ className }: IconProps) {
   return (
@@ -185,31 +189,34 @@ function SidebarExpandIcon({ className }: IconProps) {
 }
 
 
-function PinIcon({ className }: IconProps) {
-  // Pushpin — marks a pinned workspace (#37).
+function PinIcon({ className, style }: IconProps) {
+  // Pushpin — marks a pinned workspace (#37); tints with the node's color
+  // when it is set (#69/#70 HITL round: the pin IS the color marker then).
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M12 17v5" />
       <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z" />
     </svg>
   )
 }
 
-function FolderIcon({ className }: IconProps) {
-  // Folder — marks a group row (#48) and the "Move to group…" actions (#49).
+function FolderIcon({ className, style }: IconProps) {
+  // Folder — marks a group row (#48) and the "Move to group…" actions (#49);
+  // on a colored group (#70 HITL round) it tints with the chosen color.
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
     </svg>
   )
 }
 
-function FolderFilledIcon({ className }: IconProps) {
+function FolderFilledIcon({ className, style }: IconProps) {
   // Filled folder — the COLLAPSED group's glyph (#50, Adam's fix): the same
   // folder shape, filled, so a collapsed group reads at a glance even before
-  // the `● N` badge (or the hidden children) says so.
+  // the `● N` badge (or the hidden children) says so. Tints like the outline
+  // folder on a colored group (#70).
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
     </svg>
   )
@@ -1798,22 +1805,55 @@ export function WorkspaceShell() {
   /// Open the color swatch picker (#69): swaps the menu's contents IN PLACE
   /// for the eight palette swatches + clear (the "Move to group…" pattern —
   /// stopPropagation on the entry keeps the close-on-click from firing).
+  /// The target is whichever node the menu was opened FROM (#70): a tab, a
+  /// workspace, or a group.
   const openColorPicker = () => {
-    const wsId = menu?.workspaceId
-    if (wsId == null) return
-    setMenu((m) => (m == null ? m : { ...m, colorPickerFor: wsId }))
+    const target = menu?.tabId ?? menu?.workspaceId ?? menu?.groupId
+    if (target == null) return
+    setMenu((m) => (m == null ? m : { ...m, colorPickerFor: target }))
   }
 
-  /// Pick a swatch — or clear (#69). Picking the ALREADY chosen swatch again
-  /// unsets (toggle), as does "Clear color"; the setter drops the key on
-  /// clear so the payload stays byte-identical to a never-colored workspace.
+  /// The CURRENT color of the picker's target node, whichever kind it is —
+  /// the "picked — again to clear" read for the swatch rows.
+  const colorOfMenuTarget = (targetId: string): string | null => {
+    if (menu?.tabId != null) {
+      for (const w of stateRef.current.workspaces) {
+        const tab = w.tabs?.find((t) => t.id === targetId)
+        if (tab != null) return tab.color ?? null
+      }
+      return null
+    }
+    if (stateRef.current.groups.some((g) => g.id === targetId)) {
+      return stateRef.current.groups.find((g) => g.id === targetId)?.color ?? null
+    }
+    return stateRef.current.workspaces.find((w) => w.id === targetId)?.color ?? null
+  }
+
+  /// Pick a swatch — or clear (#69, #70). Picking the ALREADY chosen swatch
+  /// again unsets (toggle), as does "Clear color"; the setter drops the key
+  /// on clear so the payload stays byte-identical to a never-colored node.
+  /// The picker target decides the model path: tab, group, or workspace.
   const pickWorkspaceColor = (color: string | null) => {
-    const wsId = menu?.colorPickerFor
+    const targetId = menu?.colorPickerFor
+    const tabId = menu?.tabId
     setMenu(null)
-    if (wsId == null) return
-    const current =
-      stateRef.current.workspaces.find((w) => w.id === wsId)?.color ?? null
-    persist(setWorkspaceColor(stateRef.current, wsId, current === color ? null : color))
+    if (targetId == null) return
+    const toggle = (current: string | null) => (current === color ? null : color)
+    if (tabId != null) {
+      // Tab path (#70): the menu was opened from a TERMINAL TAB; its owning
+      // workspace is the menu's workspaceId.
+      const wsId = menu?.workspaceId
+      if (wsId == null) return
+      const current = colorOfMenuTarget(targetId)
+      persist(setTabColor(stateRef.current, wsId, tabId, toggle(current)))
+      return
+    }
+    if (stateRef.current.groups.some((g) => g.id === targetId)) {
+      const current = colorOfMenuTarget(targetId)
+      persist(setGroupColor(stateRef.current, targetId, toggle(current)))
+      return
+    }
+    persist(setWorkspaceColor(stateRef.current, targetId, toggle(colorOfMenuTarget(targetId))))
   }
 
   // --- Group actions (#48; completed in #51/#52) ------------------------------
@@ -2701,7 +2741,9 @@ export function WorkspaceShell() {
                 } ${drag?.kind === 'sidebar' && drag.ids.includes(entry.group.id) ? 'is-dragged' : ''} ${
                   selectedIds.includes(entry.group.id) ? 'is-selected' : ''
                 }`}
-                style={entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined}
+                style={
+                  entry.depth > 0 ? { paddingLeft: 8 + entry.depth * 16 } : undefined
+                }
                 onPointerDown={(e) => beginSidebarDrag(e, entry.group.id)}
                 onClick={(e) => {
                   // A drag's trailing click must not toggle the group.
@@ -2758,10 +2800,27 @@ export function WorkspaceShell() {
                     {/* The folder state doubles as the collapse indicator
                         (#50, Adam's fix): FILLED when the group is collapsed,
                         outline when expanded — same shape, one glance. */}
+                    {/* Group color (#70 HITL round): the FOLDER icon is the
+                        whole color marker — tinted with the chosen color,
+                        no square, no edge. */}
                     {entry.group.collapsed === true ? (
-                      <FolderFilledIcon className="row-folder" />
+                      <FolderFilledIcon
+                        className="row-folder"
+                        style={
+                          entry.group.color != null
+                            ? { color: entry.group.color }
+                            : undefined
+                        }
+                      />
                     ) : (
-                      <FolderIcon className="row-folder" />
+                      <FolderIcon
+                        className="row-folder"
+                        style={
+                          entry.group.color != null
+                            ? { color: entry.group.color }
+                            : undefined
+                        }
+                      />
                     )}
                     <span className="workspace-name">{entry.group.name}</span>
                     {/* Collapsed-group badge (#50): `● N` — how many
@@ -2904,19 +2963,28 @@ export function WorkspaceShell() {
                     <div className="row-main">
                       <div className="row-name-line">
                         {/* #37: pinned workspaces carry a pin glyph; the
-                            pinned group always leads its siblings. */}
+                            pinned group always leads its siblings. On a
+                            colored one (#69 HITL round) the pin IS the color
+                            marker — tinted, NO square; the square only shows
+                            on an UNPINNED colored workspace. */}
                         {entry.workspace.pinned === true && (
-                          <PinIcon className="row-pin" />
-                        )}
-                        {/* Sidebar color dot (#69): the chosen palette color
-                            beside the name — always visible while set. */}
-                        {entry.workspace.color != null && (
-                          <span
-                            className="row-color-dot"
-                            style={{ background: entry.workspace.color }}
-                            aria-hidden="true"
+                          <PinIcon
+                            className="row-pin"
+                            style={
+                              entry.workspace.color != null
+                                ? { color: entry.workspace.color }
+                                : undefined
+                            }
                           />
                         )}
+                        {entry.workspace.color != null &&
+                          entry.workspace.pinned !== true && (
+                            <span
+                              className="row-color-dot"
+                              style={{ background: entry.workspace.color }}
+                              aria-hidden="true"
+                            />
+                          )}
                         <span className="workspace-name">{entry.workspace.name}</span>
                       </div>
                       {settings.agentStatusEnabled &&
@@ -3063,6 +3131,15 @@ export function WorkspaceShell() {
                         className={`tab ${tabActive ? 'is-active' : ''} ${
                           drag?.kind === 'tab' && drag.id === tab.id ? 'is-dragged' : ''
                         }`}
+                        // Active tab edge (#70): tabs carry their default
+                        // accent as the TOP strip (.tab.is-active's inset
+                        // shadow) — a colored active tab recolors that strip;
+                        // an inactive one keeps no strip at all.
+                        style={
+                          tab.color != null && tabActive
+                            ? { boxShadow: `inset 0 2px 0 0 ${tab.color}` }
+                            : undefined
+                        }
                         // Live pointer drag reorder (round 3; same-workspace
                         // only, #45 semantics): press, move, release — the
                         // line follows the pointer between tabs.
@@ -3096,7 +3173,25 @@ export function WorkspaceShell() {
                           }
                         }}
                       >
-                        {tab.pinned === true && <PinIcon className="tab-pin" />}
+                        {/* Pinned tab (#37) — and on a colored one (#70 HITL
+                            round) the pin IS the color marker: tinted, with
+                            NO square beside it. The square only shows on an
+                            UNPINNED colored tab. */}
+                        {tab.pinned === true && (
+                          <PinIcon
+                            className="tab-pin"
+                            style={
+                              tab.color != null ? { color: tab.color } : undefined
+                            }
+                          />
+                        )}
+                        {tab.color != null && tab.pinned !== true && (
+                          <span
+                            className="tab-color-dot"
+                            style={{ background: tab.color }}
+                            aria-hidden="true"
+                          />
+                        )}
                         {editing ? (
                           <input
                             className="tab-rename"
@@ -3470,9 +3565,26 @@ export function WorkspaceShell() {
             <div className="menu-picker" onClick={(e) => e.stopPropagation()}>
               <div className="menu-picker-title">Color</div>
               {(() => {
-                const target = state.workspaces.find(
-                  (w) => w.id === menu.colorPickerFor,
-                )
+                // The picker's target (#69 workspace, #70 tab or group) —
+                // the same lookup the pick handler branches on.
+                let current: string | null = null
+                if (menu.tabId != null) {
+                  for (const w of state.workspaces) {
+                    const tab = w.tabs?.find((t) => t.id === menu.colorPickerFor)
+                    if (tab != null) {
+                      current = tab.color ?? null
+                      break
+                    }
+                  }
+                } else if (state.groups.some((g) => g.id === menu.colorPickerFor)) {
+                  current =
+                    state.groups.find((g) => g.id === menu.colorPickerFor)?.color ??
+                    null
+                } else {
+                  current =
+                    state.workspaces.find((w) => w.id === menu.colorPickerFor)
+                      ?.color ?? null
+                }
                 return (
                   <>
                     {COLOR_PALETTE.map((c) => (
@@ -3487,7 +3599,7 @@ export function WorkspaceShell() {
                           className="menu-color-dot"
                           style={{ background: c.hex }}
                         />
-                        {target?.color === c.hex ? `${c.name} (picked — again to clear)` : c.name}
+                        {current === c.hex ? `${c.name} (picked — again to clear)` : c.name}
                       </button>
                     ))}
                     <div className="menu-separator" />
@@ -3552,6 +3664,19 @@ export function WorkspaceShell() {
                   >
                     <PinIcon />
                     {pinned ? 'Unpin tab' : 'Pin tab'}
+                  </button>
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    // stopPropagation: this item SWAPS the menu's contents for
+                    // the color picker (#70) instead of closing it.
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openColorPicker()
+                    }}
+                  >
+                    <ColorIcon />
+                    Color
                   </button>
                   <div className="menu-separator" />
                   <button
@@ -3734,6 +3859,19 @@ export function WorkspaceShell() {
                 >
                   <PencilIcon />
                   Rename group
+                </button>
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  // stopPropagation: this item SWAPS the menu's contents for
+                  // the color picker (#70) instead of closing it.
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    openColorPicker()
+                  }}
+                >
+                  <ColorIcon />
+                  Color
                 </button>
                 <button
                   className="menu-item"

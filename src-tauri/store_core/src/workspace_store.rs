@@ -42,6 +42,12 @@ pub struct Tab {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    // Tab color (#70 / v1.5.0): one of the eight fixed palette hexes, or
+    // None (unset). Same `Option` + `default` + `skip_serializing_if`
+    // discipline as the workspace's `color` — pre-color configs load
+    // unchanged, uncolored tabs re-save WITHOUT the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
@@ -104,6 +110,10 @@ pub struct Group {
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    // Group color (#70 / v1.5.0): same optional palette hex and serde
+    // discipline as the tab/workspace `color` fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
@@ -689,6 +699,7 @@ mod tests {
                 collapsed: None,
                 pinned: None,
                 parent_id: None,
+                color: None,
             }],
             order: vec!["ws-2".into(), "g-1".into(), "ws-1".into()],
         }
@@ -843,6 +854,7 @@ mod tests {
                     collapsed: None,
                     pinned: None,
                     parent_id: None,
+                    color: None,
                 },
                 Group {
                     id: "g-inner".into(),
@@ -850,6 +862,7 @@ mod tests {
                     collapsed: Some(true),
                     pinned: Some(true),
                     parent_id: Some("g-outer".into()),
+                    color: None,
                 },
             ],
             order: vec!["g-outer".into(), "g-inner".into(), "ws-1".into()],
@@ -877,6 +890,7 @@ mod tests {
                 collapsed: None,
                 pinned: None,
                 parent_id: Some("g-outer".into()),
+                color: None,
             }],
             order: vec!["g-outer".into(), "g-inner".into()],
         };
@@ -982,5 +996,151 @@ mod tests {
         );
         // And that lean JSON parses back into the same data.
         assert_eq!(parse_config(&text), data);
+    }
+
+    // --- Tab + group colors (#70 / v1.5.0) ------------------------------------
+
+    // T-C5 (AC "Tab/Group color round-trips through the Rust store"): a
+    // colored tab and a colored group survive serialize → parse, and the
+    // wire JSON carries both `color` keys.
+    #[test]
+    fn tab_and_group_colors_round_trip() {
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: None,
+                pinned: None,
+                group_id: None,
+                color: None,
+                tabs: vec![Tab {
+                    id: "tab-1".into(),
+                    layout: Some(LayoutNode::Leaf { id: "p-1".into() }),
+                    name: Some("Tab 1".into()),
+                    pinned: None,
+                    color: Some("#eab308".into()),
+                }],
+            }],
+            groups: vec![Group {
+                id: "g-1".into(),
+                name: "projekty".into(),
+                collapsed: None,
+                pinned: None,
+                parent_id: None,
+                color: Some("#a855f7".into()),
+            }],
+            order: vec!["g-1".into(), "ws-1".into()],
+        };
+
+        let text = serialize_config(&data);
+
+        assert!(
+            text.contains(r##""color":"#eab308""##),
+            "tab color lost on the wire: {text}"
+        );
+        assert!(
+            text.contains(r##""color":"#a855f7""##),
+            "group color lost on the wire: {text}"
+        );
+        assert_eq!(parse_config(&text), data);
+    }
+
+    // T-C6 (AC "older JSON without the field loads unchanged"): a PRE-COLOR
+    // config — tabs and groups without `color` keys — parses with None and
+    // status Ok. Guards `#[serde(default)]` on both structs.
+    #[test]
+    fn old_config_without_tab_and_group_colors_loads_none() {
+        let text = r#"{"workspaces":[{"id":"ws-1","name":"alpha","tabs":[{"id":"t1","layout":{"kind":"leaf","id":"p1"}}]}],"groups":[{"id":"g-1","name":"stara"}],"order":["g-1","ws-1"]}"#;
+
+        let (data, status) = parse_config_with_status(text);
+
+        assert_eq!(status, ConfigStatus::Ok);
+        assert_eq!(data.workspaces[0].tabs[0].color, None);
+        assert_eq!(data.groups[0].color, None);
+    }
+
+    // T-C7 (AC "field omitted when unset"): UNCOLORED tabs and groups
+    // re-serialize WITHOUT any `color` key — byte-identical to pre-color
+    // saves. Guards `skip_serializing_if` on both structs.
+    #[test]
+    fn uncolored_tab_and_group_serializes_without_the_key() {
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: None,
+                pinned: None,
+                group_id: None,
+                color: None,
+                tabs: vec![Tab {
+                    id: "tab-1".into(),
+                    layout: Some(LayoutNode::Leaf { id: "p-1".into() }),
+                    name: Some("Tab 1".into()),
+                    pinned: None,
+                    color: None,
+                }],
+            }],
+            groups: vec![Group {
+                id: "g-1".into(),
+                name: "projekty".into(),
+                collapsed: None,
+                pinned: None,
+                parent_id: None,
+                color: None,
+            }],
+            order: vec![],
+        };
+
+        let text = serialize_config(&data);
+
+        assert!(
+            !text.contains("color"),
+            "uncolored tab/group gained a color key: {text}"
+        );
+        assert_eq!(parse_config(&text), data);
+    }
+
+    // T-C8 (AC round-trip through the FILESYSTEM): colored tab + group
+    // survive save() → load().
+    #[test]
+    fn tab_and_group_colors_survive_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::new(dir.path().join("config.json"));
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: None,
+                pinned: None,
+                group_id: None,
+                color: None,
+                tabs: vec![Tab {
+                    id: "tab-1".into(),
+                    layout: Some(LayoutNode::Leaf { id: "p-1".into() }),
+                    name: Some("Tab 1".into()),
+                    pinned: None,
+                    color: Some("#ef4444".into()),
+                }],
+            }],
+            groups: vec![Group {
+                id: "g-1".into(),
+                name: "projekty".into(),
+                collapsed: None,
+                pinned: None,
+                parent_id: None,
+                color: Some("#4ade80".into()),
+            }],
+            order: vec![],
+        };
+
+        store.save(&data).unwrap();
+        let back = store.load();
+
+        assert_eq!(back, data);
+        assert_eq!(back.workspaces[0].tabs[0].color.as_deref(), Some("#ef4444"));
+        assert_eq!(back.groups[0].color.as_deref(), Some("#4ade80"));
     }
 }

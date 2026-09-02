@@ -49,6 +49,11 @@ export type Tab = {
   layout: LayoutNode
   name?: string
   pinned?: boolean
+  // Tab color (#70 / v1.5.0): one of the eight COLOR_PALETTE hexes, or absent
+  // (unset). Same hygiene as `name`/`pinned` — the persisted payload must not
+  // gain the key just by passing through here; mirrored as an Option in the
+  // Rust store.
+  color?: string
 }
 
 // A group node of the sidebar tree (#48): a named container workspaces can be
@@ -63,6 +68,10 @@ export type Group = {
   collapsed?: boolean
   pinned?: boolean
   parentId?: string
+  // Group color (#70 / v1.5.0): same optional palette hex and key hygiene as
+  // the workspace/tab `color` fields — mirrored as an Option in the Rust
+  // store.
+  color?: string
 }
 
 export type Workspace = {
@@ -899,6 +908,58 @@ export function setWorkspaceColor(
         return rest
       }
       return { ...w, color }
+    }),
+  }
+}
+
+/// Set or clear a TAB's color (#70 / v1.5.0) — the tab-level twin of
+/// setWorkspaceColor: a palette hex sets/overwrites, `null` DROPS the key.
+/// No-op for an unknown workspace or tab id.
+export function setTabColor(
+  state: WorkspaceState,
+  id: string,
+  tabId: string,
+  color: string | null,
+): WorkspaceState {
+  const ws = state.workspaces.find((w) => w.id === id)
+  if (ws?.tabs?.some((t) => t.id === tabId) !== true) return state
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) =>
+      w.id !== id
+        ? w
+        : {
+            ...w,
+            tabs: (w.tabs ?? []).map((t) => {
+              if (t.id !== tabId) return t
+              if (color == null) {
+                const { color: _dropped, ...rest } = t
+                return rest
+              }
+              return { ...t, color }
+            }),
+          },
+    ),
+  }
+}
+
+/// Set or clear a GROUP's color (#70 / v1.5.0) — the group-level twin of
+/// setWorkspaceColor. No-op for an unknown group id.
+export function setGroupColor(
+  state: WorkspaceState,
+  id: string,
+  color: string | null,
+): WorkspaceState {
+  if (!state.groups.some((g) => g.id === id)) return state
+  return {
+    ...state,
+    groups: state.groups.map((g) => {
+      if (g.id !== id) return g
+      if (color == null) {
+        const { color: _dropped, ...rest } = g
+        return rest
+      }
+      return { ...g, color }
     }),
   }
 }

@@ -356,6 +356,7 @@ pub fn apply_import_plan(
             collapsed: g.collapsed.then_some(true),
             pinned: g.pinned.then_some(true),
             parent_id: None,
+            color: None,
         });
         next.order.push(gid.clone());
         group_id_map.insert(g.id.clone(), gid);
@@ -382,6 +383,7 @@ pub fn apply_import_plan(
             layout: Some(LayoutNode::Leaf { id: gen_id() }),
             name: Some("Tab 1".into()),
             pinned: None,
+            color: None,
         }];
         for _ in 1..w.tabs.len() {
             tabs.push(Tab {
@@ -389,6 +391,7 @@ pub fn apply_import_plan(
                 layout: Some(LayoutNode::Leaf { id: gen_id() }),
                 name: Some(next_tab_name(&tabs)),
                 pinned: None,
+                color: None,
             });
         }
         next.workspaces.push(Workspace {

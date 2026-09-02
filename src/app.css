@@ -471,6 +471,15 @@ body {
   box-shadow: inset 0 0 0 1px var(--text-dim);
 }
 
+/* Tab bar color swatch (#70 / v1.5.0): same square chip as the sidebar one,
+   sized for the tighter tab row. */
+.tab-color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
 /* Collapsed-group badge (#50): the live `● N` — N workspaces in the group's
    subtree have at least one active agent. Sits between the name and the row
    actions, never covering the name (flex shrinks the name instead). */

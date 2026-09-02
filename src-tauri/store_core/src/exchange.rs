@@ -145,6 +145,7 @@ mod tests {
                         }),
                         name: Some("Tab 1".into()),
                         pinned: None,
+                        color: None,
                     }],
                 },
                 Workspace {
@@ -159,6 +160,7 @@ mod tests {
                 collapsed: None,
                 pinned: None,
                 parent_id: None,
+                color: None,
             }],
             order: vec!["ws-2".into(), "g-1".into(), "ws-1".into()],
         }

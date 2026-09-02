@@ -65,7 +65,10 @@ import {
   zoomedPanelOf,
   type WorkspaceState,
   setWorkspaceColor,
+  setTabColor,
+  setGroupColor,
   COLOR_PALETTE,
+  defaultGenId,
 } from './workspaces'
 import { leafIds, type LayoutNode } from './PaneLayout'
 
@@ -2221,5 +2224,75 @@ describe('workspace colors (#69)', () => {
     for (const c of COLOR_PALETTE) {
       expect(c.name.trim()).not.toBe('')
     }
+  })
+})
+
+// --- Tab + group colors (#70 / v1.5.0) ---------------------------------------
+//
+// Assumptions encoded by these tests:
+//  - `color` is the same optional palette-hex string on `Tab` and `Group`,
+//    with the identical key hygiene as the workspace field (#69): set/overwrite
+//    via the setter, `null` DROPS the key, unknown ids are no-ops.
+//  - bootState (the "persist → load" surface) preserves tab and group colors
+//    untouched — the field rides along the existing migrations.
+//  - NOT tested here: rendering (component suite), Rust persistence
+//    (store_core suite), the menu wiring (component suite).
+describe('tab + group colors (#70)', () => {
+  const seedWs = (): WorkspaceState => ({
+    ...emptyState,
+    workspaces: [
+      {
+        id: 'ws-1',
+        name: 'alpha',
+        tabs: [
+          { id: 'tab-1', layout: { kind: 'leaf', id: 'p-1' }, name: 'Tab 1' },
+          { id: 'tab-2', layout: { kind: 'leaf', id: 'p-2' }, name: 'Tab 2' },
+        ],
+      },
+    ],
+    groups: [{ id: 'g-1', name: 'projekty' }],
+  })
+
+  it('setTabColor sets a tab color and bootState preserves it', () => {
+    const withColor = setTabColor(seedWs(), 'ws-1', 'tab-1', '#eab308')
+
+    expect(withColor.workspaces[0].tabs?.[0].color).toBe('#eab308')
+    // The sibling tab is untouched.
+    expect(withColor.workspaces[0].tabs?.[1]).not.toHaveProperty('color')
+
+    const booted = bootState(withColor.workspaces)
+    expect(booted.workspaces[0].tabs?.[0].color).toBe('#eab308')
+  })
+
+  it('setTabColor(null) drops the key; unknown workspace or tab is a no-op', () => {
+    let state = seedWs()
+    state = setTabColor(state, 'ws-1', 'tab-1', '#eab308')
+    state = setTabColor(state, 'ws-1', 'tab-1', null)
+
+    expect(state.workspaces[0].tabs?.[0]).not.toHaveProperty('color')
+
+    const seeded = seedWs()
+    expect(setTabColor(seeded, 'ghost', 'tab-1', '#eab308')).toBe(seeded)
+    expect(setTabColor(seeded, 'ws-1', 'tab-ghost', '#eab308')).toBe(seeded)
+  })
+
+  it('setGroupColor sets a group color and bootState preserves it', () => {
+    const withColor = setGroupColor(seedWs(), 'g-1', '#a855f7')
+
+    expect(withColor.groups[0].color).toBe('#a855f7')
+
+    const booted = bootState(withColor.workspaces, defaultGenId, withColor.groups)
+    expect(booted.groups[0].color).toBe('#a855f7')
+  })
+
+  it('setGroupColor(null) drops the key; unknown group is a no-op', () => {
+    let state = seedWs()
+    state = setGroupColor(state, 'g-1', '#a855f7')
+    state = setGroupColor(state, 'g-1', null)
+
+    expect(state.groups[0]).not.toHaveProperty('color')
+
+    const seeded = seedWs()
+    expect(setGroupColor(seeded, 'ghost', '#a855f7')).toBe(seeded)
   })
 })

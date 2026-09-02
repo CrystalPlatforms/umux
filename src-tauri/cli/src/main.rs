@@ -523,6 +523,7 @@ fn main() {
                     layout: Some(LayoutNode::Leaf { id: panel_id }),
                     name: Some("Tab 1".into()),
                     pinned: None,
+                    color: None,
                 }],
                 pinned: None,
                 group_id: None,
