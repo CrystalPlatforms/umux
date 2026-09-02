@@ -935,7 +935,10 @@ pub fn run() {
         // Issue #68: the bundled macOS notifier posts through this plugin
         // (UNUserNotificationCenter); on Linux/Windows the plugin is idle —
         // their notifiers shell out as before, behavior unchanged.
-        .plugin(tauri_plugin_notification::init());
+        .plugin(tauri_plugin_notification::init())
+        // Issue #72: clicking a listening port opens http://localhost:{port}
+        // in the system browser (open-url); copy stays on the frontend.
+        .plugin(tauri_plugin_opener::init());
 
     builder
         .setup(move |app| {

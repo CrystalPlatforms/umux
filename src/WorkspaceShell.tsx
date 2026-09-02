@@ -17,6 +17,9 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, ty
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+// Issue #72: clicking a listening port opens http://localhost:{port} in the
+// system browser (the clipboard copy stays).
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { TerminalSurface } from './TerminalSurface'
 import { EmptyState } from './EmptyState'
 import {
@@ -1192,9 +1195,17 @@ export function WorkspaceShell() {
       setPortsTip(null)
     }, 150)
   }
-  const copyPort = (port: number) => {
+  // Issue #72: a port click now OPENS http://localhost:{port} in the system
+  // browser (opener plugin) AND still copies the URL — every port opens, no
+  // protocol detection (PO decision 2026-09-01). A failed open never eats
+  // the copy: both paths report to the console, neither blocks the other.
+  const openPort = (port: number) => {
+    const url = `http://localhost:${port}`
+    void openUrl(url).catch((err: unknown) =>
+      console.error('open port failed:', err),
+    )
     void navigator.clipboard
-      ?.writeText(`http://localhost:${port}`)
+      ?.writeText(url)
       .catch((err) => console.error('copy port failed:', err))
   }
 
@@ -2841,17 +2852,9 @@ export function WorkspaceShell() {
                         </span>
                       )}
                     <div className="row-actions">
-                      <button
-                        className="icon-btn"
-                        aria-label={`Rename group ${entry.group.name}`}
-                        title="Rename"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          startGroupRename(entry.group)
-                        }}
-                      >
-                        <PencilIcon />
-                      </button>
+                      {/* #71 HITL round: the group's inline rename pencil is
+                          GONE too — the group menu's "Rename group" is the
+                          single rename entry point (same inline edit). */}
                       {/* Delete group (#51): the destructive subtree delete
                           lives behind the shared confirmation — a BARE group
                           (nothing inside) deletes outright, anything else
@@ -3020,17 +3023,11 @@ export function WorkspaceShell() {
                         })()}
                     </div>
                     <div className="row-actions">
-                      <button
-                        className="icon-btn"
-                        aria-label={`Rename ${entry.workspace.name}`}
-                        title="Rename"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          startRename(entry.workspace)
-                        }}
-                      >
-                        <PencilIcon />
-                      </button>
+                      {/* #98 / v1.5.0: the inline rename pencil is GONE from
+                          workspace rows — the context menu's "Rename
+                          workspace" is the single rename entry point (it
+                          drives the same inline edit). Group rows keep their
+                          pencil. */}
                       <button
                         className="icon-btn"
                         aria-label={`Close ${entry.workspace.name}`}
@@ -3917,8 +3914,8 @@ export function WorkspaceShell() {
       {/* Listening-ports tooltip (#42): appears under the hovered row once
           its ONE pull answers; the explicit text makes "nothing listens"
           unambiguous. Round 2: the tooltip is enterable (entering it
-          cancels the grace-close) and each port is a button copying its
-          localhost URL. */}
+          cancels the grace-close). Since #72 each port button OPENS its
+          localhost URL in the browser and still copies it. */}
       {portsTip && portsTip.ports !== null && (
         <div
           className="tab-ports-tip"
@@ -3935,8 +3932,8 @@ export function WorkspaceShell() {
                 {i > 0 && ' · '}
                 <button
                   className="tab-ports-tip-port"
-                  title={`Copy http://localhost:${port}`}
-                  onClick={() => copyPort(port)}
+                  title={`Open http://localhost:${port}`}
+                  onClick={() => openPort(port)}
                 >
                   {port}
                 </button>

@@ -31,6 +31,14 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }))
 
+// Boundary: the opener plugin (#72) — a port click hands the localhost URL
+// to the system browser. Mocked like invoke: the shell's own logic under
+// test is "which URL goes out", not the OS open itself.
+const openUrlMock = vi.fn()
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: (...args: unknown[]) => openUrlMock(...args),
+}))
+
 // Boundary: Tauri events. We capture the `config_fallback` handler so a test
 // can fire it and assert the UI surfaces a non-silent warning (Phase 18 / #19,
 // AC3). Other events are not used by WorkspaceShell today.
@@ -285,11 +293,17 @@ describe('WorkspaceShell', () => {
     expect(panel2.className).not.toContain('is-hidden')
   })
 
-  it('renames a workspace via the pencil icon and persists the new name', async () => {
+  // #71 / v1.5.0 (story #98): the always-visible rename pencil LEFT the
+  // workspace rows — the context menu's "Rename workspace" is the single
+  // rename entry point (its flow is covered by the dedicated menu test
+  // below). Group rows KEEP their pencil; tab rename is untouched.
+  it('workspace rows render NO inline rename pencil; group rows keep theirs (#71)', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'load_workspaces')
         return Promise.resolve({
           workspaces: [{ id: 'ws-1', name: 'alpha' }],
+          groups: [{ id: 'g-1', name: 'projekty' }],
+          order: ['g-1', 'ws-1'],
         })
       return Promise.resolve(undefined)
     })
@@ -297,28 +311,29 @@ describe('WorkspaceShell', () => {
     render(<WorkspaceShell />)
     await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: /rename/i }))
-    const input = screen.getByLabelText(/rename workspace/i)
-    fireEvent.change(input, { target: { value: 'alpha-renamed' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
+    // No "Rename alpha" button inside the workspace row — Close only.
+    const wsRow = screen.getByTestId('workspace-row-ws-1')
+    expect(within(wsRow).queryByRole('button', { name: 'Rename alpha' })).toBeNull()
+    expect(within(wsRow).queryByTitle('Rename')).toBeNull()
 
-    expect(await screen.findByText('alpha-renamed', { selector: '.workspace-name' })).toBeInTheDocument()
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith(
-        'save_workspaces',
-        expect.objectContaining({
-          workspaces: [
-            {
-              id: 'ws-1',
-              name: 'alpha-renamed',
-              // bootState seeded a fresh single-leaf layout for the config that
-              // had none (v0.2 / #25) — it persists along with the rename.
-              tabs: [{ id: expect.any(String), layout: { kind: 'leaf', id: expect.any(String) }, name: 'Tab 1' }],
-            },
-          ],
-        }),
-      ),
-    )
+    // HITL round (Adam): the GROUP row lost its pencil too — rename lives
+    // ONLY in the context menus, for both node kinds.
+    const groupRow = screen.getByTestId('group-row-g-1')
+    expect(
+      within(groupRow).queryByRole('button', { name: 'Rename group projekty' }),
+    ).toBeNull()
+    expect(within(groupRow).queryByTitle('Rename')).toBeNull()
+
+    // The menu path still drives the same inline rename (one assertion,
+    // full flow lives in the dedicated menu test).
+    fireEvent.contextMenu(screen.getByTestId('workspace-row-ws-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /^rename workspace$/i }))
+    expect(await screen.findByLabelText(/rename workspace/i)).toBeInTheDocument()
+
+    // The group menu's "Rename group" drives the group's inline edit.
+    fireEvent.contextMenu(screen.getByTestId('group-row-g-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /^rename group$/i }))
+    expect(await screen.findByLabelText(/rename group/i)).toBeInTheDocument()
   })
 
   it('header right-click menu offers new workspace plus window controls', async () => {
@@ -2076,13 +2091,17 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
 
     // HITL 2026-08-27 round 2: a port is a click target that copies its
     // localhost URL (the same navigator.clipboard path the terminal copy
-    // shortcut uses).
-    it('clicking a port copies its http://localhost URL', async () => {
+    // shortcut uses). #72: the click now ALSO opens the URL in the system
+    // browser (opener plugin, mocked boundary) — every port opens, no
+    // protocol detection (PO decision 2026-09-01).
+    it('clicking a port opens its http://localhost URL in the browser AND copies it (#72)', async () => {
       const writeText = vi.fn().mockResolvedValue(undefined)
       Object.defineProperty(navigator, 'clipboard', {
         value: { writeText },
         configurable: true,
       })
+      openUrlMock.mockReset()
+      openUrlMock.mockResolvedValue(undefined)
       surfacesReportHandles = true
       invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
         if (cmd === 'load_workspaces')
@@ -2096,8 +2115,14 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       fireEvent.mouseEnter(within(panel).getAllByRole('tab')[0])
       await screen.findByRole('tooltip')
 
-      fireEvent.click(within(screen.getByRole('tooltip')).getByRole('button', { name: '8000' }))
+      const portButton = within(screen.getByRole('tooltip')).getByRole('button', {
+        name: '8000',
+      })
+      // The tooltip's title invites the OPEN now, not just the copy.
+      expect(portButton).toHaveAttribute('title', 'Open http://localhost:8000')
+      fireEvent.click(portButton)
 
+      expect(openUrlMock).toHaveBeenCalledWith('http://localhost:8000')
       expect(writeText).toHaveBeenCalledWith('http://localhost:8000')
     })
   })

@@ -35,6 +35,9 @@ store_core = { path = "store_core" }
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-notification = "2.3.3"
+# Issue #72: clicking a listening port opens http://localhost:{port} in the
+# system browser (the opener plugin's open-url path).
+tauri-plugin-opener = "2"
 reqwest = "0.13.3"
 
 [dev-dependencies]

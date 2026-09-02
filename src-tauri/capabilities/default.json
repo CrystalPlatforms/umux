@@ -13,6 +13,7 @@
     "core:window:allow-destroy",
     "updater:default",
     "process:allow-restart",
-    "notification:default"
+    "notification:default",
+    "opener:default"
   ]
 }
