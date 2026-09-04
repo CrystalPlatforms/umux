@@ -14,7 +14,7 @@ export type Settings = {
   sessionRestoreEnabled: boolean
   analyticsEnabled: boolean
   portsTooltipEnabled: boolean
-  // #60: written by `umux config set default-launch-mode`; the v1.3.0 TUI
+  // #60: written by `umux config set default-launch-mode`; the v1.7.0 TUI
   // launcher reads it. Carried through here so an app save never erases a
   // CLI-written value. Defaults to "gui" (Rust Settings::default).
   defaultLaunchMode: string

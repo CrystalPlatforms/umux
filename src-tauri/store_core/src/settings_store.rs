@@ -59,7 +59,7 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub ports_tooltip_enabled: bool,
     /// What to launch when the user starts "umux": `"gui"` (the desktop app,
-    /// today's only reality) or `"tui"` (the terminal UI, v1.3.0 / #60).
+    /// today's only reality) or `"tui"` (the terminal UI, v1.7.0 / #60).
     /// Written today by `umux config set default-launch-mode`; nothing reads
     /// it until the TUI launcher lands, and a pre-#60 file loads as `"gui"`.
     #[serde(default = "default_launch_mode")]
@@ -67,7 +67,7 @@ pub struct Settings {
 }
 
 /// Serde default for `default_launch_mode`: the GUI is what umux launches
-/// until the TUI exists (v1.3.0).
+/// until the TUI exists (v1.7.0).
 fn default_launch_mode() -> String {
     "gui".into()
 }
@@ -297,7 +297,7 @@ mod tests {
     }
 
     // T-S9 (#60 — default-launch-mode: `umux config set default-launch-mode`
-    // persists the launch choice the v1.3.0 TUI launcher will read; until
+    // persists the launch choice the v1.7.0 TUI launcher will read; until
     // then nothing consumes it, and the GUI stays the default).
     #[test]
     fn default_launch_mode_defaults_to_gui_and_round_trips() {

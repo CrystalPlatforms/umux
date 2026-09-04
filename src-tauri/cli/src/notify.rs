@@ -1,6 +1,6 @@
-//! `umux notify` (#62, v1.2.0 Phase 4) — a desktop notification WITHOUT the
+//! `umux notify` (#62) — a desktop notification WITHOUT the
 //! umux app running. One-shot: the CLI process posts the notification and
-//! exits; no daemon, no socket (v1.3.0/v2.0 territory).
+//! exits; no daemon, no socket (v1.7.0/v2.0 territory).
 //!
 //! Same notification path as the app's NativeNotifier (src/lib.rs), where it
 //! can run standalone: shell-outs to the platform's notification tool, never

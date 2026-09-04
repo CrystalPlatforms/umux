@@ -344,7 +344,7 @@ cargo build --release --package umux
 # → src-tauri/target/release/umux
 ```
 
-Every command that touches a store needs a target: `--desk` (the desktop app's store) or `--term` (the terminal-UI store, whose TUI ships in v1.3.0).
+Every command that touches a store needs a target: `--desk` (the desktop app's store) or `--term` (the terminal-UI store, whose TUI ships in v1.7.0).
 
 ```bash
 umux list --desk                    # saved workspaces as JSON
@@ -371,7 +371,7 @@ umux notify "build finished"        # desktop notification, no app needed
 
 ### Exchange format
 
-`umux export` writes a **neutral, self-describing JSON document** — the format `umux import umux` restores and Desktop↔Terminal transfer (v1.3.0) reads back. Settings are deliberately not part of it: they are per-app configuration, not state you move between surfaces.
+`umux export` writes a **neutral, self-describing JSON document** — the format `umux import umux` restores and Desktop↔Terminal transfer (v1.7.0) reads back. Settings are deliberately not part of it: they are per-app configuration, not state you move between surfaces.
 
 ```json
 {
@@ -391,7 +391,7 @@ umux notify "build finished"        # desktop notification, no app needed
 
 `umux import umux <file> [--desk|--term]` **replaces** the chosen store with the document's state — export → import into a fresh store reproduces the original state exactly (id for id). Use `--dry-run` to preview. Malformed documents and unknown versions are refused with a clear error and the store is left untouched.
 
-`umux import cmux` reads the cmux app's saved files (its `cmux.json` config and live session store) and imports them into the chosen store: workspaces, sidebar order, groups with membership, working directories, and one named tab per cmux surface. Nothing is ever overwritten — a name that already exists gets a ` from cmux` suffix (numbered further when taken: `X from cmux`, `X from cmux 2`, …). The cmux files are read strictly read-only. `--dry-run` prints the plan (the collision-resolved tree) and writes nothing. Not available on Windows in v1.2.0. The same import powers the in-app wizard (Settings → Import from cmux); a shared-fixture test suite keeps the two implementations at parity.
+`umux import cmux` reads the cmux app's saved files (its `cmux.json` config and live session store) and imports them into the chosen store: workspaces, sidebar order, groups with membership, working directories, and one named tab per cmux surface. Nothing is ever overwritten — a name that already exists gets a ` from cmux` suffix (numbered further when taken: `X from cmux`, `X from cmux 2`, …). The cmux files are read strictly read-only. `--dry-run` prints the plan (the collision-resolved tree) and writes nothing. Not available on Windows. The same import powers the in-app wizard (Settings → Import from cmux); a shared-fixture test suite keeps the two implementations at parity.
 
 ---
 

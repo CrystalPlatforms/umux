@@ -1,4 +1,4 @@
-//! Parity suite for the cmux import (#63, v1.2.0 Phase 5).
+//! Parity suite for the cmux import (#63).
 //!
 //! The TypeScript importer (src/cmuxImport.ts) is the REFERENCE; this suite
 //! proves the Rust importer agrees with it on the SHARED fixtures

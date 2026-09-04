@@ -1,4 +1,4 @@
-//! StoreCore — umux's shared store library (#58, v1.2.0 Phase 1 / story 74).
+//! StoreCore — umux's shared store library (#58, story 74).
 //!
 //! Everything that defines the persisted workspace/settings state lives here,
 //! in ONE crate with no Tauri dependency: the workspace model (workspaces,
