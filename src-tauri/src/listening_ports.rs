@@ -271,10 +271,22 @@ pub fn parent_edges() -> Vec<(u32, u32)> {
 /// One bounded, output-captured tool run; any failure (missing binary,
 /// non-zero exit, weird bytes) is just None — the caller answers empty.
 fn run_tool(program: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .ok()?;
+    // CREATE_NO_WINDOW (Windows, perf/UX audit 2026-09-05): netstat and the
+    // CIM process query are console programs. Spawned from a GUI app without
+    // this flag, EVERY run flashed a console window on the desktop — the tab
+    // hover tooltip made it rain console windows. The flag hides only the
+    // console host; captured output is unaffected.
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        let mut c = std::process::Command::new(program);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = std::process::Command::new(program);
+    let out = cmd.args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }

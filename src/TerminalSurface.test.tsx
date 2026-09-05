@@ -20,7 +20,7 @@ import { render, waitFor, act } from '@testing-library/react'
 const PANEL_ID = 42
 
 const invokeMock = vi.fn()
-let outputHandler: ((e: { payload: { id: number; data: number[] } }) => void) | null = null
+let outputHandler: ((e: { payload: { id: number; data: string } }) => void) | null = null
 let sshExitHandler: ((e: { payload: { id: number; error: string | null } }) => void) | null = null
 // When set, `ssh_open` rejects with this message — simulates a synchronous
 // connection-setup failure (bad target / empty host) returned by the backend.
@@ -39,7 +39,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: (_name: string, handler: (e: { payload: { id: number; data: number[] } } | { payload: { id: number; error: string | null } }) => void) => {
+  listen: (_name: string, handler: (e: { payload: { id: number; data: string } } | { payload: { id: number; error: string | null } }) => void) => {
     if (_name === 'pty_output' || _name === 'ssh_output') outputHandler = handler as typeof outputHandler
     if (_name === 'ssh_exit') sshExitHandler = handler as typeof sshExitHandler
     return Promise.resolve(() => {})
@@ -145,7 +145,7 @@ describe('TerminalSurface', () => {
     await waitFor(() => expect(outputHandler).not.toBeNull())
 
     act(() => {
-      outputHandler!({ payload: { id: PANEL_ID, data: [104, 105] } }) // "hi"
+      outputHandler!({ payload: { id: PANEL_ID, data: btoa('hi') } }) // "hi"
     })
 
     // Output is coalesced into one write per animation frame (Phase 20 / #21),
@@ -161,7 +161,7 @@ describe('TerminalSurface', () => {
     await waitFor(() => expect(outputHandler).not.toBeNull())
 
     act(() => {
-      outputHandler!({ payload: { id: 999, data: [88] } })
+      outputHandler!({ payload: { id: 999, data: btoa('X') } })
     })
 
     expect(writeMock).not.toHaveBeenCalled()
@@ -238,7 +238,7 @@ describe('TerminalSurface', () => {
     await waitFor(() => expect(outputHandler).not.toBeNull())
 
     act(() => {
-      outputHandler!({ payload: { id: PANEL_ID, data: [104, 105] } }) // "hi"
+      outputHandler!({ payload: { id: PANEL_ID, data: btoa('hi') } }) // "hi"
     })
 
     // Coalesced into a per-frame write (Phase 20 / #21).

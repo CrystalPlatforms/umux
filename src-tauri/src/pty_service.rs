@@ -163,13 +163,42 @@ pub fn process_name(pid: u32) -> Option<String> {
 }
 
 /// The name the user TYPED to run process `pid`, if it can be determined.
+/// Native `OpenProcess` + `QueryFullProcessImageNameW` — microseconds per
+/// call. This replaced `tasklist /FI "PID eq <pid>"` (perf audit 2026-09-05):
+/// spawning tasklist took 100–500 ms, ran for every local panel every ~2 s,
+/// and ran on the UI thread — the single worst Windows jank source. Like
+/// tasklist (and unlike Linux/macOS argv[0]) this reports the IMAGE name
+/// (`node.exe` for a `claude` script) — unchanged wire semantics, just fast.
 #[cfg(target_os = "windows")]
 pub fn process_name(pid: u32) -> Option<String> {
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output()
-        .ok()?;
-    parse_tasklist_name(&String::from_utf8_lossy(&output.stdout))
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: handle is what the OS returns for a pid query and is released
+    // on every path below; the wide buffer is only written by the API call.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None; // process gone (or system process): nothing to name
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 || len == 0 {
+            return None;
+        }
+        let path = std::path::PathBuf::from(OsString::from_wide(&buf[..len as usize]));
+        // Image path's file name, `.exe` stripped case-insensitively — the
+        // same shape `parse_tasklist_name` produced for the tasklist path.
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        let stripped = name.strip_suffix(".exe").unwrap_or(&name);
+        Some(stripped.to_string())
+    }
 }
 
 /// The name the user TYPED to run process `pid`, if it can be determined.
@@ -416,7 +445,13 @@ impl PtyService {
     /// needs-attention while a CLI sits waiting and idle after it exits.
     /// Same mechanism is_busy uses — the fg group leader — only named here;
     /// terminal content is never read.
-    pub fn foreground_process_name(&mut self, handle: &PtyHandle) -> Option<String> {
+    /// The OS pid of the program currently owning this panel's terminal (the
+    /// PTY's foreground process-group leader), or `None` when the idle shell
+    /// itself owns it or the child has exited. Split out of
+    /// `foreground_process_name` so callers can resolve pids for MANY panels
+    /// under one short lock and then name each pid lock-free (perf audit
+    /// 2026-09-05: naming used to happen under the global PTY mutex).
+    pub fn foreground_pid(&mut self, handle: &PtyHandle) -> Option<u32> {
         if !self.is_busy(handle) {
             return None; // idle shell / exited child: no foreground program
         }
@@ -424,7 +459,11 @@ impl PtyService {
             .entries
             .get(&handle.id)
             .and_then(fg_group_leader)?;
-        process_name(u32::try_from(fg).ok()?)
+        u32::try_from(fg).ok()
+    }
+
+    pub fn foreground_process_name(&mut self, handle: &PtyHandle) -> Option<String> {
+        process_name(self.foreground_pid(handle)?)
     }
 
     /// The shell process's CURRENT working directory (v0.2 Phase 5 / #29

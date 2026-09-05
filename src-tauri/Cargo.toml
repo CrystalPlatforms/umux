@@ -39,6 +39,20 @@ tauri-plugin-notification = "2.3.3"
 # system browser (the opener plugin's open-url path).
 tauri-plugin-opener = "2"
 reqwest = "0.13.3"
+# PTY output bytes go over the IPC bridge as base64, not a JSON number array —
+# a 4 KB chunk is ~5.4 KB of base64 vs ~15 KB of "[12,34,...]" text, and the
+# renderer decodes it far cheaper (perf audit 2026-09-05, Windows jank).
+base64 = "0.22"
+
+# Native foreground-process name lookup (perf audit 2026-09-05): the previous
+# implementation spawned `tasklist.exe` — 100–500 ms per call, made for every
+# local panel every ~2 s on the UI thread. OpenProcess + QueryFullProcessImageNameW
+# answers in microseconds with the same image name.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

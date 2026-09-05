@@ -118,6 +118,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 name = "app"
 version = "1.5.1"
 dependencies = [
+ "base64 0.22.1",
  "log",
  "portable-pty",
  "reqwest 0.13.4",
@@ -133,6 +134,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

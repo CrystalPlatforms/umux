@@ -15,11 +15,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebglAddon } from '@xterm/addon-webgl'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import '@xterm/xterm/css/xterm.css'
 import { clipboardAction } from './clipboardShortcut'
 import { WriteBatcher } from './WriteBatcher'
+
+// Decode the base64 `pty_output` payload (perf audit 2026-09-05: the wire used
+// to carry a JSON array of numbers — ~4x the bytes per chunk and much slower
+// for the webview to parse; Windows felt every byte of that).
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
 
 export function TerminalSurface({
   label,
@@ -94,6 +105,24 @@ export function TerminalSurface({
     term.loadAddon(fit)
     term.open(container)
 
+    // GPU renderer (perf audit 2026-09-05): xterm's default DOM renderer
+    // touches layout per painted cell; the WebGL addon draws the viewport on
+    // the GPU, which is the difference between smooth and janky output on
+    // Windows WebView2. On context loss (GPU reset, driver churn, or simply
+    // too many live contexts once many panels are open) the addon is dropped
+    // and xterm falls back to the DOM renderer — degraded but never broken.
+    let webgl: WebglAddon | undefined
+    try {
+      webgl = new WebglAddon()
+      webgl.onContextLoss(() => {
+        webgl?.dispose()
+        webgl = undefined
+      })
+      term.loadAddon(webgl)
+    } catch {
+      webgl = undefined // no usable WebGL: the DOM renderer still works
+    }
+
     // Ctrl+Shift+C copies the current selection to the clipboard instead of
     // reaching the shell; everything else (including plain Ctrl+C, which must
     // stay SIGINT) passes through to the PTY (Phase 19 / HITL). Returning
@@ -125,7 +154,7 @@ export function TerminalSurface({
     let panelId: number | null = null
     // Buffer output chunks that arrive before our panel id is known, so we don't
     // drop the shell's initial prompt due to the open/listen race.
-    const pending: Array<{ id: number; data: number[] }> = []
+    const pending: Array<{ id: number; data: string }> = []
     let disposed = false
 
     // Pick the command/event family from the transport. A remote panel (sshTarget
@@ -158,6 +187,7 @@ export function TerminalSurface({
       const immediate = batcher.push(bytes)
       if (immediate != null) term.write(immediate)
     }
+
     // One flush per animation frame drains anything buffered by maxAge. rAF is
     // paused when the tab/window is hidden, so a backgrounded panel stops
     // rendering — exactly what we want.
@@ -169,18 +199,19 @@ export function TerminalSurface({
     }
     rafId = requestAnimationFrame(tickFrame)
 
-    const writeIfOurs = (payload: { id: number; data: number[] }) => {
+    const writeIfOurs = (payload: { id: number; data: string }) => {
       if (payload.id === panelId) {
-        writeToTerm(new Uint8Array(payload.data))
+        const bytes = base64ToBytes(payload.data)
+        writeToTerm(bytes)
         // Byte-activity signal for the panel's status machine (#26): the
         // chunk's LENGTH is the whole signal — content is never inspected.
-        onActivity?.(payload.data.length)
+        onActivity?.(bytes.length)
       }
     }
 
     // Subscribe BEFORE opening the PTY: the backend starts emitting the moment
     // the shell spawns, so the listener must be registered first.
-    const unlistenP = listen<{ id: number; data: number[] }>(outputEvent, (event) => {
+    const unlistenP = listen<{ id: number; data: string }>(outputEvent, (event) => {
       if (panelId == null) {
         pending.push(event.payload)
         return

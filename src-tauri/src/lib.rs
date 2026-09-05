@@ -34,12 +34,21 @@ use ssh_manager::{parse_ssh_target, SshHandle, SshManager};
 type MuteFlag = Arc<AtomicBool>;
 
 /// One chunk of PTY output, ferried to the renderer over the `pty_output` event.
-/// `data` is raw bytes serialized as a JSON array of numbers; the frontend
-/// rebuilds a `Uint8Array` from it.
+/// `data` is base64-encoded raw bytes; the frontend decodes it into a
+/// `Uint8Array`. Base64 replaced the original JSON number array (perf audit
+/// 2026-09-05): a 4 KB chunk is ~5.4 KB of base64 vs ~15 KB of
+/// `[12,34,...]` text, and decoding is far cheaper than parsing a huge array —
+/// this path runs for EVERY PTY chunk on EVERY open panel.
 #[derive(Serialize, Clone)]
 struct PtyOutputPayload {
     id: u32,
-    data: Vec<u8>,
+    data: String,
+}
+
+/// Encode raw PTY bytes for the wire (see PtyOutputPayload).
+fn encode_payload(data: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 /// Notifies the renderer that an SSH session ended. `error` is a clear,
@@ -133,7 +142,10 @@ fn pty_open(
                 let _ = emit_app.emit("pty_completion", PanelSignalPayload { id });
             }
             if !passthrough.is_empty() {
-                let _ = emit_app.emit("pty_output", PtyOutputPayload { id, data: passthrough });
+                let _ = emit_app.emit(
+                    "pty_output",
+                    PtyOutputPayload { id, data: encode_payload(&passthrough) },
+                );
             }
         }
     });
@@ -195,24 +207,33 @@ struct CwdAnswer {
     cwd: Option<String>,
 }
 
+// PERF (audit 2026-09-05): async — cwd reads are OS calls (on macOS a whole
+// `lsof` spawn) and must never run on the UI thread. State is fetched from the
+// AppHandle inside the worker thread: `State<'_, T>` cannot cross into a
+// `'static` closure, but `app.state::<T>()` works from any thread.
 #[tauri::command]
-fn panel_cwds(
-    state: State<'_, Mutex<PtyService>>,
+async fn panel_cwds(
+    app: AppHandle,
     panels: Vec<CwdQuery>,
 ) -> Result<Vec<CwdAnswer>, String> {
-    let svc = state.lock().map_err(|e| e.to_string())?;
-    Ok(panels
-        .into_iter()
-        .map(|q| {
-            let cwd = svc
-                .cwd(&PtyHandle { id: q.pty_id })
-                .map(|p| p.to_string_lossy().into_owned());
-            CwdAnswer {
-                panel_id: q.panel_id,
-                cwd,
-            }
-        })
-        .collect())
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Mutex<PtyService>>();
+        let svc = state.lock().map_err(|e| e.to_string())?;
+        Ok(panels
+            .into_iter()
+            .map(|q| {
+                let cwd = svc
+                    .cwd(&PtyHandle { id: q.pty_id })
+                    .map(|p| p.to_string_lossy().into_owned());
+                CwdAnswer {
+                    panel_id: q.panel_id,
+                    cwd,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // --- Agent-status presence (model v2, HITL 2026-08-25) ------------------------
@@ -232,19 +253,42 @@ struct PanelProcessAnswer {
     process: Option<String>,
 }
 
+// PERF (audit 2026-09-05): this runs every ~2 s for every local panel. It used
+// to be a SYNC command — Tauri runs those on the UI thread — that held the
+// global PTY mutex while naming each pid, and naming on Windows spawned
+// `tasklist.exe` (100–500 ms per call!). Net effect: the whole UI froze every
+// two seconds and keystrokes stalled behind the scan. Now: pids resolve under
+// a short lock, naming happens off-thread via the native API (pty_service::
+// process_name), and the command is async so the UI thread is never involved.
 #[tauri::command]
-fn panel_processes(
+async fn panel_processes(
     state: State<'_, Mutex<PtyService>>,
     panels: Vec<CwdQuery>,
 ) -> Result<Vec<PanelProcessAnswer>, String> {
-    let mut svc = state.lock().map_err(|e| e.to_string())?;
-    Ok(panels
-        .into_iter()
-        .map(|q| {
-            let process = svc.foreground_process_name(&PtyHandle { id: q.pty_id });
-            PanelProcessAnswer { panel_id: q.panel_id, process }
-        })
-        .collect())
+    // Under the lock: only the cheap part — which pid owns each panel's fg.
+    let resolved: Result<Vec<(String, Option<u32>)>, String> = {
+        let mut svc = state.lock().map_err(|e| e.to_string())?;
+        Ok(panels
+            .into_iter()
+            .map(|q| {
+                let pid = svc.foreground_pid(&PtyHandle { id: q.pty_id });
+                (q.panel_id, pid)
+            })
+            .collect())
+    };
+    let resolved = resolved?;
+    // Off the lock (and off the UI thread): name each pid.
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(resolved
+            .into_iter()
+            .map(|(panel_id, pid)| PanelProcessAnswer {
+                panel_id,
+                process: pid.and_then(pty_service::process_name),
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // --- Sidebar tab metadata: git branch (v1.0 Phase 14 / #41) -------------------
@@ -267,14 +311,21 @@ struct GitBranchAnswer {
     branch: Option<String>,
 }
 
+// PERF (audit 2026-09-05): async — each dir means `.git` file reads (slow
+// under real-time antivirus); the UI thread must never wait on disk.
 #[tauri::command]
-fn git_branches(dirs: Vec<String>) -> Vec<GitBranchAnswer> {
-    dirs.into_iter()
-        .map(|dir| GitBranchAnswer {
-            branch: git_branch::resolve_branch(std::path::Path::new(&dir)),
-            dir,
-        })
-        .collect()
+async fn git_branches(dirs: Vec<String>) -> Result<Vec<GitBranchAnswer>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(dirs
+            .into_iter()
+            .map(|dir| GitBranchAnswer {
+                branch: git_branch::resolve_branch(std::path::Path::new(&dir)),
+                dir,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // --- Sidebar tab metadata: listening ports (v1.0 Phase 15 / #42) --------------
@@ -306,28 +357,45 @@ struct TabPortsAnswer {
     ports: Vec<u16>,
 }
 
+// PERF (audit 2026-09-05): the socket tables come from `netstat -ano` on
+// Windows (hundreds of ms) and the old sync version held the global PTY mutex
+// WHILE running it — every keystroke stalled behind a tab hover. Now the lock
+// only collects child pids; the scan runs off-thread.
 #[tauri::command]
-fn tab_ports(
+async fn tab_ports(
     state: State<'_, Mutex<PtyService>>,
     tabs: Vec<TabPortsQuery>,
 ) -> Result<Vec<TabPortsAnswer>, String> {
-    let svc = state.lock().map_err(|e| e.to_string())?;
-    let listeners = listening_ports::listening_sockets();
-    let edges = listening_ports::parent_edges();
-    Ok(tabs
-        .into_iter()
-        .map(|tab| {
-            let roots: Vec<u32> = tab
-                .pty_ids
-                .iter()
-                .filter_map(|id| svc.child_pid(&PtyHandle { id: *id }))
-                .collect();
-            TabPortsAnswer {
+    // Under the lock: just the pid roots per tab (cheap).
+    let rooted: Result<Vec<(String, Vec<u32>)>, String> = {
+        let svc = state.lock().map_err(|e| e.to_string())?;
+        Ok(tabs
+            .into_iter()
+            .map(|tab| {
+                let roots: Vec<u32> = tab
+                    .pty_ids
+                    .iter()
+                    .filter_map(|id| svc.child_pid(&PtyHandle { id: *id }))
+                    .collect();
+                (tab.tab_id, roots)
+            })
+            .collect())
+    };
+    let rooted = rooted?;
+    // Off the lock: the actual socket-table scan.
+    tauri::async_runtime::spawn_blocking(move || {
+        let listeners = listening_ports::listening_sockets();
+        let edges = listening_ports::parent_edges();
+        Ok(rooted
+            .into_iter()
+            .map(|(tab_id, roots)| TabPortsAnswer {
                 ports: listening_ports::aggregate_ports(&listeners, &edges, &roots),
-                tab_id: tab.tab_id,
-            }
-        })
-        .collect())
+                tab_id,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // --- SSH panels (Phase 16 / Issue #17) ----------------------------------------
@@ -403,7 +471,10 @@ fn ssh_open(
                 let _ = emit_app.emit("ssh_completion", PanelSignalPayload { id });
             }
             if !passthrough.is_empty() {
-                let _ = emit_app.emit("ssh_output", PtyOutputPayload { id, data: passthrough });
+                let _ = emit_app.emit(
+                    "ssh_output",
+                    PtyOutputPayload { id, data: encode_payload(&passthrough) },
+                );
             }
         }
 
@@ -584,8 +655,14 @@ struct NativeNotifier;
 impl Notifier for NativeNotifier {
     fn show(&self, summary: &str, body: &str) {
         let script = windows_toast_script(summary, body);
+        // CREATE_NO_WINDOW (perf/UX audit 2026-09-05): without it every toast
+        // flashed a console window on the desktop; the toast itself is
+        // rendered by the OS notification service and is unaffected.
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
         let result = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output();
         match &result {
             Ok(out) if out.status.success() => {
@@ -668,25 +745,29 @@ struct ConfigFallbackPayload {
     message: &'static str,
 }
 
+// PERF (audit 2026-09-05): async — config reads/writes hit the disk (slow
+// under real-time antivirus); the UI thread must never wait on them.
 #[tauri::command]
-fn load_workspaces(
-    app: AppHandle,
-    state: State<'_, WorkspaceStore>,
-) -> WorkspaceData {
-    let (data, status) = state.load_with_status();
-    // AC3: a corrupted config must not be a silent downgrade. Surface a clear
-    // message both in the backend log and as an event the frontend can render.
-    // Missing is a normal first run -> silent; Ok is success.
-    if let Some(message) = fallback_warning(status) {
-        log::warn!("[config] fallback: {message}");
-        let _ = app.emit("config_fallback", ConfigFallbackPayload { message });
-    }
-    data
+async fn load_workspaces(app: AppHandle) -> Result<WorkspaceData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<WorkspaceStore>();
+        let (data, status) = state.load_with_status();
+        // AC3: a corrupted config must not be a silent downgrade. Surface a clear
+        // message both in the backend log and as an event the frontend can render.
+        // Missing is a normal first run -> silent; Ok is success.
+        if let Some(message) = fallback_warning(status) {
+            log::warn!("[config] fallback: {message}");
+            let _ = app.emit("config_fallback", ConfigFallbackPayload { message });
+        }
+        Ok(data)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn save_workspaces(
-    state: State<'_, WorkspaceStore>,
+async fn save_workspaces(
+    app: AppHandle,
     workspaces: Vec<Workspace>,
     groups: Vec<Group>,
     order: Vec<String>,
@@ -697,13 +778,18 @@ fn save_workspaces(
     // signature silently rejected every save because `workspaces` never
     // reached `data`. Same rule, three keys since the tree (#48): every
     // invoke key must have its matching parameter here.
-    state
-        .save(&WorkspaceData {
-            workspaces,
-            groups,
-            order,
-        })
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<WorkspaceStore>();
+        state
+            .save(&WorkspaceData {
+                workspaces,
+                groups,
+                order,
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Toggle the app-wide notification mute. Returns the new state so the frontend
@@ -725,22 +811,33 @@ fn notifications_muted(state: State<'_, MuteFlag>) -> bool {
 /// Load the persisted feature toggles (v0.2 Phase 3 / #27). A corrupted file
 /// falls back to defaults AND emits the same `config_fallback` warning the
 /// workspace config uses, so the downgrade is surfaced, not silent.
+// PERF (audit 2026-09-05): async — same disk-wait reasoning as load_workspaces.
 #[tauri::command]
-fn load_settings(app: AppHandle, state: State<'_, SettingsStore>) -> Settings {
-    let (settings, status) = state.load_with_status();
-    if let Some(message) = settings_fallback_warning(status) {
-        log::warn!("[config] settings fallback: {message}");
-        let _ = app.emit("config_fallback", ConfigFallbackPayload { message });
-    }
-    settings
+async fn load_settings(app: AppHandle) -> Result<Settings, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<SettingsStore>();
+        let (settings, status) = state.load_with_status();
+        if let Some(message) = settings_fallback_warning(status) {
+            log::warn!("[config] settings fallback: {message}");
+            let _ = app.emit("config_fallback", ConfigFallbackPayload { message });
+        }
+        Ok(settings)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Persist the feature toggles. The param is named `settings` to match the
 /// invoke key the frontend sends (`invoke('save_settings', { settings })`) —
 /// Tauri maps arguments by name (see the save_workspaces comment).
 #[tauri::command]
-fn save_settings(state: State<'_, SettingsStore>, settings: Settings) -> Result<(), String> {
-    state.save(&settings).map_err(|e| e.to_string())
+async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<SettingsStore>();
+        state.save(&settings).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Factory reset (#74): remove EVERY umux state file — workspaces.json (the
