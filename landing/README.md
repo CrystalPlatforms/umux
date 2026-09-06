@@ -74,25 +74,31 @@ Do zrobienia w panelu (jednorazowo):
 Uwagi: zero cookies (bez banerów RODO); osoby z adblockiem nie są liczone;
 darmowy plan wymaga niekomercyjnego użytku (do 100 tys. wejść/mies.).
 
-## 5. Nowa wersja aplikacji = podmiana numeru
+## 5. Nowa wersja aplikacji = zero roboty (od 2026-09-06)
 
 Linki używają wzorca GitHuba `releases/latest/download/<nazwa>` — zawsze
-wskazują najnowszy release, ale **nazwy plików zawierają numer wersji**.
-Po każdym release podmień numer w `index.html`
-(na dziś: `1.0.4` → np. `1.0.5`) — w linkach download **i w tekstach
-dialogów** dla Linuksa (te same nazwy plików):
+wskazują najnowszy release — a od tej zmiany **nazwy plików nie mają numeru
+wersji**. Workflow release'owy (`.github/workflows/release.yml`) wrzuca do
+każdego release'a, obok plików z numerem, trwałe aliasy:
 
 ```
-umux_1.0.4_amd64.AppImage
-umux_1.0.4_amd64.deb
-umux-1.0.4-1.x86_64.rpm
-umux_1.0.4_universal.dmg
-umux_1.0.4_x64-setup.exe
+umux_amd64.AppImage
+umux_amd64.deb
+umux_x86_64.rpm
+umux_universal.dmg
+umux_x64-setup.exe
 ```
 
-Test Ci przypomni, jeśli któraś nazwa się rozjedzie z tym, co produkuje CI
-(wzorzec potwierdzony z CI przy v1.0.2). Archiwum aktualizatora
-(`umux_universal.app.tar.gz`) celowo nie ma linku — nie linkujemy.
+Strona linkuje wyłącznie do tych aliasów (też w dialogach instalacyjnych
+Linuksa — przeglądarka zapisuje plik właśnie pod nazwą aliasu), więc nowy
+release **niczego nie wymaga** na stronie. Test `never hardcodes a version
+number…` zgłosi błąd, jeśli ktoś wpisze z powrotem numer wersji w link.
+
+Uwaga: aliasy zaczynają istnieć od pierwszego release'a wydanego PO tej
+zmianie — do tego momentu linki na starej, opublikowanej stronie mogą
+zwracać 404 (stara strona linkowała do `1.0.4`, które dawno nie jest
+najnowsze). Archiwum aktualizatora (`umux_universal.app.tar.gz`) celowo
+nie ma linku — nie linkujemy.
 
 ## 6. Checklist HITL (przed publikacją promocji)
 

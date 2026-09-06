@@ -58,8 +58,31 @@ jobs:
           # Issue #66: dołącz latest.json (manifest aktualizacji); tauri-action
           # scala platformy, gdy kolejne joby publikują swoje wpisy.
           includeUpdaterJson: true
-          # budujemy tylko pakiet Linux (deb + AppImage)
+          # budujemy tylko pakiet Linux (deb + AppImage + rpm)
           args: --target x86_64-unknown-linux-gnu
+
+      # Landing page (umux.pages.dev) linkuje pliki przez wzorzec GitHuba
+      # `releases/latest/download/<nazwa>` — zawsze najnowszy release, ale
+      # nazwa pliku musi pasować DOKŁADNIE, a nazwy z CI zawierają numer
+      # wersji. Dlatego obok plików z wersją wrzucamy trwałe aliasy bez
+      # numeru — strona linkuje do nich i nigdy nie wymaga ręcznej poprawki
+      # po nowym release. --clobber podmienia aliasy w kolejnym release.
+      - name: Dodaj aliasy bez numeru wersji (dla landing page)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "Ręczny przebieg (workflow_dispatch) bez release'u — pomijam aliasy."
+            exit 0
+          fi
+          BUNDLE=src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
+          cp "$BUNDLE"/appimage/umux_*_amd64.AppImage umux_amd64.AppImage
+          cp "$BUNDLE"/deb/umux_*_amd64.deb           umux_amd64.deb
+          cp "$BUNDLE"/rpm/umux-*.x86_64.rpm          umux_x86_64.rpm
+          gh release upload "$TAG" --clobber \
+            umux_amd64.AppImage umux_amd64.deb umux_x86_64.rpm \
+            --repo "$GITHUB_REPOSITORY"
 
   build-macos:
     runs-on: macos-latest
@@ -100,6 +123,22 @@ jobs:
           # .app + .dmg uniwersalny (Apple Silicon i Intel w jednym)
           args: --target universal-apple-darwin
 
+      # Alias bez numeru wersji dla landing page (patrz komentarz w jobie
+      # build-linux) — stała nazwa .dmg, która zawsze wskazuje najnowszy release.
+      - name: Dodaj alias bez numeru wersji (dla landing page)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "Ręczny przebieg (workflow_dispatch) bez release'u — pomijam alias."
+            exit 0
+          fi
+          DMG=src-tauri/target/universal-apple-darwin/release/bundle/dmg
+          cp "$DMG"/umux_*_universal.dmg umux_universal.dmg
+          gh release upload "$TAG" --clobber umux_universal.dmg \
+            --repo "$GITHUB_REPOSITORY"
+
   # v1.0 Phase 10 / #34: trzecia platforma w macierzy release'u.
   # Windows buduje przez ConPTY-ready backend (v1.0 Phase 9 / #33);
   # runner windows-latest ma MSVC, Rust i WebView2 out-of-the-box.
@@ -139,3 +178,22 @@ jobs:
           updaterJsonPreferNsis: true
           # Instalator NSIS: umux_<wersja>_x64-setup.exe
           args: --bundles nsis
+
+      # Alias bez numeru wersji dla landing page (patrz komentarz w jobie
+      # build-linux) — stała nazwa .exe, która zawsze wskazuje najnowszy release.
+      - name: Dodaj alias bez numeru wersji (dla landing page)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        shell: pwsh
+        run: |
+          if (-not $env:TAG) {
+            Write-Host "Ręczny przebieg (workflow_dispatch) bez release'u — pomijam alias."
+            exit 0
+          }
+          $exe = Get-ChildItem "src-tauri/target/release/bundle/nsis/umux_*_x64-setup.exe" |
+            Select-Object -First 1
+          if (-not $exe) { throw "Nie znaleziono instalatora NSIS w bundle/nsis/" }
+          Copy-Item $exe.FullName umux_x64-setup.exe
+          gh release upload $env:TAG --clobber umux_x64-setup.exe `
+            --repo $env:GITHUB_REPOSITORY

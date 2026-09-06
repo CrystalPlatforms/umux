@@ -14,9 +14,11 @@ import { JSDOM } from "jsdom";
 // Assumptions encoded here (stated before RED):
 //  - Input: the full HTML text of landing/index.html at the repo root.
 //  - "Auto-latest" downloads use the GitHub Releases pattern
-//    `releases/latest/download/<asset>`; asset names embed the version and
-//    are bumped on each release (names confirmed with CI for v1.0.2).
-//    Windows ships NSIS only (.exe, no .msi).
+//    `releases/latest/download/<asset>` against VERSION-LESS asset names.
+//    The release workflow (.github/workflows/release.yml) uploads those
+//    permanent aliases alongside the versioned files on every release, so
+//    the page never needs a version bump again. Windows ships NSIS only
+//    (.exe, no .msi).
 //  - Badges are dynamic shields.io endpoints (they update themselves); we
 //    assert the endpoint shape, not the current numbers.
 //  - Media (demo GIF, screenshots) live under landing/assets/ and ship with
@@ -83,9 +85,9 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
             a.getAttribute("href"),
         );
         for (const asset of [
-            "umux_1.0.4_amd64.AppImage",
-            "umux_1.0.4_amd64.deb",
-            "umux-1.0.4-1.x86_64.rpm",
+            "umux_amd64.AppImage",
+            "umux_amd64.deb",
+            "umux_x86_64.rpm",
         ]) {
             expect(
                 menuHrefs.some((h) => h?.endsWith(asset)),
@@ -128,20 +130,20 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
 
     it("points the download buttons at the latest release assets for all three platforms", () => {
         // "Auto-latest" = the GitHub `releases/latest/download/<asset>` pattern,
-        // which always resolves to the newest release. Asset names are the ones
-        // CI actually produces (confirmed for v1.0.2);
-        // on a new release only the version inside these names is bumped.
+        // which always resolves to the newest release. The asset names are the
+        // version-less aliases the release workflow uploads to every release,
+        // so no page edit is needed when a new version ships.
         const doc = parse();
         const hrefs = new Set(
             [...doc.querySelectorAll("a")].map((a) => a.getAttribute("href")),
         );
         const base = "https://github.com/CrystalPlatforms/umux/releases/latest/download";
         const assets = [
-            "umux_1.0.4_amd64.AppImage", // Linux
-            "umux_1.0.4_amd64.deb", // Linux
-            "umux-1.0.4-1.x86_64.rpm", // Linux
-            "umux_1.0.4_universal.dmg", // macOS (universal)
-            "umux_1.0.4_x64-setup.exe", // Windows (NSIS only — no .msi)
+            "umux_amd64.AppImage", // Linux
+            "umux_amd64.deb", // Linux
+            "umux_x86_64.rpm", // Linux
+            "umux_universal.dmg", // macOS (universal)
+            "umux_x64-setup.exe", // Windows (NSIS only — no .msi)
         ];
         for (const asset of assets) {
             expect(
@@ -153,6 +155,14 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(
             hrefs.has("https://github.com/CrystalPlatforms/umux/releases/latest"),
         ).toBe(true);
+    });
+
+    it("never hardcodes a version number in a download link or install command", () => {
+        // Regression guard for the version-less-alias rework (2026-09-06):
+        // versioned names like `umux_1.0.4_amd64.deb` go stale on the next
+        // release and 404. Any `umux_`/`umux-` name carrying a digit sequence
+        // with dots in the page (links, dialogs, anywhere) is a bug.
+        expect(html).not.toMatch(/umux[-_]\d/);
     });
 
     it("renders auto-updating badges for version, license and downloads", () => {
@@ -322,9 +332,9 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         // Picking a package in the dropdown starts the download AND opens a
         // dialog with the install command matching that exact format.
         const cases: [string, RegExp, string][] = [
-            ["AppImage", /chmod \+x/, "umux_1.0.4_amd64.AppImage"],
-            [".deb", /apt install/, "umux_1.0.4_amd64.deb"],
-            [".rpm", /dnf install/, "umux-1.0.4-1.x86_64.rpm"],
+            ["AppImage", /chmod \+x/, "umux_amd64.AppImage"],
+            [".deb", /apt install/, "umux_amd64.deb"],
+            [".rpm", /dnf install/, "umux_x86_64.rpm"],
         ];
         for (const [format, command, file] of cases) {
             const doc = pageWithScripts();

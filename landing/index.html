@@ -337,14 +337,17 @@
       <img src="https://img.shields.io/github/downloads/CrystalPlatforms/umux/total" alt="Total downloads" height="20">
     </div>
     <div class="downloads reveal reveal-delay-2">
-      <a class="btn btn-primary" data-platform="macos" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_universal.dmg">Download for macOS</a>
-      <a class="btn btn-primary" data-platform="windows" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_x64-setup.exe">Download for Windows</a>
+      <!-- The version-less asset names below are permanent aliases the
+           release workflow uploads to every release (.github/workflows/
+           release.yml), so these links never need a version bump. -->
+      <a class="btn btn-primary" data-platform="macos" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_universal.dmg">Download for macOS</a>
+      <a class="btn btn-primary" data-platform="windows" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_x64-setup.exe">Download for Windows</a>
       <details class="dropdown">
         <summary class="btn btn-primary">Download for Linux</summary>
         <div class="menu">
-          <a data-install="AppImage" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_amd64.AppImage">.AppImage — any distro</a>
-          <a data-install=".deb" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_amd64.deb">.deb — Ubuntu / Debian</a>
-          <a data-install=".rpm" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux-1.0.4-1.x86_64.rpm">.rpm — Fedora / openSUSE</a>
+          <a data-install="AppImage" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_amd64.AppImage">.AppImage — any distro</a>
+          <a data-install=".deb" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_amd64.deb">.deb — Ubuntu / Debian</a>
+          <a data-install=".rpm" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_x86_64.rpm">.rpm — Fedora / openSUSE</a>
         </div>
       </details>
       <a class="btn btn-ghost" href="https://github.com/CrystalPlatforms/umux/releases/latest">All releases</a>
@@ -463,15 +466,17 @@
         "hope you'll become a regular. 😃</p>" +
         '<p><a href="https://github.com/CrystalPlatforms/umux#installation" target="_blank" rel="noopener">Installation &amp; first-run notes →</a></p>';
       var install = {
+        // The browser saves the file under the version-less alias name, so
+        // these commands stay correct on every release without edits.
         "AppImage":
           "<p>No install needed — make it executable and run:</p>" +
-          "<code>chmod +x umux_1.0.4_amd64.AppImage &amp;&amp; ./umux_1.0.4_amd64.AppImage</code>",
+          "<code>chmod +x umux_amd64.AppImage &amp;&amp; ./umux_amd64.AppImage</code>",
         ".deb":
           "<p>Install from the downloaded file:</p>" +
-          "<code>sudo apt install ./umux_1.0.4_amd64.deb</code>",
+          "<code>sudo apt install ./umux_amd64.deb</code>",
         ".rpm":
           "<p>Install from the downloaded file:</p>" +
-          "<code>sudo dnf install ./umux-1.0.4-1.x86_64.rpm</code> (openSUSE: <code>zypper in</code>)",
+          "<code>sudo dnf install ./umux_x86_64.rpm</code> (openSUSE: <code>zypper in</code>)",
       };
       document.querySelectorAll("[data-platform]").forEach(function (a) {
         a.addEventListener("click", function () {
