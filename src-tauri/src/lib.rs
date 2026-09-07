@@ -928,31 +928,108 @@ fn process_pty_chunk(
     (passthrough, events)
 }
 
+/// The user's real login shell from the OS user database (getpwuid), or None.
+///
+/// A GUI-launched app (Finder/Dock on macOS, a desktop launcher on Linux)
+/// inherits NO `$SHELL` at all, so when `$SHELL` is missing this is the truth
+/// about which shell the user actually runs. Without it the old fallback
+/// launched `/bin/sh` for a zsh user: none of their config loaded — no prompt
+/// integration (git missing from the prompt), no aliases (macOS report
+/// 2026-09-07).
+#[cfg(unix)]
+fn passwd_shell() -> Option<String> {
+    // SAFETY: getpwuid returns a pointer into libc's static per-user storage;
+    // the shell path is copied out immediately and nothing else is retained.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() {
+            return None;
+        }
+        let shell = std::ffi::CStr::from_ptr((*pw).pw_shell).to_string_lossy().into_owned();
+        if shell.is_empty() {
+            None
+        } else {
+            Some(shell)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn passwd_shell() -> Option<String> {
+    None
+}
+
 /// Decide which shell binary to launch for a panel.
 ///
 /// An explicit override (from a future WorkspaceStore config) wins; otherwise
 /// the default is per-OS (v1.0 Phase 9 / #33): Windows PowerShell on Windows
 /// (the in-box Windows PowerShell 5.1 — always present on Windows 10+, which
-/// pwsh is not), the user's `$SHELL` then `/bin/sh` on Linux/macOS.
+/// pwsh is not), then the user's `$SHELL`, then their passwd login shell (a
+/// GUI launch has no `$SHELL` env var to read), then `/bin/sh`.
 pub fn resolve_shell(shell: Option<&str>) -> String {
+    resolve_shell_from(
+        shell,
+        std::env::var("SHELL").ok().filter(|s| !s.is_empty()),
+        passwd_shell(),
+    )
+}
+
+/// Pure decision core of `resolve_shell` — the env and passwd lookups are the
+/// only OS-bound parts, injected here so the whole chain is testable.
+fn resolve_shell_from(
+    shell: Option<&str>,
+    env_shell: Option<String>,
+    passwd: Option<String>,
+) -> String {
     if let Some(s) = shell {
         return s.to_string();
     }
     if cfg!(windows) {
         return "powershell.exe".to_string();
     }
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    env_shell
+        .or(passwd)
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+/// The user's home directory ($HOME on unix, $USERPROFILE on Windows), or
+/// None when unset or not an existing directory.
+///
+/// Panels must open SOMEWHERE the user can actually use. The old fallback was
+/// umux's own current dir — arbitrary for a GUI launch, and after an in-app
+/// updater relaunch it can even be a DELETED directory (macOS 2026-09-07: the
+/// shell opened "in a dot", `ls` answered "Operation not permitted", lsof
+/// reported the cwd as "."). The home dir is what every native terminal does.
+fn home_dir() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    match std::env::var(var) {
+        Ok(dir) if !dir.is_empty() && std::path::Path::new(&dir).is_dir() => {
+            Some(PathBuf::from(dir))
+        }
+        _ => None,
+    }
 }
 
 /// Decide the working directory a new shell starts in (v0.2 Phase 5 / #29).
-/// A cwd saved in the session snapshot wins when it still exists and is a
-/// directory; anything else (none, empty, deleted, a plain file) falls back
-/// to the app's current dir — exactly v0.1 behavior — so a stale or hostile
-/// snapshot value can never break panel spawn.
+/// A cwd saved in the session snapshot wins when it still exists, is a
+/// directory, and is ABSOLUTE — a relative value (e.g. the "." lsof once
+/// reported for a shell in a dead directory, macOS 2026-09-07) would resolve
+/// against umux's own — arbitrary, GUI-launch — cwd and must not pose as a
+/// saved location. Anything else falls back to the user's home dir — a GUI
+/// launch's own current dir is an arbitrary system location and can be dead
+/// after an updater relaunch (see `home_dir`) — then the app's current dir,
+/// then `/`.
 pub fn resolve_cwd(cwd: Option<&str>) -> PathBuf {
     match cwd {
-        Some(dir) if !dir.is_empty() && std::path::Path::new(dir).is_dir() => PathBuf::from(dir),
-        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        Some(dir)
+            if !dir.is_empty()
+                && std::path::Path::new(dir).is_absolute()
+                && std::path::Path::new(dir).is_dir() =>
+        {
+            PathBuf::from(dir)
+        }
+        _ => home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))),
     }
 }
 
@@ -1096,6 +1173,38 @@ mod tests {
         assert_eq!(resolve_shell(None), expected);
     }
 
+    // T3 (macOS report 2026-09-07 — GUI launch has no $SHELL): with the env
+    // var missing, the passwd entry decides. A zsh user launched from
+    // Finder/Dock must get zsh, not /bin/sh — sh reads none of their config,
+    // so the prompt lost its git integration and aliases. (Unix-only: on
+    // Windows resolve_shell_from answers "powershell.exe" before the chain.)
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_shell_without_env_uses_passwd_shell() {
+        assert_eq!(
+            resolve_shell_from(None, None, Some("/bin/zsh".to_string())),
+            "/bin/zsh"
+        );
+    }
+
+    // T4: $SHELL (a dev run from a terminal) still outranks the passwd entry.
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_shell_env_outranks_passwd() {
+        assert_eq!(
+            resolve_shell_from(None, Some("/bin/bash".to_string()), Some("/bin/zsh".to_string())),
+            "/bin/bash"
+        );
+    }
+
+    // T5: no override, no $SHELL, no passwd entry (unknown user) — the old
+    // /bin/sh last resort still applies.
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_shell_nothing_known_falls_back_to_sh() {
+        assert_eq!(resolve_shell_from(None, None, None), "/bin/sh");
+    }
+
     // --- v0.2 Phase 5 / #29: restore cwd resolution ---------------------------
 
     // T-C1 (AC2 — a restored panel re-spawns in its saved cwd):
@@ -1107,33 +1216,51 @@ mod tests {
         assert_eq!(resolve_cwd(Some(dir.to_str().unwrap())), dir);
     }
 
-    // T-C2 (AC3 — a stale snapshot value falls back to v0.1 behavior):
+    // T-C2 (AC3 — a stale snapshot value falls back to a usable directory):
     //   Input:  Some(<a path that does not exist>)
-    //   Output: the process's current dir — the panel still opens, in the
-    //           same place v0.1 would have put it.
+    //   Output: the user's HOME dir (macOS 2026-09-07: the old app-cwd
+    //           fallback put GUI-launched panels in an arbitrary — possibly
+    //           deleted — directory, "ls: Operation not permitted"). Only
+    //           when HOME is unusable does the app cwd apply.
     #[test]
     fn resolve_cwd_missing_directory_falls_back() {
-        let expected = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let expected = home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         assert_eq!(resolve_cwd(Some("/definitely/not/a/real/dir/umux-test")), expected);
+    }
+
+    // T-C2b (macOS 2026-09-07 — the stored dot): a RELATIVE saved cwd exists
+    // on disk (it resolves against the app's cwd), but it is not a real
+    // saved location — it must fall back to home, not silently reopen the
+    // panel wherever umux itself happens to run.
+    #[test]
+    fn resolve_cwd_relative_saved_value_falls_back() {
+        let expected = home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        assert_eq!(resolve_cwd(Some(".")), expected);
     }
 
     // T-C3 (no saved cwd — panels created fresh this session):
     //   Input:  None
-    //   Output: current dir, exactly as v0.1's pty_open did.
+    //   Output: the user's HOME dir, like every native terminal (macOS
+    //           2026-09-07: the app-cwd fallback opened GUI-launched panels
+    //           in an arbitrary — sometimes dead — directory).
     #[test]
     fn resolve_cwd_none_falls_back() {
-        let expected = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let expected = home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         assert_eq!(resolve_cwd(None), expected);
     }
 
     // T-C4 (a hostile/accidental value naming a FILE, not a directory):
     //   Input:  Some(<path of an existing regular file>)
-    //   Output: current dir — spawning a shell "in" a file is nonsense, and
+    //   Output: home dir — spawning a shell "in" a file is nonsense, and
     //           is_dir() (not just exists()) is what prevents it.
     #[test]
     fn resolve_cwd_file_path_falls_back() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let expected = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let expected = home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         assert_eq!(resolve_cwd(Some(file.path().to_str().unwrap())), expected);
     }
 

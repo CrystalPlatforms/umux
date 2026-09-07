@@ -51,6 +51,9 @@ const onDataMock = vi.fn()
 const onResizeMock = vi.fn()
 const fitMock = vi.fn()
 const disposeMock = vi.fn()
+// The options object the surface passed to `new Terminal(...)` — lets tests
+// pin render-affecting config (e.g. the platform terminal font stack).
+let terminalOpts: { fontFamily?: string } | null = null
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -58,7 +61,9 @@ vi.mock('@xterm/xterm', () => ({
     // 80x24 mirrors a fresh xterm before fit; tests that care can override.
     cols = 80
     rows = 24
-    constructor(_opts?: unknown) {}
+    constructor(opts?: { fontFamily?: string }) {
+      terminalOpts = opts ?? null
+    }
     loadAddon() {}
     open() {}
     write = writeMock
@@ -88,6 +93,7 @@ describe('TerminalSurface', () => {
     writeMock.mockClear()
     onDataMock.mockClear()
     disposeMock.mockClear()
+    terminalOpts = null
     outputHandler = null
     sshExitHandler = null
     sshOpenError = null
@@ -105,6 +111,20 @@ describe('TerminalSurface', () => {
         label: undefined,
       }),
     )
+  })
+
+  // Font (macOS report 2026-09-07): bare `monospace` makes WKWebView render
+  // Courier — visibly wrong next to Terminal.app's SF Mono. The surface must
+  // pass the platform terminal-mono STACK so every OS lands on its native
+  // terminal font (SF Mono / Consolas / DejaVu Sans Mono).
+  it('configures xterm with the platform terminal font stack', async () => {
+    render(<TerminalSurface />)
+
+    expect(terminalOpts?.fontFamily).toContain('ui-monospace')
+    expect(terminalOpts?.fontFamily).toContain('monospace')
+    // `monospace` alone would be the regression: it must be the LAST resort
+    // of a list, never the whole value.
+    expect(terminalOpts?.fontFamily?.split(',')[0].trim()).not.toBe('monospace')
   })
 
   it('forwards the panel label so notifications can name the origin', async () => {

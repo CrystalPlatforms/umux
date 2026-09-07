@@ -118,10 +118,20 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
 pub fn parse_lsof_cwd(output: &str) -> Option<PathBuf> {
     let line = output.lines().find(|l| l.starts_with('n'))?;
     let path = line.strip_prefix('n')?;
+    // lsof answers `n.` when it cannot resolve a cwd to a real absolute path
+    // (macOS 2026-09-07: a shell sitting in an unreadable/deleted directory —
+    // the sidebar then showed a literal dot as the panel's "folder", and the
+    // dot was stored as the workingDirectory, breaking git detection too).
+    // A relative path is never a usable answer — it would resolve against
+    // umux's own cwd wherever it is later used. Absolute, or nothing.
     if path.is_empty() {
-        None
+        return None;
+    }
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        Some(p)
     } else {
-        Some(PathBuf::from(path))
+        None
     }
 }
 
@@ -887,7 +897,11 @@ mod tests {
 
     // T-D3 (macOS — the pure lsof parser):
     //   Input:  realistic `lsof -Fn` output (pid, fd descriptor, name line).
-    //   Output: the path after the first `n`; garbage and empty paths -> None.
+    //   Output: the path after the first `n`; garbage, empty, and RELATIVE
+    //           paths -> None. lsof answers "n." for a shell sitting in an
+    //           unreadable/deleted cwd (macOS 2026-09-07) — storing that dot
+    //           as the panel's workingDirectory broke the sidebar label and
+    //           git detection; only an absolute path may pass.
     #[cfg(target_os = "macos")]
     #[test]
     fn parse_lsof_cwd_extracts_name_line() {
@@ -896,6 +910,8 @@ mod tests {
             Some(PathBuf::from("/Users/adam/proj"))
         );
         assert_eq!(parse_lsof_cwd("p12345\nfcwd\nn\n"), None);
+        assert_eq!(parse_lsof_cwd("p12345\nfcwd\nn.\n"), None);
+        assert_eq!(parse_lsof_cwd("p12345\nfcwd\nnproj\n"), None);
         assert_eq!(parse_lsof_cwd("totally unexpected output"), None);
         assert_eq!(parse_lsof_cwd(""), None);
     }

@@ -21,6 +21,7 @@ import { listen } from '@tauri-apps/api/event'
 import '@xterm/xterm/css/xterm.css'
 import { clipboardAction } from './clipboardShortcut'
 import { WriteBatcher } from './WriteBatcher'
+import { canUseWebglRenderer } from './gpuRenderer'
 
 // Decode the base64 `pty_output` payload (perf audit 2026-09-05: the wire used
 // to carry a JSON array of numbers — ~4x the bytes per chunk and much slower
@@ -31,6 +32,14 @@ function base64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
   return bytes
 }
+
+// Terminal font — each platform's native terminal mono, not the webview's
+// generic-monospace default (macOS report 2026-09-07: WKWebView resolves bare
+// `monospace` to Courier, nothing like Terminal.app's SF Mono, so panels
+// looked wrong next to the native terminal). Resolution: `ui-monospace` is
+// SF Mono in WKWebView (macOS); Windows has no ui-monospace/Menlo and lands
+// on Consolas; Linux falls through to DejaVu Sans Mono via `monospace`.
+const TERMINAL_FONT = "ui-monospace, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
 
 export function TerminalSurface({
   label,
@@ -93,7 +102,7 @@ export function TerminalSurface({
     if (container == null) return
 
     const term = new Terminal({
-      fontFamily: 'monospace',
+      fontFamily: TERMINAL_FONT,
       fontSize: 14,
       // Bounded scrollback (Phase 20 / #21, AC2): cap retained lines so a long
       // heavy-output session can't grow memory without limit. xterm's default
@@ -108,19 +117,25 @@ export function TerminalSurface({
     // GPU renderer (perf audit 2026-09-05): xterm's default DOM renderer
     // touches layout per painted cell; the WebGL addon draws the viewport on
     // the GPU, which is the difference between smooth and janky output on
-    // Windows WebView2. On context loss (GPU reset, driver churn, or simply
-    // too many live contexts once many panels are open) the addon is dropped
-    // and xterm falls back to the DOM renderer — degraded but never broken.
+    // Windows WebView2. Only CHROMIUM-based webviews get it: Apple WebKit
+    // (macOS WKWebView) and WebKitGTK (Linux) create the WebGL context but
+    // paint a black canvas — prompt invisible, keystrokes still work
+    // (xtermjs/xterm.js#3575, macOS regression 2026-09-07). On Chromium
+    // context loss (GPU reset, driver churn, or too many live contexts once
+    // many panels are open) the addon is dropped and xterm falls back to the
+    // DOM renderer — degraded but never broken.
     let webgl: WebglAddon | undefined
-    try {
-      webgl = new WebglAddon()
-      webgl.onContextLoss(() => {
-        webgl?.dispose()
-        webgl = undefined
-      })
-      term.loadAddon(webgl)
-    } catch {
-      webgl = undefined // no usable WebGL: the DOM renderer still works
+    if (canUseWebglRenderer(navigator.userAgent)) {
+      try {
+        webgl = new WebglAddon()
+        webgl.onContextLoss(() => {
+          webgl?.dispose()
+          webgl = undefined
+        })
+        term.loadAddon(webgl)
+      } catch {
+        webgl = undefined // no usable WebGL: the DOM renderer still works
+      }
     }
 
     // Ctrl+Shift+C copies the current selection to the clipboard instead of
@@ -371,7 +386,7 @@ export function TerminalSurface({
             boxSizing: 'border-box',
             background: 'rgba(0,0,0,0.9)',
             color: '#ff6b6b',
-            fontFamily: 'monospace',
+            fontFamily: TERMINAL_FONT,
             fontSize: 14,
             overflow: 'auto',
             whiteSpace: 'pre-wrap',

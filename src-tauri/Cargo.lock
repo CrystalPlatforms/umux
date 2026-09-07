@@ -119,6 +119,7 @@ name = "app"
 version = "1.5.2"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "log",
  "portable-pty",
  "reqwest 0.13.4",

@@ -54,5 +54,13 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
+# The user's real login shell via getpwuid (macOS report 2026-09-07): a
+# GUI-launched app has no $SHELL in its environment, so the /bin/sh fallback
+# spawned sh instead of the user's zsh/bash — none of their shell config
+# loaded (no prompt integration, no aliases). Already in the tree
+# transitively; this makes it directly usable on unix targets.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
