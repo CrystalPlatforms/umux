@@ -195,10 +195,13 @@ impl OscParser {
 /// and return a notification event if this is a recognized protocol.
 fn match_notification(params: &[u8]) -> Option<NotificationEvent> {
     // iTerm2: `9;<message>` — but NOT `9;9;<cwd>` (ConEmu-style cwd tracking
-    // that shell integrations emit on every prompt; see header). The message
-    // of a real completion never starts with `9;`.
+    // that shell integrations emit on every prompt; see header) and NOT
+    // `9;4;<state>[;<progress>]` (the ConEmu/Windows-Terminal PROGRESS report
+    // Claude Code emits on every prompt — treating it as a completion fired a
+    // bogus notification per prompt, issue #75). The message of a real
+    // completion never starts with `9;` or `4;`.
     if let Some(rest) = params.strip_prefix(b"9;") {
-        if !rest.starts_with(b"9;") {
+        if !rest.starts_with(b"9;") && !rest.starts_with(b"4;") {
             return Some(NotificationEvent {
             protocol: OscProtocol::Nine,
             title: String::new(),
@@ -219,16 +222,27 @@ fn match_notification(params: &[u8]) -> Option<NotificationEvent> {
     }
 
     // Kitty: `99;<metadata>;<payload>`. Best-effort: body = text after the 2nd
-    // `;`; the metadata block (key=value) is discarded here.
+    // `;`; the metadata block (key=value) is discarded here. A capability
+    // QUERY (`p=?` in the metadata — opentui/OpenCode sends one at startup,
+    // issue #75) is not a notification: it must reach the terminal untouched
+    // so the app can see whether a reply ever comes.
     if let Some(rest) = params.strip_prefix(b"99;") {
-        let (_meta, payload) = split_once_byte(rest, b';');
-        return Some(NotificationEvent {
-            protocol: OscProtocol::NinetyNine,
-            title: String::new(),
-            body: String::from_utf8_lossy(payload).into_owned(),
-        });
+        let (meta, payload) = split_once_byte(rest, b';');
+        if !contains(meta, b"p=?") {
+            return Some(NotificationEvent {
+                protocol: OscProtocol::NinetyNine,
+                title: String::new(),
+                body: String::from_utf8_lossy(payload).into_owned(),
+            });
+        }
     }
     None
+}
+
+/// Whether `haystack` contains `needle` anywhere. Byte-slice substring search
+/// (no stdlib equivalent for `&[u8]` without converting to `str`).
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Split on the first occurrence of `sep`: returns (before, after). If `sep` is
@@ -504,6 +518,54 @@ mod tests {
 
         let result = p.push(input);
 
+        assert_eq!(result.passthrough, input.as_slice());
+        assert!(result.events.is_empty());
+    }
+
+    // T14 (issue #75 — a Kitty notification capability QUERY is not a
+    // notification and must reach the terminal byte-identical):
+    //   Input:  ESC ] 99 ; i=opentui-notifications : p=? ; ESC \
+    //           (the exact 34-byte startup query captured from OpenCode's
+    //           opentui; `p=?` in the METADATA block asks whether the terminal
+    //           supports Kitty notifications and expects the terminal's reply)
+    //   Output: passthrough == input exactly, no events.
+    //   Without this the parser consumed the query, so the terminal never saw
+    //   it and could never answer — a violation of the PRD byte-identity
+    //   invariant, and one more unanswered capability probe for the app.
+    #[test]
+    fn osc99_capability_query_passes_through() {
+        let mut p = OscParser::new();
+        let input = b"\x1b]99;i=opentui-notifications:p=?;\x1b\\";
+
+        let result = p.push(input);
+
+        assert_eq!(result.passthrough, input.as_slice());
+        assert!(result.events.is_empty());
+    }
+
+    // T15 (issue #75 — ConEmu/Windows-Terminal PROGRESS reports are not
+    // completions):
+    //   Input:  ESC ] 9 ; 4 ; 0 BEL   (Claude Code emits this on every prompt:
+    //           state 0 = no progress; states 1-4 also exist)
+    //   Output: passthrough == input exactly, no events.
+    //   Without this every prompt fired a bogus completion event — Adam's
+    //   umux.log was full of `body="4;0;"` notifications and phantom
+    //   needs-attention flips. Same shape as the `9;9;` cwd guard above:
+    //   a machine-to-terminal report, never a human-readable message.
+    #[test]
+    fn osc9_4_conemu_progress_is_not_a_notification() {
+        let mut p = OscParser::new();
+        let input = b"\x1b]9;4;0\x07";
+
+        let result = p.push(input);
+
+        assert_eq!(result.passthrough, input.as_slice());
+        assert!(result.events.is_empty());
+
+        // A state-carrying variant (`state;progress`) behaves the same.
+        let mut p = OscParser::new();
+        let input = b"\x1b]9;4;3;50\x07";
+        let result = p.push(input);
         assert_eq!(result.passthrough, input.as_slice());
         assert!(result.events.is_empty());
     }

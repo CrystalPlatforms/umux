@@ -7,7 +7,42 @@
 // (xtermjs/xterm.js#3575). Real UA strings from the wild, kept verbatim.
 
 import { describe, it, expect } from 'vitest'
-import { canUseWebglRenderer } from './gpuRenderer'
+import { canUseWebglRenderer, rendererKind } from './gpuRenderer'
+
+describe('rendererKind', () => {
+  it('picks WebGL for the Windows WebView2 engine (Chromium, includes Edg)', () => {
+    const webView2 =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+      'Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0'
+    expect(rendererKind(webView2)).toBe('webgl')
+  })
+
+  it('picks WebGL for plain Chrome', () => {
+    const chrome =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+      'Chrome/139.0.0.0 Safari/537.36'
+    expect(rendererKind(chrome)).toBe('webgl')
+  })
+
+  it('picks Canvas for the macOS WKWebView engine (black WebGL canvas + black DOM TUI frames)', () => {
+    const wkWebView =
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 ' +
+      '(KHTML, like Gecko) Version/18.5 Safari/605.1.15'
+    expect(rendererKind(wkWebView)).toBe('canvas')
+  })
+
+  it('picks Canvas for Linux WebKitGTK (same WebKit engine)', () => {
+    const webkitGtk =
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
+      'Version/2.48.1 Safari/605.1.15'
+    expect(rendererKind(webkitGtk)).toBe('canvas')
+  })
+
+  it('falls back to the DOM renderer for unknown engines', () => {
+    expect(rendererKind('')).toBe('dom')
+    expect(rendererKind('Mozilla/5.0 jsdom/25.0.1')).toBe('dom')
+  })
+})
 
 describe('canUseWebglRenderer', () => {
   it('allows the Windows WebView2 engine (Chromium, includes Edg)', () => {

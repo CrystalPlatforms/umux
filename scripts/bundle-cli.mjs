@@ -18,9 +18,19 @@
 // target/ itself.
 
 import { execSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+// Plain-stream copy instead of copyFileSync/fcopyfile (build fix 2026-09-07):
+// fcopyfile preserves APFS `com.apple.decmpfs` compression metadata, and the
+// tauri-build script's Rust `fs::copy` (fclonefileat path) then fails on that
+// sidecar with "Operation not permitted" whenever the file was produced by a
+// different process lineage (macOS provenance). A read+write copy produces a
+// plain data file with no decmpfs, which fs::copy always accepts.
+function plainCopy(from, to) {
+  writeFileSync(to, readFileSync(from))
+}
 
 const srcTauri = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri')
 const outDir = path.join(srcTauri, 'binaries')
@@ -48,7 +58,7 @@ function copyCli(fromRel, destName) {
   }
   mkdirSync(outDir, { recursive: true })
   const to = path.join(outDir, destName)
-  copyFileSync(from, to)
+  plainCopy(from, to)
   console.log(`[bundle-cli] sidecar ready: ${to}`)
 }
 
@@ -78,7 +88,7 @@ if (triple === 'universal-apple-darwin') {
     'umux-aarch64-apple-darwin',
     'umux-x86_64-apple-darwin',
   ]) {
-    copyFileSync(fat, path.join(outDir, name))
+    plainCopy(fat, path.join(outDir, name))
   }
   console.log(`[bundle-cli] sidecar ready: ${fat} (+ per-arch copies)`)
 } else {

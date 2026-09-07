@@ -214,6 +214,19 @@ export function TerminalSurface({
     }
     rafId = requestAnimationFrame(tickFrame)
 
+    // Pipeline diagnostics (issue #75 hunt): every few seconds report how many
+    // characters this panel's DOM holds — total and non-whitespace (a blank
+    // grid is all spaces; a painted TUI carries hundreds of visible chars).
+    // Numbers only — never content. The backend logs it only while its debug
+    // flag file exists, so a normal install pays one tiny no-op invoke.
+    const paintTimer = window.setInterval(() => {
+      if (panelId == null) return
+      const text = container.textContent ?? ''
+      let visible = 0
+      for (const c of text) if (!/\s/.test(c)) visible++
+      void invoke('pty_debug_paint', { id: panelId, chars: text.length, visible }).catch(() => {})
+    }, 4000)
+
     const writeIfOurs = (payload: { id: number; data: string }) => {
       if (payload.id === panelId) {
         const bytes = base64ToBytes(payload.data)
@@ -340,6 +353,7 @@ export function TerminalSurface({
     return () => {
       disposed = true
       cancelAnimationFrame(rafId)
+      window.clearInterval(paintTimer)
       // Flush any output still buffered from the last frame so closing a panel
       // never silently drops bytes.
       const remaining = batcher.flush()

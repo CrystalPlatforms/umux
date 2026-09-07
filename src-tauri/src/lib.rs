@@ -4,6 +4,7 @@ pub mod git_branch;
 pub mod listening_ports;
 pub mod notification_service;
 pub mod osc_parser;
+pub mod pty_debug;
 pub mod pty_service;
 pub mod ssh_manager;
 pub mod updater_probe;
@@ -126,6 +127,10 @@ fn pty_open(
     // `set_notifications_muted` command (which flips the shared flag) is observed
     // live by every panel's notification thread.
     let mute_flag = Arc::clone(&mute);
+    // Opt-in pipeline diagnostics (issue #75 hunt): when the flag file exists,
+    // every passthrough chunk leaves one numbers-only line (byte count, running
+    // total, hex prefix — never terminal content) in pty-debug.log. The gate is
+    // re-read per chunk, so dropping the file stops the dump immediately.
     std::thread::spawn(move || {
         let mut parser = OscParser::new();
         let service = NotificationService::with_mute(
@@ -133,8 +138,18 @@ fn pty_open(
             Some("umux".to_string()),
             mute_flag,
         );
+        let mut debug_total: u64 = 0;
         while let Ok(bytes) = rx.recv() {
             let (passthrough, events) = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            let debug_dir = config_dir();
+            if pty_debug::enabled(&debug_dir) {
+                debug_total += passthrough.len() as u64;
+                pty_debug::append(
+                    &debug_dir,
+                    &pty_debug::chunk_line(id, debug_total, passthrough.len(), &passthrough),
+                    pty_debug::max_log_bytes(),
+                );
+            }
             if !events.is_empty() {
                 // Completion signal first, then the surviving output bytes: the
                 // frontend status machine's grace window expects a TUI's
@@ -155,6 +170,10 @@ fn pty_open(
 
 #[tauri::command]
 fn pty_write(state: State<'_, Mutex<PtyService>>, id: u32, data: String) -> Result<(), String> {
+    let debug_dir = config_dir();
+    if pty_debug::enabled(&debug_dir) {
+        pty_debug::append(&debug_dir, &pty_debug::input_line(id, data.len()), pty_debug::max_log_bytes());
+    }
     let mut svc = state.lock().map_err(|e| e.to_string())?;
     svc.write(&PtyHandle { id }, data.as_bytes()).map_err(|e| e.to_string())
 }
@@ -169,6 +188,20 @@ fn pty_resize(state: State<'_, Mutex<PtyService>>, id: u32, cols: u16, rows: u16
 fn pty_close(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<(), String> {
     let mut svc = state.lock().map_err(|e| e.to_string())?;
     svc.close(&PtyHandle { id });
+    Ok(())
+}
+
+/// Opt-in pipeline diagnostics (issue #75 hunt): the frontend periodically
+/// reports how many characters a panel's DOM currently holds. Numbers only —
+/// no terminal content ever crosses this boundary. Logged only while the
+/// `debug-pty.flag` file exists, so a normal install does zero work here
+/// (the frontend calls this unconditionally; the backend is the gate).
+#[tauri::command]
+fn pty_debug_paint(id: u32, chars: usize, visible: usize) -> Result<(), String> {
+    let dir = config_dir();
+    if pty_debug::enabled(&dir) {
+        pty_debug::append(&dir, &pty_debug::paint_line(id, chars, visible), pty_debug::max_log_bytes());
+    }
     Ok(())
 }
 
@@ -1077,6 +1110,7 @@ pub fn run() {
             pty_resize,
             pty_close,
             pty_is_busy,
+            pty_debug_paint,
             panel_cwds,
             panel_processes,
             git_branches,
