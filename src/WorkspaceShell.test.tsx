@@ -3578,8 +3578,9 @@ describe('workspace colors: Color submenu in the row menu (#69)', () => {
 //  - A colored workspace renders a DOT beside its name (always visible while
 //    set, active or not), painted with the chosen hex.
 //  - The row's LEFT ACTIVE EDGE takes the chosen color ONLY while the row is
-//    the active one (inline borderLeftColor); an inactive colored row keeps
-//    the invisible (transparent) edge, and the ACTIVE-UNCOLORED row keeps
+//    the active one (inline --row-rail-color custom property feeding the
+//    ::before rail); an inactive colored row keeps
+//    no override, and the ACTIVE-UNCOLORED row keeps
 //    the default accent (no inline override).
 //  - Unset color → no dot, no inline edge: exactly today's rendering.
 describe('workspace colors: dot + active edge (#69)', () => {
@@ -3650,8 +3651,8 @@ describe('workspace colors: dot + active edge (#69)', () => {
       expect(screen.getByTestId('workspace-row-ws-2').className).toContain('is-active'),
     )
     const row = screen.getByTestId('workspace-row-ws-2') as HTMLElement
-    // jsdom normalizes the inline hex to rgb() on read — #ec4899.
-    expect(row.style.borderLeftColor).toBe('rgb(236, 72, 153)')
+    // jsdom keeps custom properties verbatim (no rgb normalization).
+    expect(row.style.getPropertyValue('--row-rail-color')).toBe('#ec4899')
   })
 
   it('an inactive colored row keeps the edge invisible (no inline color)', async () => {
@@ -3662,10 +3663,10 @@ describe('workspace colors: dot + active edge (#69)', () => {
     )
 
     // ws-1 boots active; ws-2 is colored but NOT active — the edge must stay
-    // unset (the stylesheet's transparent), the dot still visible.
+    // unset (no rail override), the dot still visible.
     const row = screen.getByTestId('workspace-row-ws-2') as HTMLElement
     expect(row.className).not.toContain('is-active')
-    expect(row.style.borderLeftColor).toBe('')
+    expect(row.style.getPropertyValue('--row-rail-color')).toBe('')
     expect(dotOf('workspace-row-ws-2')).not.toBeNull()
   })
 
@@ -3678,7 +3679,7 @@ describe('workspace colors: dot + active edge (#69)', () => {
 
     const row = screen.getByTestId('workspace-row-ws-1') as HTMLElement
     expect(row.className).toContain('is-active')
-    expect(row.style.borderLeftColor).toBe('')
+    expect(row.style.getPropertyValue('--row-rail-color')).toBe('')
   })
 })
 
@@ -3690,8 +3691,10 @@ describe('workspace colors: dot + active edge (#69)', () => {
 //    bar. The square swatch (same shape as the sidebar one) sits beside the
 //    name, always visible while set.
 //  - The active tab's edge: tabs have no left edge today — their default
-//    accent is the TOP strip (inset box-shadow on .tab.is-active). A colored
-//    active tab recolors THAT strip (PRD story 95: the edge takes the item's
+//    accent is the TOP strip (.tab.is-active::before, straight and inset by
+//    the corner radius so it never follows the rounded silhouette). A colored
+//    active tab recolors THAT strip via the --tab-strip-color custom
+//    property (PRD story 95: the edge takes the item's
 //    color "instead of the default accent"); inactive colored tabs keep no
 //    strip at all.
 //  - Groups: no activation concept exists, so the group's edge shows while
@@ -3780,8 +3783,9 @@ describe('tab + group colors (#70)', () => {
       ),
     )
     const tab = screen.getByTestId('tab-ws-1-t-2') as HTMLElement
-    // jsdom keeps box-shadow verbatim (no rgb normalization like colors).
-    expect(tab.style.boxShadow).toContain('#eab308')
+    // The strip color travels as a custom property consumed by
+    // .tab.is-active::before (the straight top bar).
+    expect(tab.style.getPropertyValue('--tab-strip-color')).toBe('#eab308')
   })
 
   it('an inactive colored tab keeps no strip; an active uncolored one keeps the default', async () => {
@@ -3791,15 +3795,16 @@ describe('tab + group colors (#70)', () => {
       expect(screen.getByText('Tab 2', { selector: '.tab-name' })).toBeInTheDocument(),
     )
 
-    // Tab 1 boots active and uncolored — no inline strip override.
+    // Tab 1 boots active and uncolored — no strip-color override, so the
+    // ::before falls back to the default accent.
     const active = screen.getByTestId('tab-ws-1-t-1') as HTMLElement
     expect(active.getAttribute('aria-selected')).toBe('true')
-    expect(active.style.boxShadow).toBe('')
+    expect(active.style.getPropertyValue('--tab-strip-color')).toBe('')
 
     // The colored tab is inactive — strip hidden (dot still visible).
     const inactive = screen.getByTestId('tab-ws-1-t-2') as HTMLElement
     expect(inactive.getAttribute('aria-selected')).toBe('false')
-    expect(inactive.style.boxShadow).toBe('')
+    expect(inactive.style.getPropertyValue('--tab-strip-color')).toBe('')
     expect(tabDot('t-2')).not.toBeNull()
   })
 
@@ -3886,7 +3891,7 @@ describe('tab + group colors (#70)', () => {
     // HITL round (Adam): groups carry NO edge at all — the tinted folder is
     // the whole color signal, whether or not the group holds the active ws.
     const row = screen.getByTestId('group-row-g-1') as HTMLElement
-    expect(row.style.borderLeftColor).toBe('')
+    expect(row.style.getPropertyValue('--row-rail-color')).toBe('')
   })
 
   it('an UNCOLORED group keeps today\'s folder and no square', async () => {

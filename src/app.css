@@ -374,8 +374,8 @@ body {
   gap: 4px;
   padding: 6px 8px;
   margin-bottom: 2px;
+  position: relative;
   border-radius: var(--radius-sm);
-  border-left: 2px solid transparent;
   cursor: pointer;
   color: var(--text-dim);
   transition: background 0.1s ease, color 0.1s ease;
@@ -392,7 +392,6 @@ body {
 
 .workspace-row.is-active {
   background: var(--bg-sidebar-active);
-  border-left-color: var(--accent-line);
   color: var(--text);
 }
 
@@ -401,8 +400,35 @@ body {
    distinguishable from the ACTIVE one while several are held at once. */
 .workspace-row.is-selected {
   background: var(--bg-sidebar-hover);
-  border-left-color: var(--accent-line);
   color: var(--text);
+}
+
+/* Active/selected rows alone square off the rail edge: the accent rail runs
+   the FULL height of the row, so the silhouette must be straight there —
+   the rail's own rounded outer side carries the visible rounding. Hovered
+   and idle rows keep the standard rounding on all corners. */
+.workspace-row.is-active,
+.workspace-row.is-selected {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+/* The active/selected rail: a straight bar along the full height of the
+   row's left edge (a border-left would have followed the rounded corner
+   and bent the line at both ends). The row's rail-side corners are square,
+   so the bar sits flush with the top and bottom edges; its OUTER side
+   (left) is rounded to echo the app's rounding, the inner side stays
+   square. A workspace with a palette color recolors the rail via
+   --row-rail-color, set inline in WorkspaceShell. */
+.workspace-row.is-active::before,
+.workspace-row.is-selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 3px 0 0 3px;
+  background: var(--row-rail-color, var(--accent-line));
 }
 
 .workspace-row.is-selected.is-active {
@@ -725,6 +751,7 @@ body.is-dragging * {
   padding: 6px 8px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  position: relative;
   background: transparent;
   color: var(--text-dim);
   font-size: var(--text-sm);
@@ -747,7 +774,28 @@ body.is-dragging * {
   background: var(--bg-sidebar-active);
   border-color: var(--border-soft);
   color: var(--text);
-  box-shadow: inset 0 2px 0 0 var(--accent-line);
+  /* Only the ACTIVE tab squares off its top corners: the strip runs the
+     FULL width of the top edge, so the silhouette must be straight there —
+     the strip's own rounded top corners carry the visible rounding. Idle
+     and hovered tabs keep the standard rounding. */
+  border-radius: 0;
+}
+
+/* The active strip: a straight bar along the FULL width of the tab's top
+   edge (an inset box-shadow would have followed the rounded corner and bent
+   the line down at both ends). The tab's top corners are square, so the bar
+   sits flush with both sides; its OUTER side (top) is rounded to echo the
+   app's rounding, the inner side stays square. A tab with a palette color
+   recolors the strip via --tab-strip-color, set inline in WorkspaceShell. */
+.tab.is-active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--tab-strip-color, var(--accent-line));
 }
 
 .tab-name {

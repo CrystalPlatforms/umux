@@ -2875,11 +2875,13 @@ export function WorkspaceShell() {
                     : {}),
                   // Active edge in the workspace's chosen color (#69): ONLY
                   // while this row is the active one — an inactive colored
-                  // row keeps the stylesheet's invisible (transparent) edge,
-                  // and an uncolored row keeps the default accent.
+                  // row keeps no override, and an uncolored row keeps the
+                  // default accent. The color feeds the row's ::before rail
+                  // through the --row-rail-color custom property (the rail
+                  // is a straight full-height bar, not the border-left).
                   ...(entry.workspace.color != null &&
                   entry.workspace.id === state.activeId
-                    ? { borderLeftColor: entry.workspace.color }
+                    ? ({ '--row-rail-color': entry.workspace.color } as CSSProperties)
                     : {}),
                 }}
                 onPointerDown={(e) => beginSidebarDrag(e, entry.workspace.id)}
@@ -3115,13 +3117,13 @@ export function WorkspaceShell() {
                         className={`tab ${tabActive ? 'is-active' : ''} ${
                           drag?.kind === 'tab' && drag.id === tab.id ? 'is-dragged' : ''
                         }`}
-                        // Active tab edge (#70): tabs carry their default
-                        // accent as the TOP strip (.tab.is-active's inset
-                        // shadow) — a colored active tab recolors that strip;
-                        // an inactive one keeps no strip at all.
+                        // Active tab edge (#70): the accent is the TOP strip
+                        // (.tab.is-active::before) — a colored active tab
+                        // recolors that strip through --tab-strip-color; an
+                        // inactive one keeps no strip at all.
                         style={
                           tab.color != null && tabActive
-                            ? { boxShadow: `inset 0 2px 0 0 ${tab.color}` }
+                            ? ({ '--tab-strip-color': tab.color } as CSSProperties)
                             : undefined
                         }
                         // Live pointer drag reorder (round 3; same-workspace
