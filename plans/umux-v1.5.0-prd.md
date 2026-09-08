@@ -1,4 +1,4 @@
-# umux v1.5.0 — PRD (planned)
+# umux v1.5.0 — PRD (COMPLETED)
 
 **Status:** planned _(discovery 2026-09-01, "umux v1.5.0, v1.6.0 plan" session; not started)_
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.

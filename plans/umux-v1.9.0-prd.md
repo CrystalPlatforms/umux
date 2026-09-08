@@ -1,69 +1,60 @@
-# umux v1.9.0 — PRD (Windows shell picker & sidebar polish)
+# umux v1.9.0 — PRD (lucide icons, spring press feedback, pinned tabs)
 
-**Status:** planned — builds after v1.8.0 · created 2026-08-31 ("versions cleanup" discovery)
+**Status:** planned _(icons/press discovery 2026-09-01, "umux v1.5.0, v1.6.0 plan" session; renumbered v1.6.0 → v1.9.0 on 2026-09-07 — the cross-platform shell picker took v1.6.0; builds last)_
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
-**GitHub issue:** #67 (windows shell support)
+**Scope:** last of the pre-v2.0 UI releases — lucide-react icons, spring press feedback everywhere, pinned-tab rebuild.
 
 ## Problem Statement
 
-On Windows, new tabs always open in the OS default shell — a user juggling PowerShell, cmd, Git Bash, and WSL cannot pick per tab or change the default without leaving the app. On Windows/Linux, the sidebar's drag-to-resize gesture silently does nothing (it works only on macOS). And the sidebar's metadata (git branches, and soon folders) cannot be turned off by users who prefer a minimal sidebar.
+Every icon is a hand-rolled SVG component (17 in `WorkspaceShell`, plus three duplicated inline close SVGs and a CSS-tricked mute bell) — the set drifts from any standard and invites divergence. Press feedback is inconsistent: most buttons scale on `:active` with a plain ease-out, while menu items, tab close buttons, sidebar rows, and Settings switches give no feedback at all. And pinned tabs are only a hidden flag: a pinned tab still shows the close button and can be closed — or closed from the context menu — by accident, and it doesn't hold a stable place in the tab bar.
 
 ## Solution
 
-v1.9.0 adds a **Windows shell picker**: a default-shell choice in Settings (auto-detected PowerShell/cmd/Git Bash/WSL + a custom entry) and a small **arrow next to "+ New tab"** opening a dropdown for the shell of that specific tab. It fixes the **sidebar drag-resize on Windows/Linux** and persists the chosen width. It adds two **Settings switches, both defaulting to off**: hide the git branch on tab rows, and show **per-tab working directories on workspace rows** (each tab gets one line combining its agent-status chip with the folder that tab's shell is in).
+Switch all icons to **lucide-react** (1:1 — the hand-rolled set already mimics Lucide geometry). Give **every interactive element** a springy, Apple-style press effect — labeled buttons, icon buttons, menu items, tab close, workspace/group/tab rows, switches — and make it a standing rule for all future ones. **Rebuild pinned tabs:** the pin indicator replaces the close button entirely, pinned tabs cannot be closed until unpinned, and pinned tabs always sort to the front of the tab bar.
 
 ## User Stories
 
-*(story numbers match the master PRD)*
+_(story numbers match the master PRD)_
 
-- **88.** As a Windows user, I want to pick my default shell in Settings from an auto-detected list (PowerShell, cmd, Git Bash, WSL) or enter a custom command, so that new tabs open in the shell I actually use.
-- **89.** As a Windows user, I want an arrow next to the "+ New tab" button that opens a dropdown for choosing the shell of that specific new tab, so that I can spawn, say, a WSL tab without changing my default.
-- **90.** As a user, I want the shell picker to affect local tabs only — SSH tabs and macOS/Linux keep today's behavior — so that remote sessions stay predictable. *(Windows-only by decision, 2026-08-31.)*
-- **91.** As a Windows/Linux user, I want the sidebar's right-edge drag to resize it — the gesture that already works on macOS — and I want the chosen width to persist across restarts, so that my layout survives a reboot on every platform.
-- **92.** As a user, I want a Settings switch that hides the git branch on tab rows (default: off), so that the sidebar stays minimal when I don't care about branches.
-- **93.** As a developer, I want each workspace row to show, per tab, one line combining that tab's agent-status chip with the folder that tab's shell is in — every tab gets a line (with or without an agent), duplicate folders are not merged — toggled by a Settings switch (default: off), so that I can see at a glance where every terminal sits.
-
-> Per the story #84 standing rule, each new control ships with its menu entry (the v1.8.0 menu registry exists by the time this package is built).
+- **100.** As a user, I want all app icons to come from lucide-react (1:1 replacements for the hand-rolled set), so that the icon language is consistent and maintainable.
+- **101.** As a user, I want a springy Apple-style press effect on every interactive element — buttons with icons and labels, menu items, workspace/group/tab rows, switches — so that the UI feels alive and consistent; every future interactive element ships with it. _(Standing rule, like story #84.)_
+- **102.** As a developer, I want a pinned tab to show a pin indicator in place of the close button (non-interactive; unpin from the context menu), so that pinning is visible at a glance.
+- **103.** As a developer, I want pinned tabs to be unclosable — no close button, "Close tab" disabled in the context menu — until I unpin them, so that I never lose a pinned terminal by accident.
+- **104.** As a developer, I want pinned tabs to always sit at the front of the tab bar (user order kept within the pinned and unpinned zones), so that they are always in the same place.
 
 ## Implementation Decisions
 
-- **ShellDetector** *(deep, pure)* — turns injected probe results (PATH scan + registry checks on Windows) into the installed-shell list (display name + launch command) for both the Settings picker and the "+"-dropdown. The pure core does no I/O — detection, ranking, and dedup are unit-testable; setups the probes miss land in the custom entry.
-- **Picker scope** — Windows local tabs only; macOS/Linux and SSH tabs unchanged (decided 2026-08-31). Clicking "+" itself uses the Settings default; the arrow picks a different shell for just that tab.
-- **Sidebar resize fix + persistence** — the drag gesture works on all three platforms; the chosen width rides the existing settings storage (no store schema migration expected).
-- **Metadata switches** — the git-branch switch hides only the branch on tab rows (ports tooltip untouched). The folders switch renders one line per tab on its workspace row: agent chip + folder, every tab, duplicates unmerged — data comes from the working directories umux already tracks.
-- **Defaults** — both switches are **off** after install (decided 2026-08-31).
+- **lucide-react** (tree-shaken, pinned version) replaces all hand-rolled SVGs: the 17 icon components in `WorkspaceShell.tsx`, the three duplicated inline close SVGs (`SettingsDialog.tsx`, `CmuxImportWizard.tsx`, the update banner), and the mute bell — which becomes a lucide `Bell`/`BellOff` pair instead of the CSS strike-through. Sizes and stroke width come from lucide props; visual output stays 1:1 where lucide has an identical shape.
+- **Press effect:** the existing `--press-scale` token is extended to the elements that lack it (`.menu-item`, `.tab-close`, workspace/group/tab rows, Settings switches) and the easing is upgraded from plain ease-out to a spring-like return per /apple-design, so every element presses and releases with the same feel. `prefers-reduced-motion` continues to disable all of it (already wired).
+- **Standing rule:** recorded in Claude's MEMORY and as story #101 — every future interactive element in umux ships with the press effect from day one.
+- **Pinned tabs:** `Tab.pinned` already exists and persists — no model change. When pinned, the close button is not rendered; a **non-interactive** pin indicator sits in its place (a span, not a disabled button). Unpinning stays in the context menu. "Close tab" is disabled (with a hint) while pinned. The tab-bar render list sorts pinned tabs before unpinned ones — stable within each zone; dragging a pinned tab into the unpinned zone is blocked, and dragging an unpinned tab before the pinned zone lands it after the pinned block.
 
 ## Assumptions
 
-- PATH + registry probing covers standard Windows shell installs; non-standard setups use the custom entry — accepted by the PO.
-- The v1.8.0 menu registry exists by build time (build-order dependency: v1.8.0 first).
-- Sidebar width persistence fits the existing settings storage without a schema migration.
-- Per-tab folders can render inside the current workspace-row layout without redesign (long-path truncation details at /carve).
+- The pin change affects **tabs only** — pinned workspaces and groups keep today's rendering.
+- Clicking the pin indicator does nothing (PO decision 2026-09-01: indicator only, unpin via context menu).
+- The unclosable rule is per-tab: closing a **whole workspace** that contains pinned tabs still works and closes them with it.
+- The pinned-first sort is a render-time ordering; the saved `order` data is not rewritten by it.
 
 ## Tradeoffs Considered
 
-- **Merging duplicate folder lines on workspace rows** — rejected (2026-08-31): one line per tab keeps the tab↔folder mapping unambiguous.
-- **macOS/Linux shell pickers in v1.9.0** — deferred: issue #67 is scoped to Windows local tabs only (2026-08-31).
-- **Shell picker for SSH tabs** — rejected for now: remote shells add agent/auth complexity; local-only keeps v1.9.0 small.
-- **Hard-coded shell list** — rejected: detection must not assume a specific shell exists; the custom entry covers the rest.
-- **Both switches on by default** — rejected by the PO (2026-08-31): a minimal sidebar is the default; metadata is opt-in.
+- **Click-to-unpin on the pin indicator** — rejected by the PO: the indicator is not a button; unpinning stays in the context menu.
+- **Keeping a disabled X on pinned tabs** — rejected by the PO: the pin takes its place ("the X shouldn't exist").
+- **Icon redesign freedom while switching libraries** — rejected: strict 1:1 swap, same shapes (PO choice).
+- **Keeping plain ease-out on the already-covered buttons** — rejected: one spring feel everywhere instead of two (PO choice, /apple-design).
 
 ## Validation Strategy
 
-- **ShellDetector:** unit tests against synthetic probe results — standard shells found and ranked, duplicates deduped, nothing found → only the custom entry remains.
-- **Picker (stories #88–#90):** on Windows, Adam picks a detected default shell in Settings, spawns a Git Bash tab via the "+ New tab" arrow dropdown, and a WSL tab; an SSH tab still opens exactly as before.
-- **Resize (story #91):** on Linux, Adam drags the sidebar to a new width and it survives a restart.
-- **Switches (stories #92–#93):** with both off, the sidebar shows neither branches nor folders; with them on, tab rows show branches and workspace rows list one folder line per tab next to its agent chip (duplicates visible as separate lines).
-- **Menus (story #84):** every new control has its menu entry.
-- **Acceptance threshold:** all of the above pass on Adam's Windows machine and his Ubuntu machine.
+- **Automated:** pinned-first ordering of the tab-bar render list (pure function test); close-blocked logic (pinned tab produces no close path); type-check/build with lucide imports; no remaining hand-rolled `<svg>` in `src/`.
+- **HITL (Adam):** pin a tab — the pin icon replaces X, clicking it does nothing, context-menu "Close tab" is disabled; unpin — X returns and closing works; pinned tabs stay in front after dragging and after a restart; close a workspace with a pinned tab inside — still closes; every menu item, row, switch, and button presses with a springy return; reduced-motion on — no animation; all icons render in Settings, the import wizard, the update banner, and the mute button (Bell/BellOff states).
 
 ## Out of Scope
 
-- Shell picking on macOS/Linux and for SSH tabs (deferred, see Tradeoffs).
-- Sidebar collapse/expand changes — collapse already works everywhere; this package is about resizing only.
-- Git integration beyond the read-only branch display — stays out of scope per the master PRD.
+- Pinning behavior changes for workspaces and groups; a tmux-style pinned zone with separators; auto-pinning new tabs.
+- Everything in the sibling patch: colors, port-click open, rename cleanup ([`umux-v1.5.0-prd.md`](./umux-v1.5.0-prd.md)).
 
 ## Further Notes
 
-- Build order: v1.7.0 → v1.8.0 → **v1.9.0** (kept per the master Roadmap, 2026-08-31).
-- Full discovery record: the 2026-08-31 decisions are merged into the master PRD (stories #88–#93, ShellDetector, v1.9.0 roadmap entry); the standalone discovery file was removed in the same cleanup.
+- The press-effect standing rule was saved to Claude's persistent MEMORY on 2026-09-01 and applies to all future umux work, not only this version.
+- Standing rule (story #84): the pinned-tab actions keep their context-menu entries; their native-menu entries arrive with the v1.8.0 menu registry.
+- Build order: v1.5.x → v1.6.0 (cross-platform shell picker, [`umux-v1.6.0-prd.md`](./umux-v1.6.0-prd.md)) → v1.7.0 → v1.8.0 → **v1.9.0 (this package — last)**. Renumbered from v1.6.0 on 2026-09-07 when the PO swapped the two packages.
