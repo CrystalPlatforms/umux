@@ -101,6 +101,49 @@ describe('SettingsDialog', () => {
     expect(getByTestId('toggle-ports-tooltip')).toHaveAttribute('aria-checked', 'false')
   })
 
+  // #80 / #81 (v1.6.0): the two sidebar-display switches. Branch labels are
+  // ON by default (switch ON = visible); folder lines default OFF.
+  it('renders the git-branch switch ON and folders switch OFF (#80, #81)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
+    )
+
+    expect(getByTestId('toggle-show-tab-branch')).toHaveAttribute('aria-checked', 'true')
+    expect(getByTestId('toggle-show-tab-folders')).toHaveAttribute('aria-checked', 'false')
+    expect(
+      getByTestId('toggle-show-tab-branch').getAttribute('aria-label'),
+    ).toMatch(/git branch on tab rows/i)
+    expect(
+      getByTestId('toggle-show-tab-folders').getAttribute('aria-label'),
+    ).toMatch(/folder/i)
+  })
+
+  it('reports a flip of each new switch as a patch with the next value (#80, #81)', () => {
+    const onChange = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog settings={defaultSettings} onChange={onChange} onClose={() => {}} />,
+    )
+
+    fireEvent.click(getByTestId('toggle-show-tab-branch'))
+    fireEvent.click(getByTestId('toggle-show-tab-folders'))
+
+    expect(onChange).toHaveBeenNthCalledWith(1, { showTabBranch: false })
+    expect(onChange).toHaveBeenNthCalledWith(2, { showTabFolders: true })
+  })
+
+  it('mirrors a disabled git-branch switch through aria-checked (#80)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, showTabBranch: false, showTabFolders: true }}
+        onChange={() => {}}
+        onClose={() => {}}
+      />,
+    )
+
+    expect(getByTestId('toggle-show-tab-branch')).toHaveAttribute('aria-checked', 'false')
+    expect(getByTestId('toggle-show-tab-folders')).toHaveAttribute('aria-checked', 'true')
+  })
+
   // T3 (analytics is invisible to the user — always on, no switch; the HITL
   //   product decision): the dialog must not mention analytics at all.
   it('does not surface any analytics wording', () => {

@@ -1209,6 +1209,49 @@ body.is-dragging * {
   min-width: 0;
 }
 
+/* #81 (v1.6.0): one line per tab on a workspace row — the tab's agent chip
+   followed by the folder its shell sits in. The folder truncates (ellipsis)
+   so a very long path can never break the row's layout; the full path stays
+   on the title attribute. */
+.workspace-folder-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+.workspace-folder-line__folder {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  /* Rendered as a BUTTON (#81 HITL round: click opens the folder in the
+     system file explorer) — stripped back to plain text look. */
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  /* The ROW supplies the hover background (the button sits on it); the
+     button itself paints nothing, so hovering the path reads exactly like
+     hovering the row (HITL round 2). */
+  -webkit-appearance: none;
+  appearance: none;
+  outline: none;
+}
+
+.workspace-folder-line__folder:hover,
+.workspace-folder-line__folder:focus-visible {
+  /* Hover feedback is COLOR ONLY (HITL round 3): the dim path brightens to
+     the full text color — no background, no pill. */
+  color: var(--text);
+}
+
 .agent-status--mini {
   gap: 4px;
   opacity: 0.75;

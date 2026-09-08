@@ -64,6 +64,14 @@ pub struct Settings {
     /// it until the TUI launcher lands, and a pre-#60 file loads as `"gui"`.
     #[serde(default = "default_launch_mode")]
     pub default_launch_mode: String,
+    /// #80 (v1.6.0): shows the git-branch labels on tab rows. ON by default —
+    /// off blanks them display-only (the frontend keeps resolving branches).
+    #[serde(default = "default_true")]
+    pub show_tab_branch: bool,
+    /// #81 (v1.6.0): one folder line per tab (agent chip + folder) on each
+    /// workspace row. Default off = rows render exactly as before.
+    #[serde(default)]
+    pub show_tab_folders: bool,
 }
 
 /// Serde default for `default_launch_mode`: the GUI is what umux launches
@@ -81,6 +89,8 @@ impl Default for Settings {
             analytics_enabled: true,
             ports_tooltip_enabled: true,
             default_launch_mode: default_launch_mode(),
+            show_tab_branch: true,
+            show_tab_folders: false,
         }
     }
 }
@@ -172,6 +182,10 @@ mod tests {
         assert!(d.session_restore_enabled, "session restore default ON");
         assert!(d.analytics_enabled, "analytics default ON (always, no switch)");
         assert!(d.ports_tooltip_enabled, "ports tooltip default ON (#43)");
+        // #80/#81 (v1.6.0): the sidebar-display switches default OFF — a
+        // fresh install looks exactly like pre-v1.6.0.
+        assert!(d.show_tab_branch, "tab branches visible by default (#80)");
+        assert!(!d.show_tab_folders, "show-tab-folders default OFF (#81)");
     }
 
     // T-S2 (#27 AC4 — settings round-trip through the pure layer):
@@ -186,6 +200,8 @@ mod tests {
             analytics_enabled: false,
             ports_tooltip_enabled: false,
             default_launch_mode: "tui".into(),
+            show_tab_branch: true,
+            show_tab_folders: true,
         };
 
         let text = serialize_settings(&s);
@@ -243,6 +259,8 @@ mod tests {
             analytics_enabled: false,
             ports_tooltip_enabled: true,
             default_launch_mode: "gui".into(),
+            show_tab_branch: false,
+            show_tab_folders: false,
         };
 
         SettingsStore::new(path.clone()).save(&s).unwrap();
@@ -278,6 +296,9 @@ mod tests {
             text.contains("\"portsTooltipEnabled\""),
             "expected camelCase portsTooltipEnabled, got: {text}"
         );
+        // #80/#81 wire keys the TS frontend coerces.
+        assert!(text.contains("\"showTabBranch\""), "got: {text}");
+        assert!(text.contains("\"showTabFolders\""), "got: {text}");
         assert!(
             !text.contains("notifications_enabled"),
             "snake_case leaked into wire JSON: {text}"

@@ -19,7 +19,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 // Issue #72: clicking a listening port opens http://localhost:{port} in the
 // system browser (the clipboard copy stays).
-import { openUrl } from '@tauri-apps/plugin-opener'
+import { openPath, revealItemInDir, openUrl } from '@tauri-apps/plugin-opener'
 // Issue #74: after the factory reset wipes the store, the app relaunches so
 // the user actually lands in the fresh first-run state.
 import { relaunch } from '@tauri-apps/plugin-process'
@@ -103,6 +103,7 @@ import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { CmuxImportWizard } from './CmuxImportWizard'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
 import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
+import { tabFolderLines, formatFolderTail } from './tabFolders'
 import { formatPorts, localPtyIds, unionPorts } from './tabPorts'
 import {
   defaultUpdaterApi,
@@ -2976,7 +2977,12 @@ export function WorkspaceShell() {
                           )}
                         <span className="workspace-name">{entry.workspace.name}</span>
                       </div>
+                      {/* Chip ownership (HITL round 2): when folder lines are
+                          on, the chips live INSIDE those lines — the classic
+                          block stays only for folders-off, so a row never
+                          shows the status twice. */}
                       {settings.agentStatusEnabled &&
+                        !settings.showTabFolders &&
                         state.openIds.includes(entry.workspace.id) &&
                         (() => {
                           // One chip per panel, the ACTIVE panel's chip first
@@ -3006,6 +3012,66 @@ export function WorkspaceShell() {
                               ))}
                             </span>
                           )
+                        })()}
+                      {/* #81 (v1.6.0): one line per tab — chip + folder. Every
+                          tab gets a line, duplicates never merge. The folder
+                          shows its TAIL (parent/target, formatFolderTail) so
+                          the row reads "which folder" — the full path lives on
+                          the tooltip; clicking the folder opens it in the
+                          system file explorer (opener plugin, HITL round). */}
+                      {settings.showTabFolders &&
+                        state.openIds.includes(entry.workspace.id) &&
+                        (() => {
+                          const activePid =
+                            activePanelOf(state, entry.workspace.id) ??
+                            panelIdsOf(state, entry.workspace.id)[0]
+                          return tabFolderLines(
+                            state,
+                            statuses,
+                            settings.sessionRestoreEnabled,
+                          )[entry.workspace.id]?.map((line) => (
+                            <span
+                              key={line.tabId}
+                              className="workspace-folder-line"
+                              data-testid={`folder-line-${entry.workspace.id}-${line.tabId}`}
+                            >
+                              {settings.agentStatusEnabled && (
+                                <AgentStatusIndicator
+                                  status={line.status}
+                                  mini={line.panelId !== activePid}
+                                />
+                              )}
+                              {line.folder == null ? (
+                                <span className="workspace-folder-line__folder" />
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="workspace-folder-line__folder"
+                                  title={line.folder}
+                                  onClick={() => {
+                                    // A click opens the folder AND falls
+                                    // through to the row's own onClick, which
+                                    // activates the workspace (HITL round 2).
+                                    // openPath shows the folder's CONTENTS; if
+                                    // the opener call fails (older binary
+                                    // without the open-path ACL), reveal the
+                                    // folder in its parent instead — same
+                                    // explorer, the folder just arrives
+                                    // selected.
+                                    const folder = line.folder as string
+                                    openPath(folder).catch((err) => {
+                                      console.error('open folder failed:', err)
+                                      revealItemInDir(folder).catch((err2) =>
+                                        console.error('reveal folder failed:', err2),
+                                      )
+                                    })
+                                  }}
+                                >
+                                  {formatFolderTail(line.folder)}
+                                </button>
+                              )}
+                            </span>
+                          ))
                         })()}
                     </div>
                     <div className="row-actions">
@@ -3206,7 +3272,11 @@ export function WorkspaceShell() {
                                 branch is bold (.tab-branch.is-focused), never
                                 larger. Entries without a repository render
                                 nothing: no placeholder, ever. */}
-                            {(tabBranchDirs[tab.id] ?? []).map((entry) => {
+                            {/* #80 (v1.6.0): the hide-branch switch blanks the
+                                labels display-only — resolution keeps running,
+                                so flipping it back needs no re-query. */}
+                            {settings.showTabBranch &&
+                              (tabBranchDirs[tab.id] ?? []).map((entry) => {
                               const branch =
                                 entry.dir != null ? branchLabels[entry.dir] : undefined
                               if (branch == null || branch === '') return null

@@ -58,4 +58,21 @@ describe('coerceSettings', () => {
     expect(coerceSettings({}).defaultLaunchMode).toBe('gui')
     expect(defaultSettings.defaultLaunchMode).toBe('gui')
   })
+
+  // #80 / #81: the two v1.6.0 sidebar-display switches. Branch labels are
+  // ON by default (the fresh-install look keeps them); folder lines default
+  // OFF (no change to the pre-v1.6.0 workspace rows). Missing keys in an old
+  // settings.json coerce to those defaults.
+  it('defaults showTabBranch ON and showTabFolders OFF (#80, #81)', () => {
+    expect(defaultSettings.showTabBranch).toBe(true)
+    expect(defaultSettings.showTabFolders).toBe(false)
+    expect(coerceSettings({}).showTabBranch).toBe(true)
+    expect(coerceSettings({}).showTabFolders).toBe(false)
+  })
+
+  it('keeps explicit showTabBranch / showTabFolders values through coerce (#80, #81)', () => {
+    const next = coerceSettings({ showTabBranch: true, showTabFolders: true })
+    expect(next.showTabBranch).toBe(true)
+    expect(next.showTabFolders).toBe(true)
+  })
 })

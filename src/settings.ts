@@ -18,6 +18,12 @@ export type Settings = {
   // launcher reads it. Carried through here so an app save never erases a
   // CLI-written value. Defaults to "gui" (Rust Settings::default).
   defaultLaunchMode: string
+  // #80 (v1.6.0): shows the git-branch labels on tab rows. ON by default —
+  // OFF blanks them display-only; the branch refresh keeps running.
+  showTabBranch: boolean
+  // #81 (v1.6.0): one folder line per tab (agent chip + folder) on each
+  // workspace row in the sidebar. Default off = rows look exactly as before.
+  showTabFolders: boolean
 }
 
 export const defaultSettings: Settings = {
@@ -27,6 +33,8 @@ export const defaultSettings: Settings = {
   analyticsEnabled: true,
   portsTooltipEnabled: true,
   defaultLaunchMode: 'gui',
+  showTabBranch: true,
+  showTabFolders: false,
 }
 
 /// Coerce an unknown invoke payload into a complete Settings object: missing
@@ -41,5 +49,7 @@ export function coerceSettings(raw: unknown): Settings {
     analyticsEnabled: r.analyticsEnabled ?? defaultSettings.analyticsEnabled,
     portsTooltipEnabled: r.portsTooltipEnabled ?? defaultSettings.portsTooltipEnabled,
     defaultLaunchMode: r.defaultLaunchMode ?? defaultSettings.defaultLaunchMode,
+    showTabBranch: r.showTabBranch ?? defaultSettings.showTabBranch,
+    showTabFolders: r.showTabFolders ?? defaultSettings.showTabFolders,
   }
 }

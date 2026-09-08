@@ -32,11 +32,16 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 // Boundary: the opener plugin (#72) — a port click hands the localhost URL
-// to the system browser. Mocked like invoke: the shell's own logic under
-// test is "which URL goes out", not the OS open itself.
+// to the system browser; #81's folder click opens the folder in the system
+// file explorer. Mocked like invoke: the shell's own logic under test is
+// "which URL/path goes out", not the OS open itself.
 const openUrlMock = vi.fn()
+const openPathMock = vi.fn()
+const revealItemInDirMock = vi.fn()
 vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: (...args: unknown[]) => openUrlMock(...args),
+  openPath: (...args: unknown[]) => openPathMock(...args),
+  revealItemInDir: (...args: unknown[]) => revealItemInDirMock(...args),
 }))
 
 // Boundary: Tauri events. We capture the `config_fallback` handler so a test
@@ -3960,5 +3965,434 @@ describe('tab + group colors (#70)', () => {
       }
       expect(last.groups[0]).not.toHaveProperty('color')
     })
+  })
+})
+
+// #80 (v1.6.0) — the Settings switch for git-branch labels on tab rows.
+// Assumptions encoded:
+//  - Branch labels appear on tab rows when git_branches answers for the
+//    panel's persisted workingDirectory (session restore on); the switch is
+//    ON by default, so the fresh-install look keeps them.
+//  - With showTabBranch=false the label spans are gone from the DOM, while
+//    everything else on the tab row (name, ports tooltip machinery) keeps
+//    working; toggling back on brings the labels with no restart.
+//  - NOT tested here: persistence (Rust store, cargo tests) and the real
+//    branch resolution (git_branch.rs).
+describe('#80 git branch on tab rows', () => {
+  const seedRepo = () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/repo' }],
+              tabs: [{ id: 'tab-1', name: 'T', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      if (cmd === 'git_branches')
+        return Promise.resolve([{ dir: '/repo', branch: 'main' }])
+      return Promise.resolve(undefined)
+    })
+  }
+
+  it('shows branch labels by default (switch off = fresh-install look)', async () => {
+    seedRepo()
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    expect(
+      await screen.findByText('main', { selector: '.tab-branch' }),
+    ).toBeInTheDocument()
+  })
+
+  it('showTabBranch=false removes the branch labels from tab rows, ports tooltip intact', async () => {
+    surfacesReportHandles = true
+    seedRepo()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabBranch: false })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/repo' }],
+              tabs: [{ id: 'tab-1', name: 'T', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      if (cmd === 'git_branches')
+        return Promise.resolve([{ dir: '/repo', branch: 'main' }])
+      if (cmd === 'tab_ports')
+        return Promise.resolve([{ tabId: 'tab-1', ports: [8000] }])
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+    await act(() => new Promise((r) => setTimeout(r, 30)))
+
+    expect(screen.queryByText('main', { selector: '.tab-branch' })).toBeNull()
+
+    // The ports tooltip machinery is untouched: hovering the tab row still
+    // opens it (same input path as before the switch existed).
+    fireEvent.mouseEnter(within(screen.getByTestId('panel-ws-1')).getAllByRole('tab')[0])
+    expect(await screen.findByRole('tooltip')).toBeInTheDocument()
+  })
+
+  it('toggling the switch back on brings the labels immediately (no restart)', async () => {
+    surfacesReportHandles = true
+    seedRepo()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabBranch: false })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/repo' }],
+              tabs: [{ id: 'tab-1', name: 'T', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      if (cmd === 'git_branches')
+        return Promise.resolve([{ dir: '/repo', branch: 'main' }])
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+    await act(() => new Promise((r) => setTimeout(r, 30)))
+    expect(screen.queryByText('main', { selector: '.tab-branch' })).toBeNull()
+
+    // Flip the switch back on through the real surface: Settings → switch.
+    fireEvent.click(screen.getByRole('button', { name: /^settings$/i }))
+    fireEvent.click(await screen.findByTestId('toggle-show-tab-branch'))
+
+    expect(
+      await screen.findByText('main', { selector: '.tab-branch' }),
+    ).toBeInTheDocument()
+  })
+})
+
+// #81 (v1.6.0) — the Settings switch that puts one folder line per tab on
+// each workspace row: chip + folder. Assumptions encoded:
+//  - Default OFF: workspace rows render no folder lines (pre-v1.6.0 look).
+//  - ON: a workspace with N tabs renders exactly N lines, one per tab —
+//    duplicate folders appear as separate lines; a tab without an agent
+//    still gets its line (idle chip).
+//  - Long paths truncate (fixed truncation class + full path in title) so
+//    the row never breaks its single-line layout.
+//  - NOT tested here: line data mapping (tabFolders.test.ts) and live cwd
+//    snapshots.
+describe('#81 per-tab folder lines on workspace rows', () => {
+  const folderLineCount = (wsId: string) =>
+    screen
+      .getByTestId(`workspace-row-${wsId}`)
+      .querySelectorAll('.workspace-folder-line').length
+
+  const seedTwoTabs = () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [
+                { id: 'p-1', workingDirectory: '/repo' },
+                { id: 'p-2', workingDirectory: '/repo' },
+              ],
+              tabs: [
+                { id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } },
+                { id: 't-2', name: 'two', layout: { kind: 'leaf', id: 'p-2' } },
+              ],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  it('renders no folder lines by default (switch off)', async () => {
+    seedTwoTabs()
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    expect(folderLineCount('ws-1')).toBe(0)
+  })
+
+  it('switch on: one line per tab, duplicates as separate lines', async () => {
+    seedTwoTabs()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [
+                { id: 'p-1', workingDirectory: '/repo' },
+                { id: 'p-2', workingDirectory: '/repo' },
+              ],
+              tabs: [
+                { id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } },
+                { id: 't-2', name: 'two', layout: { kind: 'leaf', id: 'p-2' } },
+              ],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    expect(folderLineCount('ws-1')).toBe(2)
+    const row = screen.getByTestId('workspace-row-ws-1')
+    const folders = [...row.querySelectorAll('.workspace-folder-line__folder')]
+    expect(folders).toHaveLength(2)
+    // Display form is the TAIL (parent/target), not the walk from root.
+    expect(folders[0].textContent).toBe('repo')
+    expect(folders[1].textContent).toBe('repo')
+  })
+
+  it('a deep path displays parent/target while the title carries the full path', async () => {
+    const deep = '/Users/panad/Documents/umux'
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: deep }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    const folder = screen
+      .getByTestId('workspace-row-ws-1')
+      .querySelector<HTMLElement>('.workspace-folder-line__folder')
+    expect(folder?.textContent).toBe('Documents/umux')
+    expect(folder?.getAttribute('title')).toBe(deep)
+  })
+
+  it('clicking the folder opens it in the system file explorer', async () => {
+    openPathMock.mockClear()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/Users/panad/work' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    fireEvent.click(
+      screen
+        .getByTestId('workspace-row-ws-1')
+        .querySelector<HTMLElement>('.workspace-folder-line__folder')!,
+    )
+
+    expect(openPathMock).toHaveBeenCalledWith('/Users/panad/work')
+  })
+
+  it('falls back to revealing the folder when open_path is unavailable', async () => {
+    openPathMock.mockClear()
+    revealItemInDirMock.mockClear()
+    openPathMock.mockRejectedValueOnce(new Error('not allowed'))
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/Users/panad/work' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    fireEvent.click(
+      screen
+        .getByTestId('workspace-row-ws-1')
+        .querySelector<HTMLElement>('.workspace-folder-line__folder')!,
+    )
+    await waitFor(() => expect(revealItemInDirMock).toHaveBeenCalledWith('/Users/panad/work'))
+  })
+
+  it('a very long path keeps the single-line row via truncation (title carries the full path)', async () => {
+    const longPath = '/very/deeply/nested/' + 'segment/'.repeat(40) + 'project'
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: longPath }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    const folder = screen
+      .getByTestId('workspace-row-ws-1')
+      .querySelector<HTMLElement>('.workspace-folder-line__folder')
+    expect(folder).not.toBeNull()
+    expect(folder?.className).toMatch(/truncate|ellipsis|folder-line/)
+    expect(folder?.getAttribute('title')).toBe(longPath)
+  })
+
+  it('toggling the switch off removes the lines immediately (no restart)', async () => {
+    surfacesReportHandles = true
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/repo' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+    expect(folderLineCount('ws-1')).toBe(1)
+
+    fireEvent.click(screen.getByRole('button', { name: /^settings$/i }))
+    fireEvent.click(await screen.findByTestId('toggle-show-tab-folders'))
+
+    await waitFor(() => expect(folderLineCount('ws-1')).toBe(0))
+  })
+})
+
+// #81 HITL round 2 — chip ownership and folder-click activation. Rules:
+//  - agent status ON + folders OFF: the classic chips block, as always.
+//  - agent status OFF + folders ON: folder lines WITHOUT chips.
+//  - BOTH on: the chips live INSIDE the folder lines; the classic chips
+//    block disappears (no doubled status).
+//  - Clicking a folder opens the explorer AND activates its workspace row;
+//    the button itself paints no hover background (the row supplies it).
+describe('#81 chips are never doubled; folder click activates the row', () => {
+  const seed = (settingsPatch: Record<string, unknown>) => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve(settingsPatch)
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/repo' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  it('both switches on: chips live in the folder lines, classic block gone', async () => {
+    seed({ showTabFolders: true, agentStatusEnabled: true })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    const row = screen.getByTestId('workspace-row-ws-1')
+    expect(row.querySelector('.workspace-statuses')).toBeNull()
+    expect(row.querySelectorAll('.workspace-folder-line .agent-status')).toHaveLength(1)
+  })
+
+  it('folders on, agent status off: folder lines without chips', async () => {
+    seed({ showTabFolders: true, agentStatusEnabled: false })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    const row = screen.getByTestId('workspace-row-ws-1')
+    expect(row.querySelectorAll('.agent-status')).toHaveLength(0)
+    expect(row.querySelectorAll('.workspace-folder-line')).toHaveLength(1)
+  })
+
+  it('folders off, agent status on: classic chips block (unchanged)', async () => {
+    seed({ showTabFolders: false, agentStatusEnabled: true })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    const row = screen.getByTestId('workspace-row-ws-1')
+    expect(row.querySelector('.workspace-statuses')).not.toBeNull()
+    expect(row.querySelectorAll('.workspace-folder-line')).toHaveLength(0)
+  })
+
+  it('clicking the folder activates the workspace row too', async () => {
+    openPathMock.mockClear()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/repo' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+            {
+              id: 'ws-2',
+              name: 'beta',
+              panels: [{ id: 'p-2', workingDirectory: '/beta' }],
+              tabs: [{ id: 't-2', name: 'two', layout: { kind: 'leaf', id: 'p-2' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+    expect(screen.getByTestId('workspace-row-ws-2').className).not.toMatch(/is-active/)
+
+    fireEvent.click(
+      screen
+        .getByTestId('workspace-row-ws-2')
+        .querySelector<HTMLElement>('.workspace-folder-line__folder')!,
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId('workspace-row-ws-2').className).toMatch(/is-active/),
+    )
+    expect(openPathMock).toHaveBeenCalledWith('/beta')
   })
 })

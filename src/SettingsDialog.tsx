@@ -212,6 +212,20 @@ export function SettingsDialog({
           testId="toggle-ports-tooltip"
           onToggle={(next) => onChange({ portsTooltipEnabled: next })}
         />
+        {/* #80 (v1.6.0): hides the git-branch labels on tab rows. */}
+        <SettingsToggle
+          label="Git branch on tab rows"
+          checked={settings.showTabBranch}
+          testId="toggle-show-tab-branch"
+          onToggle={(next) => onChange({ showTabBranch: next })}
+        />
+        {/* #81 (v1.6.0): one line per tab on workspace rows — chip + folder. */}
+        <SettingsToggle
+          label="Show per-tab folders on workspaces"
+          checked={settings.showTabFolders}
+          testId="toggle-show-tab-folders"
+          onToggle={(next) => onChange({ showTabFolders: next })}
+        />
 
         {/* App updates (issue #66): check on demand + one-click install.
             Both buttons live in the same right-hand slot as the Import
