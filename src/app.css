@@ -1405,6 +1405,11 @@ body.is-dragging * {
   font-weight: 600;
 }
 
+/* Settings header is larger than other modal titles (user request) */
+.settings-dialog__title {
+  font-size: 18px;
+}
+
 .modal-card__message {
   margin: 10px 0 18px;
   color: var(--text);

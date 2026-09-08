@@ -166,7 +166,7 @@ export function SettingsDialog({
     >
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
-          <span className="modal-card__title">Settings</span>
+          <span className="modal-card__title settings-dialog__title">Settings</span>
           <button
             type="button"
             className="icon-btn"
