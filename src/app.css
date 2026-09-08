@@ -62,6 +62,7 @@
   --text-sm: 13px;
   --text-md: 14px;
   --text-lg: 15px;
+  --text-title: 18px;
   --text-xl: 26px;
 
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
@@ -743,6 +744,16 @@ body.is-dragging * {
   padding-left: 46px; /* 8 (bar padding) + 26 (toggle) + 12 (gap) */
 }
 
+/* Tab fullscreen (2026-09-08): the fullscreen tab's terminal owns the whole
+   shell — sidebar (and its expand toggle), plus every tab bar, are removed
+   from the layout; the active workspace's panel simply fills the window.
+   ESC exits (the WorkspaceShell capture listener). */
+.shell.is-tab-fullscreen .sidebar,
+.shell.is-tab-fullscreen .sidebar-expand,
+.shell.is-tab-fullscreen .tab-bar {
+  display: none;
+}
+
 .tab {
   display: inline-flex;
   align-items: center;
@@ -1407,7 +1418,7 @@ body.is-dragging * {
 
 /* Settings header is larger than other modal titles (user request) */
 .settings-dialog__title {
-  font-size: 18px;
+  font-size: var(--text-title);
 }
 
 .modal-card__message {

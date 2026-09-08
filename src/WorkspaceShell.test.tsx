@@ -3856,6 +3856,27 @@ describe('tab + group colors (#70)', () => {
     })
   })
 
+  it('the tab menu offers Full screen: the shell flags the mode, ESC exits it', async () => {
+    seedTabsAndGroups()
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(screen.getByText('Tab 2', { selector: '.tab-name' })).toBeInTheDocument(),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('tab-ws-1-t-1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /full screen/i }))
+
+    // The shell carries the fullscreen class — the CSS behind it (app.css)
+    // takes the sidebar and every tab bar out of the layout. The chrome stays
+    // MOUNTED (#39 keeps the sidebar alive for the slide), so only the flag
+    // is observable here.
+    expect(document.querySelector('.shell.is-tab-fullscreen')).not.toBeNull()
+
+    // ESC exits: the flag drops, the chrome is back.
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.querySelector('.shell.is-tab-fullscreen')).toBeNull()
+  })
+
   const seedGroupColor = () => {
     invokeMock.mockReset()
     invokeMock.mockImplementation((cmd: string) => {

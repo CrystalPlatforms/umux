@@ -594,6 +594,15 @@ export function WorkspaceShell() {
   const [editingTab, setEditingTab] = useState<{ wsId: string; tabId: string } | null>(null)
   const [editTabName, setEditTabName] = useState('')
   const [menu, setMenu] = useState<MenuState>(null)
+  // Tab fullscreen (2026-09-08): the workspace+tab whose terminal currently
+  // owns the WHOLE shell — sidebar and tab bars are hidden (CSS
+  // .is-tab-fullscreen), only the active panel's surface shows. ESC exits;
+  // if the tab/workspace disappears underneath (its shell ran `exit`), the
+  // guard effect below drops the mode so the chrome comes back.
+  const [fullscreenTab, setFullscreenTab] = useState<{
+    workspaceId: string
+    tabId: string
+  } | null>(null)
   // Viewport-clamped menu position (HITL): the menu opens AT the pointer, but
   // a pointer near the window's right/bottom edge used to push half the menu
   // outside the app's bounds. After the menu mounts — in a LAYOUT effect, so
@@ -1663,6 +1672,34 @@ export function WorkspaceShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state])
 
+  // Tab fullscreen (2026-09-08): ESC is the way out. Capture phase on window,
+  // BEFORE xterm's textarea — the keypress both exits the mode and is kept
+  // from the shell (no stray ESC byte lands in the terminal as the chrome
+  // comes back).
+  useEffect(() => {
+    if (fullscreenTab == null) return
+    const onFullscreenKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      setFullscreenTab(null)
+    }
+    window.addEventListener('keydown', onFullscreenKey, true)
+    return () => window.removeEventListener('keydown', onFullscreenKey, true)
+  }, [fullscreenTab])
+
+  // The fullscreen tab must keep existing AND stay open: its shell running
+  // `exit` (tab closes) or a batch close that removes the workspace drops the
+  // mode with it — otherwise the shell would sit chromeless over nothing.
+  useEffect(() => {
+    if (fullscreenTab == null) return
+    const ws = state.workspaces.find((w) => w.id === fullscreenTab.workspaceId)
+    const alive =
+      state.openIds.includes(fullscreenTab.workspaceId) &&
+      ws?.tabs?.some((t) => t.id === fullscreenTab.tabId)
+    if (!alive) setFullscreenTab(null)
+  }, [state, fullscreenTab])
+
   const startCreate = () => {
     setCreatingKind('workspace')
     setEditingId(null)
@@ -1767,6 +1804,21 @@ export function WorkspaceShell() {
     const index = ws?.tabs?.findIndex((t) => t.id === tabId) ?? -1
     const label = tabMenuLabel(ws, tabId, index)
     requestCloseTab(workspaceId, tabId, label)
+  }
+
+  /// Tab fullscreen (2026-09-08): activate the tab (its workspace's panel is
+  /// the visible one — the chrome-hide CSS relies on that) and drop the whole
+  /// chrome. ESC exits (the capture listener below).
+  const enterTabFullscreen = () => {
+    const { workspaceId, tabId } = menu ?? {}
+    setMenu(null)
+    if (workspaceId == null || tabId == null) return
+    const s = stateRef.current
+    if (!s.workspaces.some((w) => w.id === workspaceId)) return
+    if (!s.workspaces.find((w) => w.id === workspaceId)?.tabs?.some((t) => t.id === tabId))
+      return
+    persist(switchTab(s, workspaceId, tabId))
+    setFullscreenTab({ workspaceId, tabId })
   }
 
   const openMenu = (
@@ -2552,16 +2604,12 @@ export function WorkspaceShell() {
     // bar can reserve room for the expand toggle seated before the tabs.
     // is-sidebar-resizing (drag resize): col-resize cursor + no text
     // selection for the whole shell while the edge is being dragged.
+    // is-tab-fullscreen (2026-09-08): the fullscreen tab's terminal owns the
+    // shell — the CSS hides the sidebar and every tab bar behind it.
     <div
-      className={
-        collapsed
-          ? resizingSidebar
-            ? 'shell is-sidebar-collapsed is-sidebar-resizing'
-            : 'shell is-sidebar-collapsed'
-          : resizingSidebar
-            ? 'shell is-sidebar-resizing'
-            : 'shell'
-      }
+      className={`shell${fullscreenTab != null ? ' is-tab-fullscreen' : ''}${
+        collapsed ? ' is-sidebar-collapsed' : ''
+      }${resizingSidebar ? ' is-sidebar-resizing' : ''}`}
     >
       {collapsed && (
         <button
@@ -3749,6 +3797,17 @@ export function WorkspaceShell() {
                   >
                     <SplitVerticalIcon />
                     Split vertical
+                  </button>
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    // Tab fullscreen (2026-09-08): the tab's terminal takes the
+                    // whole shell (sidebar + tab bars hidden); ESC brings the
+                    // chrome back.
+                    onClick={enterTabFullscreen}
+                  >
+                    <ZoomIcon />
+                    Full screen
                   </button>
                   <div className="menu-separator" />
                   <button
