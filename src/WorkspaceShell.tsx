@@ -102,6 +102,8 @@ import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { CmuxImportWizard } from './CmuxImportWizard'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
+import { detectShells, type ShellEntry } from './shellDetector'
+import { isWindowsPlatform } from './importWizard'
 import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
 import { tabFolderLines, formatFolderTail } from './tabFolders'
 import { formatPorts, localPtyIds, unionPorts } from './tabPorts'
@@ -393,9 +395,14 @@ type PanelSurfacesProps = {
   // panes render no indicator at all — the machines keep running so flipping
   // the toggle back on is instant and lossless.
   statusEnabled: boolean
+  // The Settings default shell (#77, v1.6.0): every LOCAL surface spawns
+  // through it (covering the "+" button, the new-tab shortcut, and restored
+  // sessions — they all mount the same surfaces). SSH surfaces never receive
+  // it; the remote default shell is the server's call.
+  shell?: string
 }
 
-function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, focused, firstLeafId, panels, zoomedPanelId, onToggleZoom, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled }: PanelSurfacesProps) {
+function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, focused, firstLeafId, panels, zoomedPanelId, onToggleZoom, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled, shell }: PanelSurfacesProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
 
@@ -495,6 +502,9 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, focu
               label={`${workspaceName} · ${short}`}
               sshTarget={meta?.sshTarget}
               cwd={meta?.workingDirectory}
+              // #77: the Settings default shell rides LOCAL panels only —
+              // a remote panel's shell is always the server's default.
+              shell={meta?.sshTarget !== undefined ? undefined : shell}
               // The focused pane of the active tab of the ACTIVE workspace
               // owns the keyboard (HITL): a switch focuses it instantly.
               focused={focused && activePanelId === p.id}
@@ -1084,6 +1094,21 @@ export function WorkspaceShell() {
   // session-only mute).
   const [settings, setSettings] = useState<Settings>(defaultSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // The detected-shell list (#77, v1.6.0): fetched when the Settings dialog
+  // OPENS, not at boot — a picker most sessions never open must not cost a
+  // PATH/registry scan on every launch. Raw `list_shells` results are ranked
+  // and labelled by the pure ShellDetector; a probe failure logs and leaves
+  // the picker on Auto + custom entry only (no shell is ever assumed).
+  const [detectedShells, setDetectedShells] = useState<ShellEntry[]>([])
+  useEffect(() => {
+    if (!settingsOpen) return
+    const platform = isWindowsPlatform() ? 'windows' : 'unix'
+    invoke<{ path: string; source: 'path' | 'etcShells' | 'loginShell' | 'registry' }[]>(
+      'list_shells',
+    )
+      .then((probes) => setDetectedShells(detectShells(platform, probes)))
+      .catch((e) => console.error('list_shells failed:', e))
+  }, [settingsOpen])
   // Latest settings for event-time readers (the window-close and interval
   // effects hold first-render closures; they must read current values).
   const settingsRef = useRef(settings)
@@ -3417,6 +3442,9 @@ export function WorkspaceShell() {
                         onResizeEnd={commitResize}
                         onClose={(panelId) => requestClosePanel(ws.id, panelId)}
                         onFocusPanel={(panelId) => focusWorkspacePanel(ws.id, panelId)}
+                        // #77: the Settings default shell for every newly
+                        // spawned local panel (null = Auto → no prop).
+                        shell={settings.defaultShell ?? undefined}
                         onPanelActivity={notePanelActivity}
                         onPanelCompletion={notePanelCompletion}
                         onPanelViewportResize={notePanelViewportResize}
@@ -3452,6 +3480,7 @@ export function WorkspaceShell() {
             onCheck: checkForUpdates,
             onInstall: installUpdate,
           }}
+          shells={detectedShells}
         />
       )}
 

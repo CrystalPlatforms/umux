@@ -240,6 +240,49 @@ describe('TerminalSurface', () => {
     expect(invokeMock).not.toHaveBeenCalledWith('pty_open', expect.anything())
   })
 
+  // --- #77 (v1.6.0): the Settings default shell rides pty_open --------------
+  //
+  // The picker's saved value must reach the PTY-open invoke VERBATIM (it is
+  // the exact command the backend spawns); without a configured shell the
+  // open args stay as before, and a remote panel NEVER carries a shell — the
+  // remote default shell is the server's call.
+
+  it('passes a configured shell to pty_open verbatim (#77)', async () => {
+    render(<TerminalSurface shell="/usr/bin/fish" />)
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('pty_open', {
+        cwd: undefined,
+        shell: '/usr/bin/fish',
+        cols: expect.any(Number),
+        rows: expect.any(Number),
+        label: undefined,
+      }),
+    )
+  })
+
+  it('sends no shell for a local panel when none is configured (#77)', async () => {
+    render(<TerminalSurface />)
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('pty_open', expect.anything()))
+    const args = invokeMock.mock.calls.find((c) => c[0] === 'pty_open')?.[1] as Record<
+      string,
+      unknown
+    >
+    expect(args).not.toHaveProperty('shell')
+  })
+
+  it('never sends a shell for an SSH panel, even when one is configured (#77)', async () => {
+    render(<TerminalSurface sshTarget="adam@example.com" shell="/usr/bin/fish" />)
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('ssh_open', expect.anything()))
+    const args = invokeMock.mock.calls.find((c) => c[0] === 'ssh_open')?.[1] as Record<
+      string,
+      unknown
+    >
+    expect(args).not.toHaveProperty('shell')
+  })
+
   it('forwards keystrokes to ssh_write for a remote panel', async () => {
     render(<TerminalSurface sshTarget="adam@example.com" />)
     await waitFor(() => expect(onDataMock).toHaveBeenCalled())

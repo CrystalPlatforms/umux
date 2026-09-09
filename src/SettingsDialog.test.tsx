@@ -15,7 +15,7 @@
 //  - NOT tested here: persistence and live effect (WorkspaceShell glue).
 
 import { describe, it, expect, vi } from 'vitest'
-import { render, fireEvent } from '@testing-library/react'
+import { render, fireEvent, screen } from '@testing-library/react'
 import { SettingsDialog } from './SettingsDialog'
 import { defaultSettings } from './settings'
 
@@ -152,6 +152,230 @@ describe('SettingsDialog', () => {
     )
 
     expect(queryByText(/analytics/i)).toBeNull()
+  })
+
+  // --- #77 (v1.6.0): the "Default shell" section -----------------------------
+  //
+  // The picker is fed by the ShellDetector list (passed in via `shells` — the
+  // WorkspaceShell glue runs the probes) plus ALWAYS an "Auto" entry (null =
+  // today's backend fallback chain) and a custom-entry text field for any
+  // command. Values are what pty_open later receives — verbatim.
+  //
+  // Fix round 2026-09-09: the control is the SAME dropdown the sidebar "+"
+  // button uses (a press-styled button unfolding a .create-dropdown menu of
+  // .menu-item rows), not a native <select> — and the dialog scrolls when
+  // the window is small.
+
+  const SHELLS = [
+    { displayName: 'Bash', launchCommand: '/bin/bash' },
+    { displayName: 'Fish', launchCommand: '/usr/bin/fish' },
+  ]
+
+  const menuItems = (getByTestId: (id: string) => HTMLElement): string[] =>
+    Array.from(getByTestId('shell-picker-menu').querySelectorAll('[role="menuitem"]')).map(
+      (o) => o.textContent,
+    )
+
+  it('shows the current selection on the picker button, custom field below (#77)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    // A fresh install is Auto.
+    expect(getByTestId('shell-picker')).toHaveTextContent('Auto')
+    // The Custom… entry lives in the menu, not on the face of the dialog.
+    expect(screen.queryByTestId('shell-custom-input')).toBeNull()
+  })
+
+  it('renders the Default shell section even with nothing detected (#77)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
+    )
+
+    expect(getByTestId('shell-picker')).toHaveTextContent('Auto')
+    fireEvent.click(getByTestId('shell-picker'))
+    expect(menuItems(getByTestId)).toEqual(['Auto', 'Custom…'])
+  })
+
+  it('opens the plus-style dropdown listing Auto and detected shells in order (#77)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    expect(screen.queryByTestId('shell-picker-menu')).toBeNull()
+    fireEvent.click(getByTestId('shell-picker'))
+    expect(menuItems(getByTestId)).toEqual(['Auto', 'Bash', 'Fish', 'Custom…'])
+  })
+
+  it('reports a picked shell as defaultShell=launchCommand, verbatim, and closes (#77)', () => {
+    const onChange = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={onChange}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    fireEvent.click(getByTestId('shell-picker'))
+    fireEvent.click(
+      Array.from(getByTestId('shell-picker-menu').querySelectorAll('[role="menuitem"]')).find(
+        (o) => o.textContent === 'Fish',
+      )!,
+    )
+
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ defaultShell: '/usr/bin/fish' })
+    expect(screen.queryByTestId('shell-picker-menu')).toBeNull()
+  })
+
+  it('reports the Auto pick as defaultShell=null (#77)', () => {
+    const onChange = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultShell: '/bin/bash' }}
+        onChange={onChange}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    fireEvent.click(getByTestId('shell-picker'))
+    fireEvent.click(
+      Array.from(getByTestId('shell-picker-menu').querySelectorAll('[role="menuitem"]')).find(
+        (o) => o.textContent === 'Auto',
+      )!,
+    )
+
+    expect(onChange).toHaveBeenCalledWith({ defaultShell: null })
+  })
+
+  it('mirrors a saved shell on the button label (#77)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultShell: '/usr/bin/fish' }}
+        onChange={() => {}}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    expect(getByTestId('shell-picker')).toHaveTextContent('Fish')
+  })
+
+  it('offers a saved custom command in the menu and reflects it (#77)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultShell: 'wsl.exe ~' }}
+        onChange={() => {}}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    expect(getByTestId('shell-picker')).toHaveTextContent('wsl.exe ~')
+    fireEvent.click(getByTestId('shell-picker'))
+    expect(menuItems(getByTestId)).toEqual(['Auto', 'Bash', 'Fish', 'wsl.exe ~', 'Custom…'])
+  })
+
+  // The custom entry is a "Custom…" MENU ITEM (user request, fix round 2):
+  // picking it opens a small dialog with the command field. Use applies the
+  // command trimmed; Cancel (or Escape) closes without changing anything.
+  it('opens the Custom dialog from the menu, prefilled with a saved command (#77)', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultShell: 'wsl.exe ~' }}
+        onChange={() => {}}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    fireEvent.click(getByTestId('shell-picker'))
+    fireEvent.click(getByTestId('shell-custom-item'))
+
+    // The command in effect prefills the field — reopening it explains the
+    // current selection instead of starting from scratch.
+    expect(getByTestId('shell-custom-input')).toHaveValue('wsl.exe ~')
+    expect(getByTestId('shell-custom-input')).toHaveFocus()
+  })
+
+  it('applies the custom entry verbatim, trimmed, and closes the dialog (#77)', () => {
+    const onChange = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={onChange}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    fireEvent.click(getByTestId('shell-picker'))
+    fireEvent.click(getByTestId('shell-custom-item'))
+    fireEvent.change(getByTestId('shell-custom-input'), {
+      target: { value: '  mysh --login  ' },
+    })
+    fireEvent.click(getByTestId('shell-custom-apply'))
+
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ defaultShell: 'mysh --login' })
+    expect(screen.queryByTestId('shell-custom-dialog')).toBeNull()
+  })
+
+  it('an empty custom command does nothing, Cancel closes without changing (#77)', () => {
+    const onChange = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={onChange}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+
+    fireEvent.click(getByTestId('shell-picker'))
+    fireEvent.click(getByTestId('shell-custom-item'))
+    fireEvent.change(getByTestId('shell-custom-input'), { target: { value: '   ' } })
+    fireEvent.click(getByTestId('shell-custom-apply'))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(getByTestId('shell-custom-dialog')).toBeInTheDocument()
+
+    fireEvent.click(getByTestId('shell-custom-cancel'))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('shell-custom-dialog')).toBeNull()
+  })
+
+  it('Escape inside the Custom dialog closes only the dialog (#77)', () => {
+    const onClose = vi.fn()
+    const onChange = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={onChange}
+        onClose={onClose}
+        shells={SHELLS}
+      />,
+    )
+
+    fireEvent.click(getByTestId('shell-picker'))
+    fireEvent.click(getByTestId('shell-custom-item'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(screen.queryByTestId('shell-custom-dialog')).toBeNull()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   // T4 (dismissal — the same "back out" reflex as the rename/create inputs):

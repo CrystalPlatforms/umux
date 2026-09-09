@@ -257,6 +257,54 @@ pub fn parse_ps_command(output: &str) -> Option<String> {
         .map(|n| n.to_string_lossy().into_owned())
 }
 
+/// Split a shell command string into argv tokens, quote-aware (#77): double
+/// quotes group characters, so a quoted Windows path keeps its spaces and
+/// arguments after it become separate tokens. Quotes are grouping only —
+/// they are stripped from the tokens; backslashes are never escapes (they
+/// are path separators on Windows). Pure — unit-testable with fixtures.
+pub fn split_shell_command(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for ch in s.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ' ' | '\t' if !in_quotes => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Decide the PTY argv for a `shell` string (pure — unit-testable):
+/// - a single token is a plain program path (quotes stripped) and keeps the
+///   login flag — today's behavior;
+/// - an UNQUOTED path whose first token already contains a path separator is
+///   still one program path (a Windows path with spaces, "C:\Program
+///   Files\...") — splitting it would invent a bogus program name;
+/// - anything multi-token — a quoted path with arguments (the picker's WSL
+///   distro entries) or a bare name plus arguments (the custom entry,
+///   `wsl.exe ~`) — is the command line used verbatim, with NO login flag
+///   (it would be meaningless or harmful: wsl.exe would forward it into the
+///   distro).
+pub fn shell_argv(shell: &str, login_flag: &str) -> Vec<String> {
+    let tokens = split_shell_command(shell);
+    match tokens.len() {
+        1 => vec![tokens[0].clone(), login_flag.to_string()],
+        _ if tokens[0].contains(['\\', '/']) && !shell.contains('"') => {
+            vec![shell.to_string(), login_flag.to_string()]
+        }
+        _ => tokens,
+    }
+}
+
 impl PtyService {
     pub fn new() -> Self {
         Self {
@@ -279,10 +327,18 @@ impl PtyService {
         // to start), so on Windows (v1.0 Phase 9 / #33, ConPTY +
         // powershell.exe) pass -NoLogo instead — panels start clean without
         // the version banner, the closest spirit of "respect the config".
+        //
+        // #77 fix round (2026-09-09): `shell` may be a FULL command line —
+        // the picker's WSL distro entries (`"...wsl.exe" -d Ubuntu`) and the
+        // Settings custom entry (`wsl.exe ~`) carry arguments. shell_argv
+        // keeps plain paths whole with the flag and uses command lines
+        // verbatim without it.
         #[cfg(windows)]
-        let argv = vec![shell.to_string(), "-NoLogo".to_string()];
+        let login_flag = "-NoLogo";
         #[cfg(not(windows))]
-        let argv = vec![shell.to_string(), "-l".to_string()];
+        let login_flag = "-l";
+
+        let argv = shell_argv(shell, login_flag);
         self.spawn_argv(argv, cwd, cols, rows)
     }
 
@@ -529,6 +585,61 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    // T-SPLIT (#77 fix round 2026-09-09): the picker's WSL distro entries and
+    // the Settings custom entry hand `shell` a full command line, not just a
+    // program path. The split must be quote-aware — a quoted Windows path
+    // keeps its spaces — and must not invent tokens for blank strings.
+    #[test]
+    fn split_shell_command_handles_paths_args_and_quotes() {
+        assert_eq!(split_shell_command("bash"), vec!["bash"]);
+        assert_eq!(
+            split_shell_command("C:\\Windows\\System32\\wsl.exe"),
+            vec!["C:\\Windows\\System32\\wsl.exe"]
+        );
+        assert_eq!(
+            split_shell_command("\"C:\\Program Files\\WSL\\wsl.exe\" -d Ubuntu"),
+            vec!["C:\\Program Files\\WSL\\wsl.exe", "-d", "Ubuntu"]
+        );
+        assert_eq!(split_shell_command("wsl.exe ~"), vec!["wsl.exe", "~"]);
+        assert_eq!(
+            split_shell_command("powershell.exe -Command \"echo hi\""),
+            vec!["powershell.exe", "-Command", "echo hi"]
+        );
+        assert_eq!(split_shell_command("   "), Vec::<String>::new());
+    }
+
+    // T-ARGV (#77 fix round 2): a plain program path — INCLUDING one whose
+    // directory name contains spaces ("C:\Program Files\...") — must keep
+    // the login flag and stay ONE token. Only a quoted path (an explicit
+    // command line) or a bare name followed by arguments is used verbatim
+    // without the flag. A quoted path with no arguments loses its quotes.
+    #[test]
+    fn shell_argv_keeps_spaced_paths_whole_and_splits_command_lines() {
+        // A spaced path with no quotes: one token + the login flag, whether
+        // or not the path exists (the spawn surfaces a missing one).
+        assert_eq!(
+            shell_argv("C:\\Program Files\\Git\\bin\\bash.exe", "-NoLogo"),
+            vec!["C:\\Program Files\\Git\\bin\\bash.exe", "-NoLogo"]
+        );
+        // A quoted path with arguments: verbatim command line, no flag.
+        assert_eq!(
+            shell_argv("\"C:\\Program Files\\WSL\\wsl.exe\" -d Ubuntu", "-NoLogo"),
+            vec!["C:\\Program Files\\WSL\\wsl.exe", "-d", "Ubuntu"]
+        );
+        // A quoted path with NO arguments: one token (quotes stripped) + flag.
+        assert_eq!(
+            shell_argv("\"C:\\Program Files\\WSL\\wsl.exe\"", "-NoLogo"),
+            vec!["C:\\Program Files\\WSL\\wsl.exe", "-NoLogo"]
+        );
+        // A bare name + arguments: command line, verbatim.
+        assert_eq!(
+            shell_argv("wsl.exe ~", "-l"),
+            vec!["wsl.exe", "~"]
+        );
+        // Plain single-token shells keep the flag (today's behavior).
+        assert_eq!(shell_argv("/bin/bash", "-l"), vec!["/bin/bash", "-l"]);
+    }
 
     // Shells interleave prompt + echoed input + command output, so a single
     // clean message never arrives. Scan the running buffer for `needle`

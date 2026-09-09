@@ -45,6 +45,7 @@ export function TerminalSurface({
   label,
   sshTarget,
   cwd,
+  shell,
   focused,
   onActivity,
   onCompletion,
@@ -62,6 +63,12 @@ export function TerminalSurface({
   // restore). Local panels only — a remote shell's cwd is the server's call.
   // Consumed once, at PTY open time (the effect below runs per mount).
   cwd?: string
+  // The shell binary/command this local panel spawns through (#77, v1.6.0):
+  // the Settings default shell, passed to `pty_open` VERBATIM. Local panels
+  // only — a remote shell is always the server's default, so a configured
+  // shell is never sent over SSH. Undefined = Auto (the backend fallback
+  // chain). Consumed once, at PTY open time.
+  shell?: string
   // This panel is THE active surface (the focused pane of the active tab of
   // the active workspace). Every flip to true pulls keyboard focus into the
   // terminal — switching workspace or tab makes it typable immediately, no
@@ -281,10 +288,12 @@ export function TerminalSurface({
     // Open the PTY (or SSH session) at xterm's measured size so the shell agrees
     // with the renderer from the first byte (see lib.rs pty_open / ssh_open).
     // term.cols/rows are already set by the fit() above. A remote panel passes
-    // its target string; a local one passes nothing extra.
+    // its target string and NEVER a shell; a local one passes the configured
+    // shell (#77) — the key is simply absent when unset (Auto), matching the
+    // pre-#77 invoke shape.
     const openArgs = isRemote
       ? { target: sshTarget, cols: term.cols, rows: term.rows, label }
-      : { cwd, cols: term.cols, rows: term.rows, label }
+      : { cwd, ...(shell != null ? { shell } : {}), cols: term.cols, rows: term.rows, label }
     const opened = invoke<number>(openCmd, openArgs).then((id) => {
       if (disposed) {
         void invoke(closeCmd, { id })

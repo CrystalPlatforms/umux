@@ -75,4 +75,26 @@ describe('coerceSettings', () => {
     expect(next.showTabBranch).toBe(true)
     expect(next.showTabFolders).toBe(true)
   })
+
+  // #77 (v1.6.0): defaultShell — null is "Auto" (today's backend fallback
+  // chain), a non-empty string is a concrete shell/custom command that must
+  // survive save/reload verbatim (it later rides pty_open untouched).
+  it('defaults defaultShell to null (Auto) for empty and legacy payloads (#77)', () => {
+    expect(defaultSettings.defaultShell).toBe(null)
+    expect(coerceSettings({}).defaultShell).toBe(null)
+    expect(coerceSettings(null)?.defaultShell).toBe(null)
+  })
+
+  it('keeps an explicit defaultShell=null and a saved custom command through coerce (#77)', () => {
+    expect(coerceSettings({ defaultShell: null }).defaultShell).toBe(null)
+    expect(coerceSettings({ defaultShell: '/usr/bin/fish' }).defaultShell).toBe('/usr/bin/fish')
+    expect(coerceSettings({ defaultShell: 'wsl.exe ~' }).defaultShell).toBe('wsl.exe ~')
+  })
+
+  // A hand-edited settings.json must never put a useless shell value on the
+  // spawn path: junk types and blank strings coerce back to Auto.
+  it('coerces a non-string or blank defaultShell back to Auto (#77)', () => {
+    expect(coerceSettings({ defaultShell: 42 as unknown as string }).defaultShell).toBe(null)
+    expect(coerceSettings({ defaultShell: '   ' }).defaultShell).toBe(null)
+  })
 })

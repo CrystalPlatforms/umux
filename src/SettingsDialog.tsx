@@ -25,6 +25,7 @@ import { useEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
 import { isWindowsPlatform } from './importWizard'
 import { downloadProgressText, type UpdateState } from './updater'
+import { pickerOptions, type ShellEntry } from './shellDetector'
 
 type ToggleProps = {
   label: string
@@ -92,6 +93,7 @@ export function SettingsDialog({
   onImportWizard,
   onResetAll,
   updates,
+  shells = [],
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -119,16 +121,39 @@ export function SettingsDialog({
     onCheck: () => void
     onInstall: () => void
   }
+  // The detected-shell list (#77, v1.6.0): raw probes already ranked by the
+  // pure ShellDetector (the WorkspaceShell glue runs the `list_shells`
+  // invoke). Empty = only "Auto" and the custom entry are offered — no shell
+  // is ever assumed to exist.
+  shells?: ShellEntry[]
 }) {
+  // Custom shell entry (#77, fix round 2): the "Custom…" menu item opens a
+  // small dialog with the command field. The field prefills with the saved
+  // command when one is in effect and it is not already a detected entry.
+  // "Use" applies it trimmed; empty does nothing — clearing back to Auto is
+  // the picker's "Auto" entry, not an empty command.
+  const [customOpen, setCustomOpen] = useState(false)
+  const [customShell, setCustomShell] = useState(() => {
+    const saved = settings.defaultShell
+    if (saved == null) return ''
+    return shells.some((s) => s.launchCommand === saved) ? '' : saved
+  })
+
   // Escape closes the dialog — the same dismissal key the rename/create
-  // inputs use, so the app has one "back out" reflex everywhere.
+  // inputs use, so the app has one "back out" reflex everywhere. While the
+  // custom-shell dialog is open, Escape closes ONLY that dialog.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      if (customOpen) {
+        setCustomOpen(false)
+        return
+      }
+      onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, customOpen])
 
   // The Import dropdown (HITL round): open state + close on any press outside
   // it — the same interaction pattern as the header's "+" dropdown.
@@ -150,20 +175,49 @@ export function SettingsDialog({
     return () => window.removeEventListener('pointerdown', close)
   }, [importOpen])
 
+  // The Default-shell picker (#77) reuses that exact dropdown interaction —
+  // open state + close on any press outside it.
+  const [shellPickerOpen, setShellPickerOpen] = useState(false)
+  const shellPickerRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!shellPickerOpen) return
+    const close = (e: PointerEvent) => {
+      if (
+        shellPickerRef.current != null &&
+        e.target instanceof Node &&
+        shellPickerRef.current.contains(e.target)
+      ) {
+        return
+      }
+      setShellPickerOpen(false)
+    }
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [shellPickerOpen])
+
   // Reset arming (#74): the first click ARMS (label changes to the confirm
   // question), only the second fires the reset. Two deliberate clicks — a
   // stray press can never wipe the store.
   const [resetArmed, setResetArmed] = useState(false)
 
+  // The picker's menu rows and the label the button shows for the value in
+  // effect ("Auto" when nothing is set). pickerOptions already appends a
+  // saved custom command, so the current value is always on the list.
+  const shellOptions = pickerOptions(shells, settings.defaultShell)
+  const currentShell =
+    shellOptions.find((o) => o.value === (settings.defaultShell ?? null)) ?? shellOptions[0]
+  const currentShellLabel = currentShell?.label ?? 'Auto'
+
   return (
-    <div
-      className="modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Settings"
-      data-testid="settings-dialog"
-      onClick={onClose}
-    >
+    <>
+      <div
+        className="modal-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        data-testid="settings-dialog"
+        onClick={onClose}
+      >
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
           <span className="modal-card__title settings-dialog__title">Settings</span>
@@ -226,6 +280,65 @@ export function SettingsDialog({
           testId="toggle-show-tab-folders"
           onToggle={(next) => onChange({ showTabFolders: next })}
         />
+
+        {/* Default shell (#77, v1.6.0): what every newly opened LOCAL tab
+            spawns through. The picker is the SAME dropdown the sidebar "+"
+            uses — a press-styled button unfolding a .create-dropdown menu —
+            listing "Auto" (null = the backend fallback chain, today's
+            behavior) plus the shells the pure ShellDetector ranked from the
+            raw probes; the "Custom…" item opens the command dialog. A value
+            rides pty_open verbatim. */}
+        <div className="settings-row">
+          <div className="settings-row__text">
+            <span className="settings-row__label">Default shell</span>
+            <span className="settings-row__description">
+              Shell for newly opened tabs. SSH tabs keep the remote default.
+            </span>
+          </div>
+          <div className="settings-import" ref={shellPickerRef}>
+            <button
+              type="button"
+              className="btn-primary shell-picker-button"
+              data-testid="shell-picker"
+              aria-label="Default shell"
+              aria-haspopup="menu"
+              aria-expanded={shellPickerOpen}
+              onClick={() => setShellPickerOpen((o) => !o)}
+            >
+              {currentShellLabel}
+            </button>
+            {shellPickerOpen && (
+              <div className="create-dropdown" role="menu" data-testid="shell-picker-menu">
+                {shellOptions.map((o) => (
+                  <button
+                    key={o.value ?? '__auto'}
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setShellPickerOpen(false)
+                      onChange({ defaultShell: o.value })
+                    }}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+                {/* Custom… (fix round 2): a menu item, not a permanent row —
+                    picking it opens the small command dialog below. */}
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  data-testid="shell-custom-item"
+                  onClick={() => {
+                    setShellPickerOpen(false)
+                    setCustomOpen(true)
+                  }}
+                >
+                  Custom…
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* App updates (issue #66): check on demand + one-click install.
             Both buttons live in the same right-hand slot as the Import
@@ -351,6 +464,73 @@ export function SettingsDialog({
         </div>
       </div>
     </div>
+
+      {/* Custom shell command dialog (#77, fix round 2): opened by the
+          picker's "Custom…" menu item. Escape/overlay/Cancel back out without
+          changing anything; Use applies the command trimmed. */}
+      {customOpen && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Custom shell command"
+          data-testid="shell-custom-dialog"
+          onClick={() => setCustomOpen(false)}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-card__header">
+              <span className="modal-card__title">Custom shell command</span>
+            </div>
+            <div className="modal-card__message">
+              Any command the list misses — arguments allowed. Quote paths that
+              contain spaces.
+            </div>
+            <input
+              className="text-input"
+              data-testid="shell-custom-input"
+              aria-label="Custom shell command"
+              placeholder="e.g. wsl.exe ~"
+              autoFocus
+              value={customShell}
+              onChange={(e) => setCustomShell(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const next = customShell.trim()
+                  if (next !== '') {
+                    setCustomOpen(false)
+                    onChange({ defaultShell: next })
+                  }
+                }
+              }}
+            />
+            <div className="modal-card__actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                data-testid="shell-custom-cancel"
+                onClick={() => setCustomOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                data-testid="shell-custom-apply"
+                onClick={() => {
+                  const next = customShell.trim()
+                  if (next !== '') {
+                    setCustomOpen(false)
+                    onChange({ defaultShell: next })
+                  }
+                }}
+              >
+                Use
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

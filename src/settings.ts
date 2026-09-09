@@ -24,6 +24,11 @@ export type Settings = {
   // #81 (v1.6.0): one folder line per tab (agent chip + folder) on each
   // workspace row in the sidebar. Default off = rows look exactly as before.
   showTabFolders: boolean
+  // #77 (v1.6.0): the default shell every newly opened LOCAL tab spawns
+  // through. null = "Auto" — the backend fallback chain untouched (today's
+  // behavior). A non-empty string is a shell path / custom command, passed
+  // to pty_open verbatim. SSH tabs never read it.
+  defaultShell: string | null
 }
 
 export const defaultSettings: Settings = {
@@ -35,6 +40,7 @@ export const defaultSettings: Settings = {
   defaultLaunchMode: 'gui',
   showTabBranch: true,
   showTabFolders: false,
+  defaultShell: null,
 }
 
 /// Coerce an unknown invoke payload into a complete Settings object: missing
@@ -51,5 +57,12 @@ export function coerceSettings(raw: unknown): Settings {
     defaultLaunchMode: r.defaultLaunchMode ?? defaultSettings.defaultLaunchMode,
     showTabBranch: r.showTabBranch ?? defaultSettings.showTabBranch,
     showTabFolders: r.showTabFolders ?? defaultSettings.showTabFolders,
+    // #77: null is a MEANINGFUL value here (Auto), so the usual `?? default`
+    // pattern would erase an explicit Auto on reload — coerce by shape
+    // instead: a non-blank string survives, everything else is Auto.
+    defaultShell:
+      typeof r.defaultShell === 'string' && r.defaultShell.trim() !== ''
+        ? r.defaultShell
+        : null,
   }
 }

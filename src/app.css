@@ -404,10 +404,9 @@ body {
   color: var(--text);
 }
 
-/* Active/selected rows alone square off the rail edge: the accent rail runs
-   the FULL height of the row, so the silhouette must be straight there —
-   the rail's own rounded outer side carries the visible rounding. Hovered
-   and idle rows keep the standard rounding on all corners. */
+/* Active/selected rows alone square off the rail edge (the sidebar's inner,
+   left edge): the rounded silhouette lives entirely on the OUTER side.
+   Hovered and idle rows keep the standard rounding on all corners. */
 .workspace-row.is-active,
 .workspace-row.is-selected {
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
@@ -785,19 +784,19 @@ body.is-dragging * {
   background: var(--bg-sidebar-active);
   border-color: var(--border-soft);
   color: var(--text);
-  /* Only the ACTIVE tab squares off its top corners: the strip runs the
-     FULL width of the top edge, so the silhouette must be straight there —
-     the strip's own rounded top corners carry the visible rounding. Idle
-     and hovered tabs keep the standard rounding. */
-  border-radius: 0;
+  /* Active tab keeps the rounded OUTER silhouette (#70 round 3): the top —
+     away from the line the tab rests on — carries the full --radius (8px,
+     not the sidebar's 5px, so the rounding stays legible at the tab's small
+     size); the line side stays square so the tab sits flush on it. overflow
+     clips the TOP strip to this outline. */
+  border-radius: var(--radius) var(--radius) 0 0;
+  overflow: hidden;
 }
 
-/* The active strip: a straight bar along the FULL width of the tab's top
-   edge (an inset box-shadow would have followed the rounded corner and bent
-   the line down at both ends). The tab's top corners are square, so the bar
-   sits flush with both sides; its OUTER side (top) is rounded to echo the
-   app's rounding, the inner side stays square. A tab with a palette color
-   recolors the strip via --tab-strip-color, set inline in WorkspaceShell. */
+/* The active strip stays on TOP (its #70 home): a straight bar along the
+   tab's outer edge, clipped by the tab's rounded outline so the corners
+   stay clean. A tab with a palette color recolors the strip via
+   --tab-strip-color, set inline in WorkspaceShell. */
 .tab.is-active::before {
   content: "";
   position: absolute;
@@ -805,7 +804,6 @@ body.is-dragging * {
   left: 0;
   right: 0;
   height: 3px;
-  border-radius: 3px 3px 0 0;
   background: var(--tab-strip-color, var(--accent-line));
 }
 
@@ -1395,6 +1393,10 @@ body.is-dragging * {
 
 .modal-card {
   width: min(430px, calc(100vw - 48px));
+  /* Scroll when the window is too short for the whole card (Settings has
+     grown many rows) instead of spilling past the frame. */
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   padding: 18px 18px 14px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
@@ -1502,6 +1504,34 @@ body.is-dragging * {
 .settings-import {
   position: relative;
   flex-shrink: 0;
+}
+
+/* Default shell (#77, v1.6.0): the picker button reuses .btn-primary (with
+   its press effect); a min-width keeps the label steady and a long custom
+   command ellipsizes instead of squeezing the row. The custom-entry cell
+   stacks field + button vertically so a long command never squeezes the row
+   label either. */
+.shell-picker-button {
+  min-width: 132px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-import--stacked {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.settings-import--stacked .text-input {
+  flex: none;
+  width: 220px;
 }
 
 /* Import wizard (#59, HITL rework 2026-08-30): its own dialog, opened from

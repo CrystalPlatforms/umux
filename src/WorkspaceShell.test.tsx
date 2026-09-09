@@ -89,6 +89,7 @@ vi.mock('./TerminalSurface', () => ({
   TerminalSurface: (props: {
     sshTarget?: string
     cwd?: string
+    shell?: string
     // The keyboard-ownership flag (HITL): the real surface focuses its xterm
     // when this flips true; the mock echoes it into a data attribute.
     focused?: boolean
@@ -110,6 +111,7 @@ vi.mock('./TerminalSurface', () => ({
         data-testid="terminal-surface"
         data-ssh-target={props.sshTarget ?? ''}
         data-cwd={props.cwd ?? ''}
+        data-shell={props.shell ?? ''}
         data-focused={props.focused === true ? 'true' : 'false'}
         // Stand-in for "the user typed in this terminal" (xterm onData).
         onKeyDown={() => userInputRef.current?.()}
@@ -1123,6 +1125,70 @@ describe('WorkspaceShell', () => {
       expect(surface?.dataset.sshTarget).toBe('')
     })
 
+    // #77 (v1.6.0) — the Settings default shell rides every LOCAL surface.
+    // The "+" button, the new-tab shortcut, and session restore all spawn
+    // through the same surfaces, so one wire covers all three spawn paths.
+    it('passes the configured default shell to local surfaces (#77)', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [{ id: 'ws-1', name: 'alpha', panels: [{ id: 'p-1' }] }],
+          })
+        if (cmd === 'load_settings')
+          return Promise.resolve({ defaultShell: '/usr/bin/fish' })
+        return Promise.resolve(undefined)
+      })
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
+
+      const surface = container.querySelector<HTMLElement>('[data-ssh-target]')
+      expect(surface?.dataset.sshTarget).toBe('')
+      expect(surface?.dataset.shell).toBe('/usr/bin/fish')
+    })
+
+    it('keeps local surfaces in Auto (no shell) when defaultShell is null (#77)', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [{ id: 'ws-1', name: 'alpha', panels: [{ id: 'p-1' }] }],
+          })
+        if (cmd === 'load_settings')
+          return Promise.resolve({ defaultShell: null })
+        return Promise.resolve(undefined)
+      })
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
+
+      const surface = container.querySelector<HTMLElement>('[data-ssh-target]')
+      expect(surface?.dataset.shell).toBe('')
+    })
+
+    it('never passes the default shell to an SSH surface (#77)', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              {
+                id: 'ws-1',
+                name: 'alpha',
+                panels: [{ id: 'p-1', sshTarget: 'adam@example.com' }],
+              },
+            ],
+          })
+        if (cmd === 'load_settings')
+          return Promise.resolve({ defaultShell: '/usr/bin/fish' })
+        return Promise.resolve(undefined)
+      })
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() => expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument())
+
+      const remote = container.querySelector<HTMLElement>(
+        '[data-ssh-target="adam@example.com"]',
+      )
+      expect(remote).not.toBeNull()
+      expect(remote?.dataset.shell).toBe('')
+    })
+
     // Phase 18 / Issue #19 — AC3: a config fallback must NOT be silent. When
     // the backend emits `config_fallback` (corrupt/unreadable config), the
     // shell surfaces a visible, human-readable warning so Adam knows his
@@ -1248,6 +1314,36 @@ describe('WorkspaceShell', () => {
           }),
         ),
       )
+    })
+
+    // #77 (v1.6.0): opening Settings probes the installed shells ONCE and the
+    // picker shows the detected list — the raw `list_shells` results ranked
+    // and labelled by the pure ShellDetector. A probe failure must not break
+    // the dialog: the picker falls back to Auto + the custom entry.
+    it('feeds the Default shell picker from list_shells when the dialog opens (#77)', async () => {
+      seedSettings()
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'load_settings')
+          return Promise.resolve({ notificationsEnabled: true, agentStatusEnabled: true })
+        if (cmd === 'list_shells')
+          return Promise.resolve([
+            { path: '/usr/bin/fish', source: 'path' },
+            { path: '/bin/bash', source: 'loginShell' },
+          ])
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^settings$/i }))
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('list_shells'))
+
+      const picker = await screen.findByTestId('shell-picker')
+      fireEvent.click(picker)
+      const menu = screen.getByTestId('shell-picker-menu')
+      const labels = Array.from(menu.querySelectorAll('[role="menuitem"]')).map((o) => o.textContent)
+      expect(labels).toEqual(['Auto', 'Bash', 'Fish', 'Custom…'])
     })
   })
 

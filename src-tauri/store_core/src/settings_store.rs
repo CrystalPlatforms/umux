@@ -72,6 +72,14 @@ pub struct Settings {
     /// workspace row. Default off = rows render exactly as before.
     #[serde(default)]
     pub show_tab_folders: bool,
+    /// #77 (v1.6.0): the default shell every newly opened LOCAL tab spawns
+    /// through. `None` = "Auto" — the backend fallback chain (override →
+    /// $SHELL → passwd → /bin/sh; hardcoded powershell.exe on Windows when
+    /// nothing else) stays untouched, which is today's behavior. `Some(cmd)`
+    /// is a shell path / custom command passed to pty_open verbatim. SSH
+    /// tabs never read it; no schema migration (new field with a default).
+    #[serde(default)]
+    pub default_shell: Option<String>,
 }
 
 /// Serde default for `default_launch_mode`: the GUI is what umux launches
@@ -91,6 +99,7 @@ impl Default for Settings {
             default_launch_mode: default_launch_mode(),
             show_tab_branch: true,
             show_tab_folders: false,
+            default_shell: None,
         }
     }
 }
@@ -202,6 +211,7 @@ mod tests {
             default_launch_mode: "tui".into(),
             show_tab_branch: true,
             show_tab_folders: true,
+            default_shell: None,
         };
 
         let text = serialize_settings(&s);
@@ -261,6 +271,7 @@ mod tests {
             default_launch_mode: "gui".into(),
             show_tab_branch: false,
             show_tab_folders: false,
+            default_shell: Some("/bin/bash".into()),
         };
 
         SettingsStore::new(path.clone()).save(&s).unwrap();
@@ -343,6 +354,39 @@ mod tests {
         // with the gui default, same as the other defaulted fields.
         let (back, status) = parse_settings_with_status("{\"notificationsEnabled\":false}");
         assert_eq!(back.default_launch_mode, "gui");
+        assert_eq!(status, ConfigStatus::Ok, "valid JSON shape — no fallback");
+    }
+
+    // T-S10 (#77 — default-shell: None is "Auto" (the backend fallback chain
+    // untouched); Some(cmd) is a concrete shell or custom command that must
+    // round-trip verbatim, because it later rides pty_open untouched).
+    #[test]
+    fn default_shell_defaults_to_auto_and_round_trips() {
+        assert_eq!(
+            Settings::default().default_shell,
+            None,
+            "a fresh install is Auto — today's shell"
+        );
+
+        // Auto round-trips as an explicit null (not a missing key).
+        let text = serialize_settings(&Settings::default());
+        assert!(
+            text.contains("\"defaultShell\":null"),
+            "Auto must serialize as defaultShell:null, got: {text}"
+        );
+
+        // A picked shell survives save/load unchanged.
+        let s = Settings {
+            default_shell: Some("/usr/bin/fish".into()),
+            ..Settings::default()
+        };
+        let back = parse_settings(&serialize_settings(&s));
+        assert_eq!(back, s);
+
+        // A file written before the field existed loads as Auto, not an
+        // error — same per-field-default contract as every other toggle.
+        let (back, status) = parse_settings_with_status("{\"notificationsEnabled\":false}");
+        assert_eq!(back.default_shell, None);
         assert_eq!(status, ConfigStatus::Ok, "valid JSON shape — no fallback");
     }
 }

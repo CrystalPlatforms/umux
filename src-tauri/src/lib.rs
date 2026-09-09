@@ -6,6 +6,7 @@ pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_debug;
 pub mod pty_service;
+pub mod shell_probe;
 pub mod ssh_manager;
 pub mod updater_probe;
 
@@ -882,6 +883,16 @@ fn reset_all() -> Result<(), String> {
     reset_store_files(&config_dir()).map_err(|e| format!("reset failed: {e}"))
 }
 
+/// Raw installed-shell probes for the Settings "Default shell" picker (#77):
+/// PATH scan everywhere, /etc/shells + the login shell on Unix, registry App
+/// Paths on Windows. RAW results only — ranking, dedup, and display names
+/// live in the pure TS ShellDetector (src/shellDetector.ts); nothing here
+/// assumes any specific shell exists, so an empty list is a valid answer.
+#[tauri::command]
+fn list_shells() -> Vec<shell_probe::ShellProbe> {
+    shell_probe::probe_shells()
+}
+
 /// Open settings.json with the platform's default handler (Settings footnote
 /// link): the file the toggles persist to, revealed in the user's own editor.
 /// Fire-and-forget spawn — a GUI editor may stay open for hours, so we never
@@ -970,7 +981,7 @@ fn process_pty_chunk(
 /// integration (git missing from the prompt), no aliases (macOS report
 /// 2026-09-07).
 #[cfg(unix)]
-fn passwd_shell() -> Option<String> {
+pub(crate) fn passwd_shell() -> Option<String> {
     // SAFETY: getpwuid returns a pointer into libc's static per-user storage;
     // the shell path is copied out immediately and nothing else is retained.
     unsafe {
@@ -988,7 +999,7 @@ fn passwd_shell() -> Option<String> {
 }
 
 #[cfg(not(unix))]
-fn passwd_shell() -> Option<String> {
+pub(crate) fn passwd_shell() -> Option<String> {
     None
 }
 
@@ -1126,6 +1137,7 @@ pub fn run() {
             load_settings,
             save_settings,
             reset_all,
+            list_shells,
             open_settings_file,
             updater_status,
             cmux_import::read_cmux_import_sources,
