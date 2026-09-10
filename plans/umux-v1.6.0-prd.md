@@ -1,6 +1,6 @@
 # umux v1.6.0 — PRD (cross-platform shell picker & sidebar polish)
 
-**Status:** planned — next build target, right after v1.5.x · created 2026-08-31 ("versions cleanup" discovery); renumbered v1.9.0 → v1.6.0 and extended to all platforms on 2026-09-07 (swap with the old v1.6.0 icons/press/pinned-tabs package, which moved to v1.9.0).
+**Status:** shipped as v1.6.0 on 2026-09-10 · created 2026-08-31 ("versions cleanup" discovery); renumbered v1.9.0 → v1.6.0 and extended to all platforms on 2026-09-07 (swap with the old v1.6.0 icons/press/pinned-tabs package, which moved to v1.9.0). The sidebar drag-resize item (story #91, issue #79) moved to **v1.6.1** on 2026-09-10.
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
 **GitHub issue:** #67 (shell support — scope extended from Windows-only to all platforms, 2026-09-07)
 
@@ -10,7 +10,7 @@ On Windows, new tabs always open in the OS default shell — a user juggling Pow
 
 ## Solution
 
-v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Settings (auto-detected installed shells + a custom entry) and a small **arrow next to "+ New tab"** opening a dropdown for the shell of that specific tab. The arrow appears **only when more than one shell is detected** — with a single installed shell there is nothing to choose, so the arrow is hidden and "+ New tab" alone remains. It fixes the **sidebar drag-resize on Windows/Linux** and persists the chosen width. It adds two **Settings switches, both defaulting to off**: hide the git branch on tab rows, and show **per-tab working directories on workspace rows** (each tab gets one line combining its agent-status chip with the folder that tab's shell is in).
+v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Settings (auto-detected installed shells + a custom entry) and a small **arrow next to "+ New tab"** opening a dropdown for the shell of that specific tab. The arrow appears **only when more than one shell is detected** — with a single installed shell there is nothing to choose, so the arrow is hidden and "+ New tab" alone remains. It adds two **Settings switches, both defaulting to off**: hide the git branch on tab rows, and show **per-tab working directories on workspace rows** (each tab gets one line combining its agent-status chip with the folder that tab's shell is in). *(The originally planned sidebar drag-resize fix and width persistence moved to v1.6.1 on 2026-09-10 — story #91, issue #79.)*
 
 ## User Stories
 
@@ -19,7 +19,7 @@ v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Setting
 - **88.** As a user on any platform, I want to pick my default shell in Settings from an auto-detected list (Windows: PowerShell, cmd, Git Bash, WSL; Linux: bash, zsh, fish, …; macOS: zsh, bash, …) or enter a custom command, so that new tabs open in the shell I actually use.
 - **89.** As a user on any platform, I want an arrow next to the "+ New tab" button that opens a dropdown for choosing the shell of that specific new tab, so that I can spawn, say, a fish tab without changing my default. **The arrow is visible only when the detector finds more than one shell** — with one shell it is hidden.
 - **90.** As a user, I want the shell picker to affect local tabs only — SSH tabs keep today's behavior — so that remote sessions stay predictable. *(Local tabs on all three platforms; SSH excluded — extended from Windows-only, 2026-09-07.)*
-- **91.** As a Windows/Linux user, I want the sidebar's right-edge drag to resize it — the gesture that already works on macOS — and I want the chosen width to persist across restarts, so that my layout survives a reboot on every platform.
+- **91.** *(Moved to v1.6.1 on 2026-09-10 — sidebar drag-resize on Windows/Linux + width persistence; see the master PRD and issue #79.)*
 - **92.** As a user, I want a Settings switch that hides the git branch on tab rows (default: off), so that the sidebar stays minimal when I don't care about branches.
 - **93.** As a developer, I want each workspace row to show, per tab, one line combining that tab's agent-status chip with the folder that tab's shell is in — every tab gets a line (with or without an agent), duplicate folders are not merged — toggled by a Settings switch (default: off), so that I can see at a glance where every terminal sits.
 
@@ -29,7 +29,6 @@ v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Setting
 
 - **ShellDetector** *(deep, pure)* — turns injected probe results into the installed-shell list (display name + launch command) for both the Settings picker and the "+"-dropdown. Windows: PATH scan + registry checks; **Unix (Linux/macOS): PATH scan + `/etc/shells` + the login shell from the environment**. The pure core does no I/O — detection, ranking, dedup, and the **arrow-visibility rule (hide when ≤1 shell found)** are unit-testable; setups the probes miss land in the custom entry.
 - **Picker scope** — local tabs on **all three platforms**; SSH tabs unchanged (extended from Windows-only, 2026-09-07). Clicking "+" itself uses the Settings default; the arrow picks a different shell for just that tab and is rendered only when the detected list has more than one entry.
-- **Sidebar resize fix + persistence** — the drag gesture works on all three platforms; the chosen width rides the existing settings storage (no store schema migration expected).
 - **Metadata switches** — the git-branch switch hides only the branch on tab rows (ports tooltip untouched). The folders switch renders one line per tab on its workspace row: agent chip + folder, every tab, duplicates unmerged — data comes from the working directories umux already tracks.
 - **Defaults** — both switches are **off** after install (decided 2026-08-31).
 
@@ -37,7 +36,6 @@ v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Setting
 
 - PATH + registry probing covers standard Windows shell installs; PATH + `/etc/shells` covers standard Unix installs; non-standard setups use the custom entry — accepted by the PO.
 - The v1.8.0 menu registry exists by build time (build-order dependency: v1.8.0 later; the picker does not block on it except for menu entries).
-- Sidebar width persistence fits the existing settings storage without a schema migration.
 - Per-tab folders can render inside the current workspace-row layout without redesign (long-path truncation details at /carve).
 - Single-shell installs are common enough on stock Linux/macOS that hiding the arrow is the right default behavior.
 
@@ -54,7 +52,6 @@ v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Setting
 
 - **ShellDetector:** unit tests against synthetic probe results — standard shells found and ranked per platform, duplicates deduped, nothing found → only the custom entry remains; one shell detected → arrow hidden; two or more → arrow shown.
 - **Picker (stories #88–#90):** on Windows, Adam picks a detected default shell in Settings, spawns a Git Bash tab via the "+ New tab" arrow dropdown, and a WSL tab; on Ubuntu he spawns a zsh tab next to his default bash; on macOS the picker lists zsh and bash. An SSH tab still opens exactly as before on every platform. On a machine with a single shell, the arrow is not visible.
-- **Resize (story #91):** on Linux, Adam drags the sidebar to a new width and it survives a restart.
 - **Switches (stories #92–#93):** with both off, the sidebar shows neither branches nor folders; with them on, tab rows show branches and workspace rows list one folder line per tab next to its agent chip (duplicates visible as separate lines).
 - **Menus (story #84):** every new control has its menu entry.
 - **Acceptance threshold:** all of the above pass on Adam's Windows machine, his Ubuntu machine, and his Mac.
@@ -62,10 +59,10 @@ v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Setting
 ## Out of Scope
 
 - Shell picking for SSH tabs (deferred, see Tradeoffs).
-- Sidebar collapse/expand changes — collapse already works everywhere; this package is about resizing only.
+- Sidebar collapse/expand changes — collapse already works everywhere; the drag-resize fix itself moved to v1.6.1 (2026-09-10, issue #79).
 - Git integration beyond the read-only branch display — stays out of scope per the master PRD.
 
 ## Further Notes
 
-- Build order: v1.5.x (done) → **v1.6.0 (this package — next)** → v1.7.0 → v1.8.0 → v1.9.0. Renumbered from v1.9.0 on 2026-09-07; the icons/press/pinned-tabs package that previously held v1.6.0 moved to v1.9.0 ([`umux-v1.9.0-prd.md`](./umux-v1.9.0-prd.md)).
+- Build order: v1.5.x (done) → **v1.6.0 (this package — shipped 2026-09-10)** → v1.6.1 (sidebar resize patch, issue #79) → v1.7.0 → v1.8.0 → v1.9.0. Renumbered from v1.9.0 on 2026-09-07; the icons/press/pinned-tabs package that previously held v1.6.0 moved to v1.9.0 ([`umux-v1.9.0-prd.md`](./umux-v1.9.0-prd.md)).
 - Full discovery record: the 2026-08-31 decisions are merged into the master PRD (stories #88–#93, ShellDetector); the standalone discovery file was removed in the same cleanup. The 2026-09-07 cross-platform extension and arrow-visibility rule were decided directly with the PO.
