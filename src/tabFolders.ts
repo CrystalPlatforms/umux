@@ -60,7 +60,11 @@ export function tabFolderLines(
 /// just the segment; null stays null (chip-only line).
 export function formatFolderTail(folder: string | null): string | null {
   if (folder == null) return null
-  const segments = folder.split('/').filter((s) => s !== '')
+  // Both separators: Windows snapshots (#81 fix) record native backslash
+  // paths, and the tail rule is the same there — last two segments, joined
+  // with the path's own separator, never the walk from the drive letter.
+  const segments = folder.split(/[\\/]/).filter((s) => s !== '')
   if (segments.length === 0) return folder
-  return segments.slice(-2).join('/')
+  const sep = folder.includes('\\') ? '\\' : '/'
+  return segments.slice(-2).join(sep)
 }

@@ -1285,6 +1285,20 @@ describe('workspace state', () => {
       expect(panelIdsOf(next, 'ws-1')).toEqual(['p-1', 'p-2'])
     })
 
+    // #78 (HITL 2026-09-10, supersedes #78's in-memory-only note): the arrow
+    // dropdown's shell is born ON the tab and persists with it, so session
+    // restore brings the tab back in its own shell. A tab added without a
+    // shell must not gain the key at all (persisted payload stays clean).
+    it('addTab stores the picked shell on the new tab and omits it when unset', () => {
+      const withShell = addTab(one(), 'ws-1', seq('tab-2', 'p-2'), '/usr/bin/fish')
+      expect(withShell.workspaces[0].tabs![1].shell).toBe('/usr/bin/fish')
+
+      const without = addTab(one(), 'ws-1', seq('tab-2', 'p-2'))
+      const tab = without.workspaces[0].tabs![1]
+      expect(tab.shell).toBeUndefined()
+      expect('shell' in tab).toBe(false)
+    })
+
     it('closeTab removes the tab, its panels entries, and activates the neighbor', () => {
       let state = one()
       state = addTab(state, 'ws-1', seq('tab-2', 'p-2'))

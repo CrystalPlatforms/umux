@@ -89,6 +89,26 @@ pub fn parse_lxss_distros(output: &str) -> Vec<String> {
     out
 }
 
+/// The registry keys that can list WSL distros, in query order (HITL fix
+/// 2026-09-10). The inbox (pre-Store) WSL registers distros under
+/// `...\Windows\NT\CurrentVersion\Lxss`; the modern Store WSL registers
+/// under `...\Windows\CurrentVersion\Lxss` — WITHOUT the `NT` segment (seen
+/// on a machine whose `wsl -l -v` lists Ubuntu while the NT key does not
+/// exist — Ubuntu was invisible to the picker). Both hives, NT first so the
+/// older home wins ties.
+#[cfg(windows)]
+fn lxss_key_paths() -> Vec<String> {
+    [
+        "HKCU\\SOFTWARE\\Microsoft\\Windows\\NT\\CurrentVersion\\Lxss",
+        "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss",
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\NT\\CurrentVersion\\Lxss",
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 /// Does `path` exist as something spawnable? On Windows the Store launchers
 /// (pwsh.exe / bash.exe / wsl.exe under ...\WindowsApps) are app-execution
 /// ALIASES — reparse points `fs::metadata` refuses to follow, so `is_file()`
@@ -218,10 +238,10 @@ fn platform_extras() -> Vec<ShellProbe> {
         .cloned()
         .unwrap_or_else(|| "wsl.exe".to_string());
     let mut seen_distros: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for root in ["HKCU", "HKLM"] {
+    for key in lxss_key_paths() {
         let Ok(output) = std::process::Command::new("reg")
             .arg("query")
-            .arg(format!("{root}\\SOFTWARE\\Microsoft\\Windows\\NT\\CurrentVersion\\Lxss"))
+            .arg(key)
             .arg("/s")
             .arg("/v")
             .arg("DistributionName")
@@ -260,6 +280,25 @@ pub fn probe_shells() -> Vec<ShellProbe> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // T-LXSS (HITL fix 2026-09-10): the Store WSL registers distros under
+    // Windows\CurrentVersion\Lxss WITHOUT the NT segment — a machine whose
+    // `wsl -l -v` lists Ubuntu answered "key not found" for the NT path and
+    // the picker never saw Ubuntu. Both homes (and both hives) must be
+    // queried, NT-first.
+    #[cfg(windows)]
+    #[test]
+    fn lxss_keys_cover_store_and_inbox_registry_homes() {
+        let keys = lxss_key_paths();
+        assert!(keys.contains(&"HKCU\\SOFTWARE\\Microsoft\\Windows\\NT\\CurrentVersion\\Lxss".to_string()));
+        assert!(keys.contains(&"HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss".to_string()));
+        assert!(keys.contains(&"HKLM\\SOFTWARE\\Microsoft\\Windows\\NT\\CurrentVersion\\Lxss".to_string()));
+        assert!(keys.contains(&"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss".to_string()));
+        assert_eq!(
+            keys.first().unwrap(),
+            "HKCU\\SOFTWARE\\Microsoft\\Windows\\NT\\CurrentVersion\\Lxss"
+        );
+    }
 
     // T-P1 (#77 — /etc/shells parse): lines survive verbatim and in order;
     // blanks and # comments are dropped.

@@ -48,7 +48,11 @@ const TABLE: Record<string, Command> = {
   n: 'new-workspace',
   t: 'new-tab',
   h: 'split-horizontal',
-  v: 'split-vertical',
+  // HITL 2026-09-10: split-vertical moved V → E (Terminator's split
+  // convention). Ctrl+Shift+V is the universal terminal PASTE chord —
+  // pressing it used to split the pane instead, and V must fall through to
+  // the terminal's own paste handler untouched.
+  e: 'split-vertical',
   w: 'close-panel',
   z: 'toggle-zoom',
 }

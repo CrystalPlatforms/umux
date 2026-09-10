@@ -54,6 +54,13 @@ export type Tab = {
   // gain the key just by passing through here; mirrored as an Option in the
   // Rust store.
   color?: string
+  // The shell this tab spawns through (#78, v1.6.0 — persisted per Adam's
+  // HITL decision 2026-09-10, superseding #78's original "in-memory only"):
+  // set at birth by the "+ New tab" arrow dropdown, so session restore
+  // brings the tab back in ITS shell. Absent = the tab follows the Settings
+  // default. Same key hygiene as color; mirrored as an Option in the Rust
+  // store.
+  shell?: string
 }
 
 // A group node of the sidebar tree (#48): a named container workspaces can be
@@ -749,6 +756,9 @@ export function addTab(
   state: WorkspaceState,
   id: string,
   genId: () => string = defaultGenId,
+  // The shell this tab spawns through (HITL 2026-09-10): rides pty_open
+  // verbatim for every panel the tab spawns, and persists with the tab.
+  shell?: string,
 ): WorkspaceState {
   const ws = state.workspaces.find((w) => w.id === id)
   if (ws == null) return state
@@ -757,6 +767,9 @@ export function addTab(
     id: genId(),
     layout: createTree(genId()),
     name: nextTabName(ws.tabs ?? []),
+    // Key hygiene (as with color): a tab without a shell must not gain the
+    // key on the persisted payload.
+    ...(shell != null ? { shell } : {}),
   }
   return {
     ...state,

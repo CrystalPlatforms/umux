@@ -40,6 +40,13 @@ struct PtyEntry {
     // panel can poll `child_exit_code` without re-waiting an already-dead child
     // (which would error on a second reap).
     exit_code: Option<i32>,
+    // The directory this child was spawned in (#81 fix). Where the OS cannot
+    // read a live process's cwd (Windows today), this recorded starting
+    // directory is the best answer `cwd()` can give — it is what the session
+    // snapshot stores there, and what the sidebar's folder lines and branch
+    // labels then show (the tab's STARTING directory per the accepted PO
+    // decision; live cwd on Windows is a separate future task).
+    spawn_cwd: PathBuf,
 }
 
 // portable-pty's `MasterPty` trait (0.8.x) doesn't carry a `Send` bound, so
@@ -88,8 +95,11 @@ fn pt_err(e: impl std::fmt::Display) -> io::Error {
 //   - macOS: no /proc; shell out to `lsof -a -p <pid> -d cwd -Fn` and parse
 //     the `n<path>` line. Runs only at snapshot time (a handful of calls per
 //     save), never on the output hot path.
-//   - Windows: not available yet (v1.0 Phase 9 scope) — panels snapshot as
-//     cwd-less and restore in the default directory.
+//   - Windows: not available yet (v1.0 Phase 9 scope) — there `cwd()` falls
+//     back to the recorded spawn directory (#81 fix), so panels snapshot
+//     their STARTING directory and the sidebar's folder lines / branch
+//     labels have something to show (PO decision 2026-09-08); a shell that
+//     has `cd`ed still reports where it started.
 // Failure is always `None`: a cwd that cannot be read is simply not snapshotted.
 
 /// The current working directory of process `pid`, if it can be determined.
@@ -294,12 +304,42 @@ pub fn split_shell_command(s: &str) -> Vec<String> {
 ///   `wsl.exe ~`) — is the command line used verbatim, with NO login flag
 ///   (it would be meaningless or harmful: wsl.exe would forward it into the
 ///   distro).
+///
+/// The `-NoLogo` flag (HITL fix 2026-09-10) is a POWERSHELL flag: bash, wsl
+/// and cmd refuse it, so a Git Bash or plain-WSL tab errored on spawn. It is
+/// appended only to the PowerShell family (pwsh / powershell, any casing,
+/// .exe or not); the POSIX `-l` login flag is meaningful for every Unix
+/// shell and keeps the append-always behavior.
 pub fn shell_argv(shell: &str, login_flag: &str) -> Vec<String> {
     let tokens = split_shell_command(shell);
+    // `-NoLogo` selects the PowerShell-only regime; anything else (the POSIX
+    // `-l`) applies to every shell as before.
+    let powershell_only = login_flag.eq_ignore_ascii_case("-NoLogo");
+    let wants_flag = |program: &str| -> bool {
+        if !powershell_only {
+            return true;
+        }
+        let base = program.rsplit(['\\', '/']).next().unwrap_or(program);
+        let lower = base.to_ascii_lowercase();
+        let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+        stem == "pwsh" || stem == "powershell"
+    };
     match tokens.len() {
-        1 => vec![tokens[0].clone(), login_flag.to_string()],
+        1 => {
+            if wants_flag(&tokens[0]) {
+                vec![tokens[0].clone(), login_flag.to_string()]
+            } else {
+                vec![tokens[0].clone()]
+            }
+        }
         _ if tokens[0].contains(['\\', '/']) && !shell.contains('"') => {
-            vec![shell.to_string(), login_flag.to_string()]
+            // The program is the WHOLE unquoted path — tokens[0] is only its
+            // first space-separated piece, so the check reads `shell`.
+            if wants_flag(shell) {
+                vec![shell.to_string(), login_flag.to_string()]
+            } else {
+                vec![shell.to_string()]
+            }
         }
         _ => tokens,
     }
@@ -370,6 +410,9 @@ impl PtyService {
         for arg in &argv[1..] {
             cmd.arg(arg);
         }
+        // #81: remember the starting directory before it moves into the
+        // command — the cwd() fallback on OSes that cannot read a live cwd.
+        let spawn_cwd = cwd.clone();
         cmd.cwd(cwd);
         // A GUI-launched app (Finder/Dock on macOS, a desktop launcher on
         // Linux) inherits no TERM, which degrades the shell's line editor
@@ -419,6 +462,7 @@ impl PtyService {
                 writer,
                 child,
                 exit_code: None,
+                spawn_cwd,
             },
         );
 
@@ -534,10 +578,18 @@ impl PtyService {
 
     /// The shell process's CURRENT working directory (v0.2 Phase 5 / #29
     /// session snapshot), read from the OS at call time — it follows `cd`s.
-    /// `None` for an unknown handle, a child without a pid, or an OS that
-    /// cannot answer (the caller then leaves the panel's stored cwd alone).
+    /// `None` for an unknown handle or a child without a pid. When the OS
+    /// cannot read a live cwd (Windows today — no /proc equivalent), the
+    /// directory the shell was spawned in is reported instead (#81 fix:
+    /// the snapshot then stores the tab's starting directory, which is what
+    /// folder lines and branch labels show there — PO decision 2026-09-08;
+    /// live cwd on Windows stays a separate future task).
     pub fn cwd(&self, handle: &PtyHandle) -> Option<PathBuf> {
-        process_cwd(self.child_pid(handle)?)
+        let pid = self.child_pid(handle)?;
+        match process_cwd(pid) {
+            Some(cwd) => Some(cwd),
+            None => self.entries.get(&handle.id).map(|e| e.spawn_cwd.clone()),
+        }
     }
 
     /// Non-blocking poll for the child's exit code. Returns `Ok(None)` while the
@@ -609,36 +661,42 @@ mod tests {
         assert_eq!(split_shell_command("   "), Vec::<String>::new());
     }
 
-    // T-ARGV (#77 fix round 2): a plain program path — INCLUDING one whose
-    // directory name contains spaces ("C:\Program Files\...") — must keep
-    // the login flag and stay ONE token. Only a quoted path (an explicit
-    // command line) or a bare name followed by arguments is used verbatim
-    // without the flag. A quoted path with no arguments loses its quotes.
+    // T-ARGV (#77 fix round 2; flag gating HITL 2026-09-10): a plain program
+    // path — INCLUDING one whose directory name contains spaces — must stay
+    // ONE token. -NoLogo is POWERSHELL-only: bash/wsl/cmd must NOT receive it
+    // (they refuse it and the tab errored on spawn); pwsh/powershell keep it.
+    // The POSIX -l flag keeps the append-always behavior for every shell.
     #[test]
     fn shell_argv_keeps_spaced_paths_whole_and_splits_command_lines() {
-        // A spaced path with no quotes: one token + the login flag, whether
-        // or not the path exists (the spawn surfaces a missing one).
+        // A spaced path with no quotes: one token; -NoLogo only for PowerShell.
         assert_eq!(
             shell_argv("C:\\Program Files\\Git\\bin\\bash.exe", "-NoLogo"),
-            vec!["C:\\Program Files\\Git\\bin\\bash.exe", "-NoLogo"]
+            vec!["C:\\Program Files\\Git\\bin\\bash.exe"]
+        );
+        assert_eq!(
+            shell_argv("C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoLogo"),
+            vec!["C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoLogo"]
+        );
+        // Bare names: wsl/cmd never get -NoLogo; powershell does (any casing).
+        assert_eq!(shell_argv("wsl.exe", "-NoLogo"), vec!["wsl.exe"]);
+        assert_eq!(shell_argv("cmd.exe", "-NoLogo"), vec!["cmd.exe"]);
+        assert_eq!(
+            shell_argv("PowerShell.EXE", "-NoLogo"),
+            vec!["PowerShell.EXE", "-NoLogo"]
         );
         // A quoted path with arguments: verbatim command line, no flag.
         assert_eq!(
             shell_argv("\"C:\\Program Files\\WSL\\wsl.exe\" -d Ubuntu", "-NoLogo"),
             vec!["C:\\Program Files\\WSL\\wsl.exe", "-d", "Ubuntu"]
         );
-        // A quoted path with NO arguments: one token (quotes stripped) + flag.
-        assert_eq!(
-            shell_argv("\"C:\\Program Files\\WSL\\wsl.exe\"", "-NoLogo"),
-            vec!["C:\\Program Files\\WSL\\wsl.exe", "-NoLogo"]
-        );
         // A bare name + arguments: command line, verbatim.
         assert_eq!(
             shell_argv("wsl.exe ~", "-l"),
             vec!["wsl.exe", "~"]
         );
-        // Plain single-token shells keep the flag (today's behavior).
+        // The POSIX -l login flag still applies to every single-token shell.
         assert_eq!(shell_argv("/bin/bash", "-l"), vec!["/bin/bash", "-l"]);
+        assert_eq!(shell_argv("bash.exe", "-l"), vec!["bash.exe", "-l"]);
     }
 
     // Shells interleave prompt + echoed input + command output, so a single
@@ -1004,6 +1062,67 @@ mod tests {
     fn cwd_unknown_handle_is_none() {
         let svc = PtyService::new();
         assert_eq!(svc.cwd(&PtyHandle { id: 9999 }), None);
+    }
+
+    // A shell that actually exists on the host OS: the Unix-oriented
+    // default_shell() resolves to /bin/sh where $SHELL is unset, which
+    // Windows cannot spawn.
+    fn native_shell() -> String {
+        #[cfg(windows)]
+        {
+            "cmd.exe".to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            default_shell()
+        }
+    }
+
+    // T-D4 (#81 fix 2026-09-10 — the Windows starting directory): where the
+    // OS has no way to read a live process's cwd (Windows today), `cwd()`
+    // must report the directory the shell was SPAWNED in instead of None —
+    // the session snapshot then stores the tab's starting directory, which
+    // is what the sidebar's folder lines and branch labels show there (PO
+    // decision 2026-09-08; live cwd on Windows stays a separate future
+    // task). On Unix the live read wins and equals the spawn directory on a
+    // fresh panel, so the same assertion holds trivially there and the
+    // fallback never masks the live answer (`cwd_follows_cd` keeps
+    // covering `cd`).
+    #[test]
+    fn cwd_reports_spawn_directory_when_os_cannot_read_live_cwd() {
+        #[cfg(windows)]
+        let dir = {
+            let tmp = tempfile::tempdir().unwrap();
+            tmp.path().to_path_buf()
+        };
+        // Canonicalized on Unix (as in cwd_follows_cd) so the kernel's
+        // answer matches through /tmp and /var symlinks on macOS.
+        #[cfg(not(windows))]
+        let dir = std::fs::canonicalize(tempfile::tempdir().unwrap().path())
+            .expect("canonicalize tempdir");
+
+        let mut svc = PtyService::new();
+        let (handle, _rx) = svc.open(&native_shell(), dir.clone(), 80, 24).expect("open pty");
+
+        // The shell may still be starting up; poll briefly the way the
+        // snapshot path does.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw = None;
+        while Instant::now() < deadline {
+            if let Some(cwd) = svc.cwd(&handle) {
+                saw = Some(cwd);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        svc.close(&handle);
+
+        assert_eq!(
+            saw,
+            Some(dir),
+            "expected cwd() to report the spawn directory when the OS cannot read a live cwd"
+        );
     }
 
     // T-D3 (macOS — the pure lsof parser):

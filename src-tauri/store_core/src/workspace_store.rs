@@ -48,6 +48,14 @@ pub struct Tab {
     // unchanged, uncolored tabs re-save WITHOUT the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    // The shell this tab spawns through (#78, v1.6.0; persisted per Adam's
+    // HITL decision 2026-09-10): the "+ New tab" arrow dropdown sets it at
+    // birth, so session restore reopens the tab in ITS shell. None = the
+    // tab follows the Settings default. Same key hygiene as `color` —
+    // pre-#78 configs load unchanged and default-shell tabs re-save WITHOUT
+    // the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
@@ -1019,6 +1027,7 @@ mod tests {
                     layout: Some(LayoutNode::Leaf { id: "p-1".into() }),
                     name: Some("Tab 1".into()),
                     pinned: None,
+                    shell: None,
                     color: Some("#eab308".into()),
                 }],
             }],
@@ -1079,6 +1088,7 @@ mod tests {
                     layout: Some(LayoutNode::Leaf { id: "p-1".into() }),
                     name: Some("Tab 1".into()),
                     pinned: None,
+                    shell: None,
                     color: None,
                 }],
             }],
@@ -1122,6 +1132,7 @@ mod tests {
                     layout: Some(LayoutNode::Leaf { id: "p-1".into() }),
                     name: Some("Tab 1".into()),
                     pinned: None,
+                    shell: None,
                     color: Some("#ef4444".into()),
                 }],
             }],
@@ -1142,5 +1153,62 @@ mod tests {
         assert_eq!(back, data);
         assert_eq!(back.workspaces[0].tabs[0].color.as_deref(), Some("#ef4444"));
         assert_eq!(back.groups[0].color.as_deref(), Some("#4ade80"));
+    }
+
+    // --- Tab shell (#78, HITL 2026-09-10 persistence) -------------------------
+
+    // T-S1: a tab's picked shell round-trips through the pure layer and the
+    // wire JSON carries the camelCase `shell` key with the command verbatim
+    // (it rides pty_open untouched after a restart).
+    #[test]
+    fn tab_shell_round_trips_through_the_pure_layer() {
+        let data = WorkspaceData {
+            workspaces: vec![Workspace {
+                id: "ws-1".into(),
+                name: "alpha".into(),
+                panels: vec![],
+                layout: None,
+                pinned: None,
+                group_id: None,
+                color: None,
+                tabs: vec![Tab {
+                    id: "tab-1".into(),
+                    layout: Some(LayoutNode::Leaf { id: "p-1".into() }),
+                    name: Some("Tab 1".into()),
+                    pinned: None,
+                    shell: Some("\"C:\\Program Files\\WSL\\wsl.exe\" -d Ubuntu".into()),
+                    color: None,
+                }],
+            }],
+            groups: vec![],
+            order: vec![],
+        };
+
+        let text = serialize_config(&data);
+        assert!(
+            text.contains(r#""shell":"\"C:\\Program Files\\WSL\\wsl.exe\" -d Ubuntu""#),
+            "expected the tab shell on the wire, got: {text}"
+        );
+        let back = parse_config(&text);
+        assert_eq!(
+            back.workspaces[0].tabs[0].shell.as_deref(),
+            Some("\"C:\\Program Files\\WSL\\wsl.exe\" -d Ubuntu")
+        );
+    }
+
+    // T-S2 (back-compat, Adam's report 2026-09-10 inverse): a config written
+    // by a PRE-#78 umux — tabs without `shell` — parses with None, and a
+    // default-shell tab re-serializes WITHOUT the key.
+    #[test]
+    fn old_config_without_tab_shell_loads_none_and_resaves_without_the_key() {
+        let text = r#"{"workspaces":[{"id":"ws-1","name":"alpha","tabs":[{"id":"tab-1","layout":{"kind":"leaf","id":"p-1"}}]}],"groups":[],"order":[]}"#;
+        let data = parse_config(text);
+        assert_eq!(data.workspaces[0].tabs[0].shell, None);
+
+        let resaved = serialize_config(&data);
+        assert!(
+            !resaved.contains("shell"),
+            "a shell-less tab gained a shell key: {resaved}"
+        );
     }
 }

@@ -146,14 +146,31 @@ export function TerminalSurface({
     }
 
     // Ctrl+Shift+C copies the current selection to the clipboard instead of
-    // reaching the shell; everything else (including plain Ctrl+C, which must
-    // stay SIGINT) passes through to the PTY (Phase 19 / HITL). Returning
-    // false swallows the key from xterm so it is not forwarded via onData.
+    // reaching the shell; Ctrl+Shift+V pastes (HITL 2026-09-10 — the chord
+    // used to sit on split-vertical, so pasting split the pane); everything
+    // else (including plain Ctrl+C, which must stay SIGINT, and plain
+    // Ctrl+V, xterm's native paste) passes through to the PTY (Phase 19 /
+    // HITL). Returning false swallows the key from xterm so it is not
+    // forwarded via onData.
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true
-      if (clipboardAction(event) === 'copy') {
+      const action = clipboardAction(event)
+      if (action === 'copy') {
         const selection = term.getSelection()
         if (selection) void navigator.clipboard.writeText(selection)
+        return false
+      }
+      if (action === 'paste') {
+        // A blocked clipboard read (WebView2 permission) logs and leaves
+        // plain Ctrl+V as the paste path — the key is swallowed either way.
+        navigator.clipboard
+          ?.readText()
+          .then((text) => {
+            if (text) term.paste(text)
+          })
+          .catch((err: unknown) =>
+            console.error('paste failed (Ctrl+V still works):', err),
+          )
         return false
       }
       return true

@@ -48,7 +48,12 @@ describe('matchShortcut', () => {
   it('maps the split / close shortcuts', () => {
     const cs = { ctrlKey: true, shiftKey: true }
     expect(matchShortcut(ev('h', cs))).toBe('split-horizontal')
-    expect(matchShortcut(ev('v', cs))).toBe('split-vertical')
+    // HITL 2026-09-10: split-vertical moved V → E — Ctrl+Shift+V is the
+    // universal paste chord (Windows Terminal / GNOME) and pressing it used
+    // to split the pane instead. V itself must now match nothing here so it
+    // can fall through to the terminal's paste handler.
+    expect(matchShortcut(ev('e', cs))).toBe('split-vertical')
+    expect(matchShortcut(ev('v', cs))).toBe(null)
     expect(matchShortcut(ev('w', cs))).toBe('close-panel')
   })
 

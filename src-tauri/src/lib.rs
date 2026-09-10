@@ -1189,6 +1189,41 @@ pub fn run() {
                     log::warn!("[analytics] track_event failed: {e}");
                 }
             }
+            // HITL fix 2026-09-10: WebView2's BROWSER accelerator keys (F5,
+            // F12, Ctrl+Shift+C/I, print/zoom chords) are consumed by the
+            // webview before the page ever sees them — Ctrl+Shift+C opened
+            // DevTools instead of letting the terminal copy its selection
+            // (clipboardShortcut never ran). A terminal owns its own
+            // keyboard: turn the browser accelerators off entirely. Failures
+            // log and continue — a missing settings interface must never
+            // keep the window from opening.
+            #[cfg(windows)]
+            if let Some(win) = app.get_webview_window("main") {
+                use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings6;
+                let result = win.with_webview(move |webview| unsafe {
+                    use windows::core::Interface;
+                    let controller = webview.controller();
+                    let Ok(core) = controller.CoreWebView2() else {
+                        log::warn!("[accelerators] CoreWebView2 unavailable");
+                        return;
+                    };
+                    let Ok(settings) = core.Settings() else {
+                        log::warn!("[accelerators] WebView2 settings unavailable");
+                        return;
+                    };
+                    match settings.cast::<ICoreWebView2Settings6>() {
+                        Ok(s6) => {
+                            if let Err(e) = s6.SetAreBrowserAcceleratorKeysEnabled(false) {
+                                log::warn!("[accelerators] disable failed: {e}");
+                            }
+                        }
+                        Err(e) => log::warn!("[accelerators] settings6 cast failed: {e}"),
+                    }
+                });
+                if let Err(e) = result {
+                    log::warn!("[accelerators] with_webview failed: {e}");
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

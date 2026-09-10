@@ -119,6 +119,19 @@ describe('formatFolderTail', () => {
     expect(formatFolderTail('/Users/panad/work/')).toBe('panad/work')
   })
 
+  // #81 Windows fix: the snapshot on Windows records the tab's starting
+  // directory as a NATIVE path — `C:\Users\...` with backslashes. The tail
+  // must treat `\` as a separator too, or the line shows the whole walk
+  // from the drive letter instead of the last two segments.
+  it('tails Windows backslash paths to the last two segments', () => {
+    expect(formatFolderTail('C:\\Users\\panad\\Documents\\umux')).toBe('Documents\\umux')
+    expect(formatFolderTail('C:\\repo\\sub')).toBe('repo\\sub')
+  })
+
+  it('shows the bare drive as-is for a Windows root path', () => {
+    expect(formatFolderTail('C:\\')).toBe('C:')
+  })
+
   it('returns null for a null folder (chip-only line stays chip-only)', () => {
     expect(formatFolderTail(null)).toBeNull()
   })

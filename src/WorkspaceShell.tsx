@@ -102,7 +102,12 @@ import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
 import { CmuxImportWizard } from './CmuxImportWizard'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
-import { detectShells, type ShellEntry } from './shellDetector'
+import {
+  detectShells,
+  newTabArrowVisible,
+  tabShellOptions,
+  type ShellEntry,
+} from './shellDetector'
 import { isWindowsPlatform } from './importWizard'
 import { applyBranchAnswers, branchDirsByTab, branchQueryDirs } from './tabBranch'
 import { tabFolderLines, formatFolderTail } from './tabFolders'
@@ -127,6 +132,16 @@ function PlusIcon({ className }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M12 5v14M5 12h14" />
+    </svg>
+  )
+}
+
+// The per-tab shell arrow (#78): the chevron that unfolds the shell dropdown
+// beside "+ New tab".
+function ChevronDownIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M6 9l6 6 6-6" />
     </svg>
   )
 }
@@ -1094,21 +1109,30 @@ export function WorkspaceShell() {
   // session-only mute).
   const [settings, setSettings] = useState<Settings>(defaultSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // The detected-shell list (#77, v1.6.0): fetched when the Settings dialog
-  // OPENS, not at boot — a picker most sessions never open must not cost a
-  // PATH/registry scan on every launch. Raw `list_shells` results are ranked
-  // and labelled by the pure ShellDetector; a probe failure logs and leaves
-  // the picker on Auto + custom entry only (no shell is ever assumed).
+  // The detected-shell list (#77, v1.6.0). #78 extends this beyond the
+  // Settings dialog: the tab-bar arrow must know the shell count at RENDER
+  // time, so the probe now also runs ONCE at boot (the Settings-open refresh
+  // stays, for a fresh list when the picker opens). A failed or missing
+  // answer logs and leaves the list empty — the arrow-visibility rule then
+  // hides the arrow, keeping the pre-#78 UI (no shell is ever assumed).
   const [detectedShells, setDetectedShells] = useState<ShellEntry[]>([])
-  useEffect(() => {
-    if (!settingsOpen) return
+  const refreshShells = useCallback(() => {
     const platform = isWindowsPlatform() ? 'windows' : 'unix'
     invoke<{ path: string; source: 'path' | 'etcShells' | 'loginShell' | 'registry' }[]>(
       'list_shells',
     )
-      .then((probes) => setDetectedShells(detectShells(platform, probes)))
+      .then((probes) =>
+        setDetectedShells(detectShells(platform, Array.isArray(probes) ? probes : [])),
+      )
       .catch((e) => console.error('list_shells failed:', e))
-  }, [settingsOpen])
+  }, [])
+  useEffect(() => {
+    refreshShells()
+  }, [refreshShells])
+  useEffect(() => {
+    if (!settingsOpen) return
+    refreshShells()
+  }, [settingsOpen, refreshShells])
   // Latest settings for event-time readers (the window-close and interval
   // effects hold first-render closures; they must read current values).
   const settingsRef = useRef(settings)
@@ -1531,6 +1555,47 @@ export function WorkspaceShell() {
       groups: next.groups,
       order: next.order,
     }).catch((e) => console.error('save_workspaces failed:', e))
+  }
+
+  // --- "+ New tab" per-tab shell dropdown (#78, v1.6.0) ----------------------
+  //
+  // Which workspace's tab-bar shell menu is open (each workspace renders its
+  // own bar). The picked shell is PERSISTED on the tab itself (HITL decision
+  // 2026-09-10, superseding #78's original in-memory-only note: session
+  // restore must bring a tab back in ITS shell — Adam lost an Ubuntu tab to
+  // the Settings default on restart). A tab without a shell follows the
+  // Settings default.
+  const [shellMenuWsId, setShellMenuWsId] = useState<string | null>(null)
+  // Viewport coordinates for the open menu: the tab bar has overflow-x: auto
+  // (scrollable tab lists), which CLIPS anything dropping below it — an
+  // absolutely-positioned dropdown inside the bar is invisible (HITL round
+  // 2026-09-10). Fixed positioning measured from the arrow button escapes
+  // the clipping, the same way the right-click context menu does.
+  const [shellMenuPos, setShellMenuPos] = useState({ top: 0, left: 0 })
+  const tabShellMenuRef = useRef<HTMLDivElement | null>(null)
+  // Closes on any pointer press outside the open menu (the same rule the
+  // header "+" dropdown follows).
+  useEffect(() => {
+    if (shellMenuWsId == null) return
+    const close = (e: PointerEvent) => {
+      if (
+        tabShellMenuRef.current != null &&
+        e.target instanceof Node &&
+        tabShellMenuRef.current.contains(e.target)
+      ) {
+        return
+      }
+      setShellMenuWsId(null)
+    }
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [shellMenuWsId])
+  // One new LOCAL tab in the picked shell: addTab stays the single creation
+  // path (naming, layout, restore semantics untouched) and the shell rides
+  // the persisted tab — every panel the tab spawns (now and after a
+  // restart) opens through it.
+  const addTabInShell = (wsId: string, shell: string) => {
+    persist(addTab(stateRef.current, wsId, undefined, shell))
   }
 
   // --- Session snapshot (v0.2 Phase 5 / #29) ---------------------------------
@@ -2999,6 +3064,25 @@ export function WorkspaceShell() {
                     'right',
                   )
                 }
+                // HITL 2026-09-10: the tooltip must appear wherever the
+                // pointer is over the row, not only when it entered through
+                // the name line — a webview can swallow the enter crossing a
+                // child boundary, so the first MOVE inside the row re-arms
+                // the pull. Same row key ⇒ no re-query; a tip already open
+                // for this row is just held (moving between the row and the
+                // tooltip survives the grace window on both sides).
+                onMouseMove={(e) => {
+                  if (portsTip?.key === `ws:${entry.workspace.id}`) {
+                    holdPortsTip()
+                    return
+                  }
+                  openPortsTip(
+                    e,
+                    `ws:${entry.workspace.id}`,
+                    entry.workspace.tabs ?? [],
+                    'right',
+                  )
+                }}
                 onMouseLeave={closePortsTip}
                 onMouseDown={(e) => {
                   if (isMenuPress(e)) openMenu(e, false, entry.workspace.id)
@@ -3393,6 +3477,65 @@ export function WorkspaceShell() {
                   >
                     <PlusIcon />
                   </button>
+                  {/* #78 (v1.6.0): the per-tab shell arrow — rendered ONLY
+                      when the detector finds more than one shell (pure rule:
+                      newTabArrowVisible), so a 0/1-shell machine keeps the
+                      pre-#78 bar byte-identical. The dropdown feeds from the
+                      SAME detected list as the Settings picker (plus the
+                      saved custom command, no Auto row); a pick spawns
+                      exactly one new LOCAL tab in that shell — spawn-time
+                      only, nothing persists, the plain "+" and the new-tab
+                      shortcut keep the Settings default, and SSH tabs are
+                      untouched (a remote surface never receives a shell). */}
+                  {newTabArrowVisible(detectedShells) && (
+                    <div
+                      className="tab-shell-create"
+                      ref={shellMenuWsId === ws.id ? tabShellMenuRef : undefined}
+                    >
+                      <button
+                        className="icon-btn tab-add-arrow"
+                        data-testid="new-tab-shell-arrow"
+                        aria-label="New terminal tab in a chosen shell"
+                        title="New terminal tab in a chosen shell"
+                        aria-haspopup="menu"
+                        aria-expanded={shellMenuWsId === ws.id}
+                        onClick={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect()
+                          setShellMenuPos({ top: r.bottom + 4, left: r.left })
+                          setShellMenuWsId((cur) => (cur === ws.id ? null : ws.id))
+                        }}
+                      >
+                        <ChevronDownIcon />
+                      </button>
+                      {shellMenuWsId === ws.id && (
+                        <div
+                          className="create-dropdown tab-shell-dropdown"
+                          role="menu"
+                          data-testid="new-tab-shell-menu"
+                          style={{ top: shellMenuPos.top, left: shellMenuPos.left }}
+                        >
+                          {tabShellOptions(detectedShells, settings.defaultShell).map(
+                            (o) => (
+                              <button
+                                key={o.value ?? o.label}
+                                className="menu-item"
+                                role="menuitem"
+                                onClick={() => {
+                                  // tabShellOptions never emits a null value
+                                  // (no Auto row) — the guard is for TS.
+                                  if (o.value == null) return
+                                  setShellMenuWsId(null)
+                                  addTabInShell(ws.id, o.value)
+                                }}
+                              >
+                                {o.label}
+                              </button>
+                            ),
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {/* Live insertion line for tab drags (round 3). */}
                   {drag?.kind === 'tab' && drag.wsId === ws.id && tabDrop != null && (
                     <div
@@ -3442,9 +3585,11 @@ export function WorkspaceShell() {
                         onResizeEnd={commitResize}
                         onClose={(panelId) => requestClosePanel(ws.id, panelId)}
                         onFocusPanel={(panelId) => focusWorkspacePanel(ws.id, panelId)}
-                        // #77: the Settings default shell for every newly
-                        // spawned local panel (null = Auto → no prop).
-                        shell={settings.defaultShell ?? undefined}
+                        // #77 + #78: the shell for every newly spawned local
+                        // panel of THIS tab — the tab's own persisted shell
+                        // (the arrow dropdown's pick) wins, otherwise the
+                        // Settings default (null = Auto → no prop).
+                        shell={tab.shell ?? settings.defaultShell ?? undefined}
                         onPanelActivity={notePanelActivity}
                         onPanelCompletion={notePanelCompletion}
                         onPanelViewportResize={notePanelViewportResize}

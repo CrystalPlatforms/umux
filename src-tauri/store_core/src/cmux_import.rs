@@ -450,6 +450,7 @@ pub fn apply_import_plan(
             layout: Some(LayoutNode::Leaf { id: gen_id() }),
             name: Some("Tab 1".into()),
             pinned: None,
+            shell: None,
             color: None,
         }];
         for _ in 1..w.tabs.len() {
@@ -458,6 +459,7 @@ pub fn apply_import_plan(
                 layout: Some(LayoutNode::Leaf { id: gen_id() }),
                 name: Some(next_tab_name(&tabs)),
                 pinned: None,
+                shell: None,
                 color: None,
             });
         }

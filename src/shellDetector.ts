@@ -168,6 +168,22 @@ export function detectShells(platform: DetectorPlatform, probes: ShellProbe[]): 
   return out
 }
 
+/// The saved-default custom entry shared by both picker lists, or undefined
+/// when it is unset or already covered by a detected entry (same command or
+/// same display name) — one identity rule for the Settings picker (#77) and
+/// the "+ New tab" dropdown (#78).
+function customOption(
+  entries: ShellEntry[],
+  saved: string | null,
+): ShellPickerOption | undefined {
+  const custom = saved?.trim()
+  if (!custom) return undefined
+  const covered = entries.some(
+    (e) => e.launchCommand === custom || e.displayName === custom,
+  )
+  return covered ? undefined : { value: custom, label: custom }
+}
+
 /// The Settings "Default shell" picker's full option list: "Auto" first
 /// (null = the backend fallback chain, today's behavior), then one option per
 /// detected shell, then a saved custom command when it is set and not already
@@ -180,12 +196,33 @@ export function pickerOptions(
   for (const e of entries) {
     options.push({ value: e.launchCommand, label: e.displayName })
   }
-  const custom = savedDefault?.trim()
-  if (custom) {
-    const covered = entries.some(
-      (e) => e.launchCommand === custom || e.displayName === custom,
-    )
-    if (!covered) options.push({ value: custom, label: custom })
-  }
+  const custom = customOption(entries, savedDefault)
+  if (custom != null) options.push(custom)
+  return options
+}
+
+/// #78 (v1.6.0): the "+ New tab" arrow's visibility rule — the arrow renders
+/// ONLY when the detector found MORE THAN ONE shell; with zero or one the tab
+/// bar stays byte-identical to the pre-#78 UI. A saved custom command never
+/// counts (it is not a detection result), so a custom-only machine sees no
+/// arrow either.
+export function newTabArrowVisible(entries: ShellEntry[]): boolean {
+  return entries.length > 1
+}
+
+/// The "+ New tab" dropdown's option list (#78): one option per detected
+/// shell plus the saved custom command when set and not already covered.
+/// Unlike the Settings picker there is NO "Auto" row — a dropdown pick always
+/// names an exact command (the plain "+" is what keeps the Settings default).
+export function tabShellOptions(
+  entries: ShellEntry[],
+  savedDefault: string | null,
+): ShellPickerOption[] {
+  const options: ShellPickerOption[] = entries.map((e) => ({
+    value: e.launchCommand,
+    label: e.displayName,
+  }))
+  const custom = customOption(entries, savedDefault)
+  if (custom != null) options.push(custom)
   return options
 }

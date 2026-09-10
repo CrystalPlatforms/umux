@@ -877,6 +877,27 @@ body.is-dragging * {
   margin-bottom: 2px;
 }
 
+/* #78 (v1.6.0): the per-tab shell arrow — a small chevron beside
+   "+ New tab", rendered only when the detector finds more than one shell.
+   Glued to the "+" (negative margin cancels the bar's gap — HITL round:
+   the arrow must sit right against the plus) and bottom-aligned like it. */
+.tab-shell-create {
+  position: relative;
+  align-self: flex-end;
+  margin-left: -2px;
+  margin-bottom: 2px;
+}
+
+/* The menu cannot live inside the bar: .tab-bar has overflow-x: auto, which
+   clips anything dropping below it (HITL round 2026-09-10 — an absolute
+   dropdown here was invisible). Fixed positioning measured from the arrow
+   button escapes the clip, like the right-click .context-menu. Coordinates
+   come in inline (top/left); right:auto keeps the box width-driven. */
+.tab-shell-dropdown {
+  position: fixed;
+  right: auto;
+}
+
 /* Pin glyph on a pinned terminal tab (#37 follow-up) — sits before the
    name, same accent color as the workspace-row pin. */
 .tab-pin {

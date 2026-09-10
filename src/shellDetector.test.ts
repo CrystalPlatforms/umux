@@ -33,11 +33,23 @@
 //    — "Auto" (value null) first, then one option per entry (value =
 //    launchCommand verbatim), then the saved custom command when set and not
 //    already covered by a detected entry.
+//  - #78 (Phase 2): newTabArrowVisible(entries) is the arrow-visibility rule
+//    — true iff the detector found MORE THAN ONE shell (a saved custom
+//    command never affects visibility; it is not a detection result).
+//    tabShellOptions(entries, savedDefault) is the "+ New tab" dropdown's
+//    list — one option per detected shell plus the saved custom command,
+//    with NO "Auto" row (a dropdown pick always names an exact command; the
+//    plain "+" is what keeps the Settings default).
 //  - NOT tested here: the Rust probes themselves (cargo tests), the
 //    pty_open handoff (TerminalSurface tests), the UI (SettingsDialog tests).
 
 import { describe, it, expect } from 'vitest'
-import { detectShells, pickerOptions } from './shellDetector'
+import {
+  detectShells,
+  newTabArrowVisible,
+  pickerOptions,
+  tabShellOptions,
+} from './shellDetector'
 
 describe('detectShells', () => {
   // Tracer bullet: a typical Windows probe — PowerShell 7 and cmd found on
@@ -189,5 +201,78 @@ describe('pickerOptions', () => {
   it('does not duplicate a saved default already covered by a detected entry', () => {
     const options = pickerOptions(entries, '/usr/bin/fish')
     expect(options.filter((o) => o.value === '/usr/bin/fish')).toHaveLength(1)
+  })
+})
+
+// --- #78 (v1.6.0 Phase 2): the "+ New tab" arrow -----------------------------
+
+describe('newTabArrowVisible', () => {
+  // AC: two or more detected shells → the arrow renders next to "+ New tab".
+  it('shows the arrow when the detector finds two or more shells', () => {
+    const two = detectShells('unix', [
+      { path: '/bin/bash', source: 'loginShell' },
+      { path: '/usr/bin/fish', source: 'path' },
+    ])
+    expect(newTabArrowVisible(two)).toBe(true)
+
+    const three = detectShells('unix', [
+      { path: '/bin/bash', source: 'loginShell' },
+      { path: '/usr/bin/zsh', source: 'path' },
+      { path: '/usr/bin/fish', source: 'path' },
+    ])
+    expect(newTabArrowVisible(three)).toBe(true)
+  })
+
+  // AC: exactly one detected shell → arrow not rendered; the bar is
+  // byte-identical to the pre-#78 UI. Duplicate probes of the same shell
+  // collapse to ONE entry, so a twice-seen bash still hides the arrow.
+  it('hides the arrow for exactly one detected shell', () => {
+    const one = detectShells('unix', [
+      { path: '/bin/bash', source: 'loginShell' },
+      { path: '/usr/bin/bash', source: 'path' },
+    ])
+    expect(one).toHaveLength(1)
+    expect(newTabArrowVisible(one)).toBe(false)
+  })
+
+  // "Nothing found" (and a failed probe — the UI glue leaves the list empty)
+  // must hide the arrow too: today's UI, no dropdown.
+  it('hides the arrow when nothing was detected', () => {
+    expect(newTabArrowVisible([])).toBe(false)
+    expect(newTabArrowVisible(detectShells('windows', []))).toBe(false)
+  })
+})
+
+describe('tabShellOptions', () => {
+  const entries = detectShells('unix', [
+    { path: '/usr/bin/fish', source: 'path' },
+    { path: '/bin/bash', source: 'loginShell' },
+  ])
+
+  // Unlike the Settings picker there is NO "Auto" row: a dropdown pick must
+  // name an exact command — the plain "+" is what keeps the Settings default.
+  it('lists exactly one option per detected shell, no Auto row', () => {
+    expect(tabShellOptions(entries, null)).toEqual([
+      { value: '/bin/bash', label: 'Bash' },
+      { value: '/usr/bin/fish', label: 'Fish' },
+    ])
+  })
+
+  // The saved custom command rides the dropdown verbatim so it stays
+  // reachable even though no probe found it.
+  it('appends a saved custom command verbatim', () => {
+    expect(tabShellOptions(entries, 'C:\\tools\\mysh.exe --login')).toEqual([
+      { value: '/bin/bash', label: 'Bash' },
+      { value: '/usr/bin/fish', label: 'Fish' },
+      { value: 'C:\\tools\\mysh.exe --login', label: 'C:\\tools\\mysh.exe --login' },
+    ])
+  })
+
+  // A saved default that IS a detected shell must not appear twice in the
+  // dropdown either (same identity rule as the Settings picker).
+  it('does not duplicate a saved default already covered by a detected entry', () => {
+    const options = tabShellOptions(entries, '/usr/bin/fish')
+    expect(options.filter((o) => o.value === '/usr/bin/fish')).toHaveLength(1)
+    expect(options).toHaveLength(2)
   })
 })

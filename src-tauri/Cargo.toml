@@ -53,6 +53,12 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
 ] }
+# HITL 2026-09-10: WebView2's browser accelerator keys (Ctrl+Shift+C opened
+# DevTools before the terminal could copy) are disabled through
+# ICoreWebView2Settings6 at setup. Versions match tauri's own tree so the
+# COM interface types unify.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_System_Com"] }
 
 # The user's real login shell via getpwuid (macOS report 2026-09-07): a
 # GUI-launched app has no $SHELL in its environment, so the /bin/sh fallback

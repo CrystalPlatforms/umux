@@ -145,6 +145,7 @@ mod tests {
                         }),
                         name: Some("Tab 1".into()),
                         pinned: None,
+                        shell: None,
                         color: None,
                     }],
                 },

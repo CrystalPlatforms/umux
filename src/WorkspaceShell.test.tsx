@@ -1347,6 +1347,232 @@ describe('WorkspaceShell', () => {
     })
   })
 
+  // --- #78 (v1.6.0 Phase 2): the "+ New tab" per-tab shell dropdown --------
+
+  // Assumptions encoded (#78): the arrow renders ONLY when the shell
+  // detector finds MORE THAN ONE shell — with 0/1 the bar is byte-identical
+  // to the pre-#78 UI (no wrapper, no button, no dropdown). The dropdown
+  // lists the SAME detected shells the Settings picker feeds from plus the
+  // saved custom command, with NO Auto row. A pick spawns exactly one new
+  // LOCAL tab in that shell — in-memory, spawn-time only (nothing persists);
+  // the plain "+" and the new-tab shortcut keep the Settings default; SSH
+  // tabs are untouched (the dropdown only creates local panels).
+  describe('per-tab shell dropdown (#78)', () => {
+    const seedShells = (
+      shells: { path: string; source: string }[],
+      loadSettings: Record<string, unknown> = {},
+    ) => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'load_settings')
+          return Promise.resolve({
+            notificationsEnabled: true,
+            agentStatusEnabled: true,
+            ...loadSettings,
+          })
+        if (cmd === 'list_shells') return Promise.resolve(shells)
+        return Promise.resolve(undefined)
+      })
+    }
+    const twoShells = [
+      { path: '/usr/bin/fish', source: 'path' },
+      { path: '/bin/bash', source: 'loginShell' },
+    ]
+
+    // AC: one detected shell → arrow not rendered; the only affordance is
+    // the plain "+" (and no dropdown anchor exists anywhere).
+    it('renders no arrow when the detector finds at most one shell', async () => {
+      seedShells([{ path: '/bin/bash', source: 'loginShell' }])
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      expect(screen.queryByTestId('new-tab-shell-arrow')).toBeNull()
+      expect(container.querySelector('.tab-shell-create')).toBeNull()
+      expect(screen.getByRole('button', { name: 'New terminal tab' })).toBeInTheDocument()
+    })
+
+    // AC: two or more detected shells → the arrow renders beside "+".
+    it('renders the arrow beside "+ New tab" when two shells are detected', async () => {
+      seedShells(twoShells)
+      render(<WorkspaceShell />)
+
+      const bar = await screen.findByTestId('tab-bar-ws-1')
+      await waitFor(() =>
+        expect(within(bar).getByTestId('new-tab-shell-arrow')).toBeInTheDocument(),
+      )
+      expect(within(bar).getByRole('button', { name: 'New terminal tab' })).toBeInTheDocument()
+    })
+
+    // The dropdown is the Settings picker's list minus Auto: detected shells
+    // ranked by the pure detector, plus the saved custom command verbatim.
+    it('lists the detected shells plus a saved custom command in the dropdown', async () => {
+      seedShells(twoShells, { defaultShell: 'mysh --login' })
+      render(<WorkspaceShell />)
+
+      const bar = await screen.findByTestId('tab-bar-ws-1')
+      await waitFor(() =>
+        expect(within(bar).getByTestId('new-tab-shell-arrow')).toBeInTheDocument(),
+      )
+      fireEvent.click(within(bar).getByTestId('new-tab-shell-arrow'))
+
+      const menu = screen.getByTestId('new-tab-shell-menu')
+      const labels = Array.from(menu.querySelectorAll('[role="menuitem"]')).map(
+        (o) => o.textContent,
+      )
+      expect(labels).toEqual(['Bash', 'Fish', 'mysh --login'])
+    })
+
+    // AC: choosing a non-default shell spawns EXACTLY ONE new local tab
+    // running that shell; the untouched tab keeps its own shell; the menu
+    // closes after the pick. The choice is spawn-time only — it rides the
+    // new panel's pty_open, never the persisted state.
+    it('spawns exactly one new local tab running the picked shell', async () => {
+      seedShells(twoShells)
+      render(<WorkspaceShell />)
+
+      const bar = await screen.findByTestId('tab-bar-ws-1')
+      await waitFor(() =>
+        expect(within(bar).getByTestId('new-tab-shell-arrow')).toBeInTheDocument(),
+      )
+      const tabsBefore = bar.querySelectorAll('[role="tab"]').length
+      const surfacesBefore = screen.getAllByTestId('terminal-surface').length
+
+      fireEvent.click(within(bar).getByTestId('new-tab-shell-arrow'))
+      fireEvent.click(
+        within(screen.getByTestId('new-tab-shell-menu')).getByRole('menuitem', {
+          name: 'Fish',
+        }),
+      )
+
+      await waitFor(() =>
+        expect(bar.querySelectorAll('[role="tab"]').length).toBe(tabsBefore + 1),
+      )
+      const surfaces = screen.getAllByTestId('terminal-surface')
+      expect(surfaces).toHaveLength(surfacesBefore + 1)
+      const picked = surfaces.filter((s) => s.dataset.shell === '/usr/bin/fish')
+      expect(picked).toHaveLength(1)
+      // The pre-existing tab was NOT switched to the picked shell (Auto here
+      // — defaultShell null — so its surface carries no shell at all).
+      expect(surfaces.filter((s) => s.dataset.shell === '')).toHaveLength(surfacesBefore)
+      expect(screen.queryByTestId('new-tab-shell-menu')).toBeNull()
+    })
+
+    // AC: clicking "+" (the shortcut rides the same wire) still spawns the
+    // Settings default — the dropdown pick must not leak into it.
+    it('keeps the plain "+" on the Settings default', async () => {
+      seedShells(twoShells, { defaultShell: '/bin/bash' })
+      render(<WorkspaceShell />)
+
+      const bar = await screen.findByTestId('tab-bar-ws-1')
+      await waitFor(() =>
+        expect(within(bar).getByTestId('new-tab-shell-arrow')).toBeInTheDocument(),
+      )
+
+      fireEvent.click(within(bar).getByRole('button', { name: 'New terminal tab' }))
+      await waitFor(() => expect(bar.querySelectorAll('[role="tab"]').length).toBe(2))
+
+      const surfaces = screen.getAllByTestId('terminal-surface')
+      expect(surfaces).toHaveLength(2)
+      expect(surfaces.filter((s) => s.dataset.shell === '/bin/bash')).toHaveLength(2)
+    })
+
+    // The boot probe (new in #78 — the arrow needs the shell count at render
+    // time) must degrade silently: a backend without a list_shells answer
+    // leaves the list empty → no arrow, today's UI, no crash.
+    it('survives a boot without a list_shells answer — no arrow, clean UI', async () => {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'load_settings') return Promise.resolve({ notificationsEnabled: true })
+        return Promise.resolve(undefined)
+      })
+      const { container } = render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      expect(screen.queryByTestId('new-tab-shell-arrow')).toBeNull()
+      expect(container.querySelector('.tab-shell-create')).toBeNull()
+      expect(screen.getByRole('button', { name: 'New terminal tab' })).toBeInTheDocument()
+    })
+
+    // HITL 2026-09-10 (supersedes #78's no-persist note): the pick is born
+    // ON the persisted tab — save_workspaces must carry tab.shell so a
+    // restart brings the tab back in ITS shell (Adam lost an Ubuntu tab to
+    // the Settings default on restart).
+    it('persists the picked shell on the new tab (save_workspaces payload)', async () => {
+      seedShells(twoShells)
+      render(<WorkspaceShell />)
+
+      const bar = await screen.findByTestId('tab-bar-ws-1')
+      await waitFor(() =>
+        expect(within(bar).getByTestId('new-tab-shell-arrow')).toBeInTheDocument(),
+      )
+      fireEvent.click(within(bar).getByTestId('new-tab-shell-arrow'))
+      fireEvent.click(
+        within(screen.getByTestId('new-tab-shell-menu')).getByRole('menuitem', {
+          name: 'Fish',
+        }),
+      )
+
+      await waitFor(() => {
+        const saves = invokeMock.mock.calls.filter((c) => c[0] === 'save_workspaces')
+        const last = saves[saves.length - 1]?.[1] as
+          | { workspaces: Array<{ tabs?: Array<{ shell?: string }> }> }
+          | undefined
+        const shells = (last?.workspaces ?? []).flatMap((w) =>
+          (w.tabs ?? []).map((t) => t.shell),
+        )
+        expect(shells).toContain('/usr/bin/fish')
+      })
+    })
+
+    // Session restore: a tab saved with a shell comes back in THAT shell —
+    // not the Settings default (Adam's restart report 2026-09-10: an Ubuntu
+    // tab reopened as the default shell).
+    it('restores a saved tab in its own shell, not the Settings default', async () => {
+      const ubuntu = '"C:\\Program Files\\WSL\\wsl.exe" -d Ubuntu'
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [
+              {
+                id: 'ws-1',
+                name: 'alpha',
+                tabs: [
+                  {
+                    id: 'tab-1',
+                    name: 'T',
+                    layout: { kind: 'leaf', id: 'p-1' },
+                    shell: ubuntu,
+                  },
+                ],
+              },
+            ],
+          })
+        if (cmd === 'load_settings')
+          return Promise.resolve({
+            notificationsEnabled: true,
+            agentStatusEnabled: true,
+            defaultShell: '/bin/bash',
+          })
+        if (cmd === 'list_shells') return Promise.resolve(twoShells)
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      await waitFor(() =>
+        expect(screen.getByText('alpha', { selector: '.workspace-name' })).toBeInTheDocument(),
+      )
+
+      const surfaces = screen.getAllByTestId('terminal-surface')
+      expect(surfaces).toHaveLength(1)
+      expect(surfaces[0].dataset.shell).toBe(ubuntu)
+    })
+  })
+
   // --- v0.2 Phase 4 / #28: safe panel closing -----------------------------------
 
   describe('safe panel closing (#28)', () => {
@@ -2194,6 +2420,33 @@ describe('terminal tabs, pin, and rename menu (#37 rework)', () => {
       const payload = portCalls()[0]?.[1] as { tabs: Array<{ ptyIds: number[] }> }
       expect(payload.tabs).toHaveLength(2)
       for (const q of payload.tabs) expect(q.ptyIds).toEqual([42])
+    })
+
+    // HITL 2026-09-10: the tooltip must show wherever the pointer is over
+    // the workspace row — not only when it entered through the name line. A
+    // pointer MOVE inside the row with no tooltip open re-arms the pull, so
+    // a swallowed/missed mouseenter cannot leave the rest of the row silent.
+    it('re-arms the tooltip on pointer move inside the row (no mouseenter)', async () => {
+      surfacesReportHandles = true
+      invokeMock.mockImplementation((cmd: string, args?: { tabs?: Array<{ tabId: string }> }) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+        if (cmd === 'tab_ports')
+          return Promise.resolve(
+            (args?.tabs ?? []).map((t) => ({ tabId: t.tabId, ports: [8000] })),
+          )
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      const panel = await screen.findByTestId('panel-ws-1')
+      fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+      await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+
+      // No mouseEnter at all — the pointer just moves within the row.
+      fireEvent.mouseMove(screen.getByTestId('workspace-row-ws-1'))
+
+      const tip = await screen.findByRole('tooltip')
+      expect(tip.textContent).toBe('8000')
     })
 
     // HITL 2026-08-27 round 2: the tooltip must be ENTERABLE — moving the
