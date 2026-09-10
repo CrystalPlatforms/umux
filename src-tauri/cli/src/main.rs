@@ -524,6 +524,9 @@ fn main() {
                     name: Some("Tab 1".into()),
                     pinned: None,
                     color: None,
+                    // #78 added the per-tab shell; the CLI has no shell picker,
+                    // so a new tab always uses the Settings default.
+                    shell: None,
                 }],
                 pinned: None,
                 group_id: None,
