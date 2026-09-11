@@ -217,6 +217,84 @@ describe('SettingsDialog', () => {
     expect(menuItems(getByTestId)).toEqual(['Auto', 'Bash', 'Fish', 'Custom…'])
   })
 
+  // Fix round 2026-09-11 (HITL): the settings card scrolls (overflow-y: auto),
+  // which used to clip the absolute dropdown exactly at the card wall when a
+  // long entry (a WSL distro command) widened it. The menu must escape the
+  // card: fixed-positioned from the button's box with inline top/left (the
+  // same contract as the #78 tab dropdown), an on-screen maxWidth, and the
+  // full label riding each row's title tooltip.
+  it('positions the menu off the card clip and keeps long labels reachable', () => {
+    const longName = '"C:\\Program Files\\WSL\\wsl.exe" -d Ubuntu-22.04'
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        shells={[...SHELLS, { displayName: longName, launchCommand: longName }]}
+      />,
+    )
+
+    fireEvent.click(getByTestId('shell-picker'))
+    const menu = getByTestId('shell-picker-menu')
+    expect(menu).toHaveClass('settings-shell-dropdown')
+    expect(menu.style.top).not.toBe('')
+    expect(menu.style.left).not.toBe('')
+    expect(menu.style.maxWidth).not.toBe('')
+    const longRow = Array.from(menu.querySelectorAll('[role="menuitem"]')).find(
+      (o) => o.textContent === longName,
+    )!
+    expect(longRow.getAttribute('title')).toBe(longName)
+  })
+
+  // Fix round 3 (HITL): the menu is never shrunk to fit the window. When it
+  // would cross the window's bottom edge it opens ABOVE the button instead;
+  // with room below it drops back under. jsdom has no layout, so the test
+  // stubs the button's rect and the menu's offsetHeight.
+  it('flips the menu above the button when there is no room below', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        shells={SHELLS}
+      />,
+    )
+    const button = getByTestId('shell-picker')
+    // Button low in the window: rect {top: 500, bottom: 520}; menu is 300 tall.
+    button.getBoundingClientRect = () =>
+      ({
+        top: 500,
+        bottom: 520,
+        left: 40,
+        right: 140,
+        width: 100,
+        height: 20,
+        x: 40,
+        y: 500,
+        toJSON: () => {},
+      }) as DOMRect
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      value: 300,
+    })
+    try {
+      // 820 tall: below the button there is only 296px (820 - 524) — not
+      // enough for 300; above there is 496px → the menu flips above.
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 820 })
+      fireEvent.click(button)
+      expect(getByTestId('shell-picker-menu').style.top).toBe('196px')
+
+      // Reopen with room below (900 - 524 = 376 ≥ 300) → back under the button.
+      fireEvent.click(button) // toggles the open menu closed
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 })
+      fireEvent.click(button)
+      expect(getByTestId('shell-picker-menu').style.top).toBe('524px')
+    } finally {
+      delete (HTMLElement.prototype as { offsetHeight?: unknown }).offsetHeight
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
+    }
+  })
+
   it('reports a picked shell as defaultShell=launchCommand, verbatim, and closes (#77)', () => {
     const onChange = vi.fn()
     const { getByTestId } = render(

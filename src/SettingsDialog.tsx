@@ -21,7 +21,7 @@
 // aria-checked mirroring the state, so assistive tech announces it as a
 // toggle. Escape and the header X close the dialog.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
 import { isWindowsPlatform } from './importWizard'
 import { downloadProgressText, type UpdateState } from './updater'
@@ -176,8 +176,14 @@ export function SettingsDialog({
   }, [importOpen])
 
   // The Default-shell picker (#77) reuses that exact dropdown interaction —
-  // open state + close on any press outside it.
+  // open state + close on any press outside it. The menu is FIXED-positioned
+  // from the button's box (fix round 2026-09-11): the settings card has
+  // overflow-y: auto, which used to clip the absolute dropdown at the card
+  // wall when a long entry (a WSL distro command) widened it. maxWidth keeps
+  // the escaped menu on screen; rows ellipsis and carry the full label as
+  // their title tooltip.
   const [shellPickerOpen, setShellPickerOpen] = useState(false)
+  const [shellPickerPos, setShellPickerPos] = useState({ top: 0, left: 0, maxWidth: 480 })
   const shellPickerRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!shellPickerOpen) return
@@ -207,6 +213,29 @@ export function SettingsDialog({
   const currentShell =
     shellOptions.find((o) => o.value === (settings.defaultShell ?? null)) ?? shellOptions[0]
   const currentShellLabel = currentShell?.label ?? 'Auto'
+
+  // Flip (fix round 3, 2026-09-11 — replaces the shrink/scroll attempt): the
+  // menu opens BELOW the button by default, but never past the umux window's
+  // bottom edge — when there is no room below it opens ABOVE the button
+  // instead (that side with more room when neither fits). Measured in a
+  // layout effect, before paint, so the flip never flickers; the state bail
+  // keeps re-renders from looping.
+  const pickerMenuRef = useRef<HTMLDivElement | null>(null)
+  const pickerAnchor = useRef<DOMRect | null>(null)
+  useLayoutEffect(() => {
+    if (!shellPickerOpen) return
+    const a = pickerAnchor.current
+    const menu = pickerMenuRef.current
+    if (a == null || menu == null) return
+    const h = menu.offsetHeight
+    const below = window.innerHeight - a.bottom - 4
+    const above = a.top - 4
+    let top = a.bottom + 4
+    if (h > below && (h <= above || above >= below)) {
+      top = Math.max(4, a.top - h - 4)
+    }
+    setShellPickerPos((p) => (p.top === top ? p : { ...p, top }))
+  })
 
   return (
     <>
@@ -303,17 +332,40 @@ export function SettingsDialog({
               aria-label="Default shell"
               aria-haspopup="menu"
               aria-expanded={shellPickerOpen}
-              onClick={() => setShellPickerOpen((o) => !o)}
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect()
+                pickerAnchor.current = r
+                setShellPickerPos({
+                  top: r.bottom + 4,
+                  left: r.left,
+                  // Stay on screen however wide the entries are (the menu may
+                  // hang past the card — that is the point); vertical fitting
+                  // is the flip logic's job, not a width shrink.
+                  maxWidth: Math.min(480, window.innerWidth - r.left - 8),
+                })
+                setShellPickerOpen((o) => !o)
+              }}
             >
               {currentShellLabel}
             </button>
             {shellPickerOpen && (
-              <div className="create-dropdown" role="menu" data-testid="shell-picker-menu">
+              <div
+                ref={pickerMenuRef}
+                className="create-dropdown settings-shell-dropdown"
+                role="menu"
+                data-testid="shell-picker-menu"
+                style={{
+                  top: shellPickerPos.top,
+                  left: shellPickerPos.left,
+                  maxWidth: shellPickerPos.maxWidth,
+                }}
+              >
                 {shellOptions.map((o) => (
                   <button
                     key={o.value ?? '__auto'}
                     className="menu-item"
                     role="menuitem"
+                    title={o.label}
                     onClick={() => {
                       setShellPickerOpen(false)
                       onChange({ defaultShell: o.value })

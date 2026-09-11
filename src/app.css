@@ -1543,6 +1543,27 @@ body.is-dragging * {
   justify-content: center;
 }
 
+/* The Default-shell picker menu (#77 fix round 2026-09-11): .modal-card has
+   overflow-y: auto, which clipped the absolute .create-dropdown at the card
+   wall — a long entry (a WSL distro command) made the menu die exactly at the
+   settings frame. Fixed positioning measured from the picker button escapes
+   the clip (same trick as .tab-shell-dropdown); coordinates and an on-screen
+   maxWidth come in inline. Rows ellipsis and carry their full label as the
+   title tooltip, so a truncated name is still readable on hover. */
+.settings-shell-dropdown {
+  position: fixed;
+  right: auto;
+  /* maxWidth arrives inline, capped to the umux window; the vertical fit is
+     the component's flip logic (open above the button when there is no room
+     below), never a shrink — the menu always shows at its natural size. */
+}
+
+.settings-shell-dropdown .menu-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-import--stacked {
   display: flex;
   flex-direction: column;
