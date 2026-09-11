@@ -888,9 +888,20 @@ fn reset_all() -> Result<(), String> {
 /// Paths on Windows. RAW results only — ranking, dedup, and display names
 /// live in the pure TS ShellDetector (src/shellDetector.ts); nothing here
 /// assumes any specific shell exists, so an empty list is a valid answer.
+// PERF (2026-09-11): async — the probe scans every PATH dir × known shells
+// (hundreds of stat calls) and on Windows spawns up to eight `reg query`
+// children (hundreds of ms warm, seconds under antivirus). This used to be a
+// SYNC command — Tauri runs those on the UI thread — and the frontend calls it
+// at every boot (the #78 arrow needs the shell count) and on every Settings
+// open, so the whole window froze right at startup. Same fix as panel_cwds /
+// panel_processes (audit 2026-09-05): the probe runs on a worker thread and
+// the UI thread is never involved. A failed join degrades to the empty list —
+// the same answer the frontend already treats as "no shells detected".
 #[tauri::command]
-fn list_shells() -> Vec<shell_probe::ShellProbe> {
-    shell_probe::probe_shells()
+async fn list_shells() -> Vec<shell_probe::ShellProbe> {
+    tauri::async_runtime::spawn_blocking(shell_probe::probe_shells)
+        .await
+        .unwrap_or_default()
 }
 
 /// Open settings.json with the platform's default handler (Settings footnote

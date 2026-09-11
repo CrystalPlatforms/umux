@@ -206,7 +206,7 @@ fn platform_extras() -> Vec<ShellProbe> {
         let key = format!(
             "{root}\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe}"
         );
-        let Ok(output) = std::process::Command::new("reg").arg("query").arg(&key).arg("/ve").output() else {
+        let Ok(output) = silent_reg().arg("query").arg(&key).arg("/ve").output() else {
             continue;
         };
         if !output.status.success() {
@@ -239,7 +239,7 @@ fn platform_extras() -> Vec<ShellProbe> {
         .unwrap_or_else(|| "wsl.exe".to_string());
     let mut seen_distros: std::collections::HashSet<String> = std::collections::HashSet::new();
     for key in lxss_key_paths() {
-        let Ok(output) = std::process::Command::new("reg")
+        let Ok(output) = silent_reg()
             .arg("query")
             .arg(key)
             .arg("/s")
@@ -266,6 +266,25 @@ fn platform_extras() -> Vec<ShellProbe> {
         }
     }
     out
+}
+
+/// A console child of a GUI app flashes a console window on the desktop
+/// unless CREATE_NO_WINDOW is set (same rule as listening_ports::run_tool).
+/// The probe's `reg` queries fire at boot and on every Settings open —
+/// without the flag, each one flickered a black box over the desktop
+/// (HITL 2026-09-11: "terminale włączają się i wyłączają").
+#[cfg(windows)]
+fn silent_reg() -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let mut c = std::process::Command::new("reg");
+    c.creation_flags(CREATE_NO_WINDOW);
+    c
+}
+
+#[cfg(not(windows))]
+fn silent_reg() -> std::process::Command {
+    std::process::Command::new("reg")
 }
 
 /// Run every probe for the current platform and return the raw results in
