@@ -135,19 +135,33 @@ pub fn parse_lsof_listen(output: &str) -> Vec<(u16, u32)> {
         .collect()
 }
 
-/// Windows LISTEN table from `netstat -ano -p tcp`: TCP rows in state
-/// LISTENING become (port, pid). The local address's port sits after the
-/// LAST colon (`0.0.0.0:8000`, `[::]:8080`), which also survives IPv6.
+/// Windows LISTEN table from `netstat -ano -p tcp`: listening TCP rows become
+/// (port, pid). The local address's port sits after the LAST colon
+/// (`0.0.0.0:8000`, `[::]:8080`), which also survives IPv6.
+///
+/// LOCALE (fix 2026-09-11): netstat TRANSLATES the State column — Polish
+/// Windows prints `NASŁUCHIWANIE`, not `LISTENING`, so matching the state word
+/// found zero rows and the ports tooltip never showed. The locale-proof
+/// listener signal is the FOREIGN address: a TCP listener's peer is always the
+/// all-zero endpoint (`0.0.0.0:0` / `[::]:0`) everywhere on earth, while
+/// established/time-wait rows carry a real peer. Bound-but-not-listening
+/// sockets share the all-zero shape — rare, and accepted: a tooltip is
+/// metadata, an occasional extra port beats a dead one.
 pub fn parse_netstat_listen(output: &str) -> Vec<(u16, u32)> {
     output
         .lines()
         .filter_map(|line| {
             let cols: Vec<&str> = line.split_whitespace().collect();
-            if cols.len() < 5 || cols[0] != "TCP" || cols[3] != "LISTENING" {
+            if cols.len() < 4 || cols[0] != "TCP" {
+                return None;
+            }
+            let foreign = cols[2];
+            let zero_peer = foreign == "0.0.0.0:0" || foreign == "[::]:0" || foreign == "*:*";
+            if !zero_peer {
                 return None;
             }
             let port = cols[1].rsplit(':').next()?.parse::<u16>().ok()?;
-            let pid = cols[4].parse::<u32>().ok()?;
+            let pid = cols.last()?.parse::<u32>().ok()?;
             Some((port, pid))
         })
         .collect()
@@ -410,8 +424,9 @@ node      12345      adam   25u  IPv4  0x9f31a2b3c4d5e6fa      0t0  TCP 192.168.
     // --- Windows: `netstat -ano -p tcp` + PowerShell CIM parent map ---------
     //
     // T-W1 (AC5 — Windows LISTEN parsing): netstat's own table shape, with
-    //   `[::]` and `0.0.0.0` wildcards; ESTABLISHED/TIME_WAIT rows and the
-    //   header must not survive.
+    //   `[::]` and `0.0.0.0` wildcards; ESTABLISHED/TIME_WAIT rows (real peer
+    //   endpoints — listeners are the only rows whose foreign address is the
+    //   all-zero one) and the header must not survive.
     #[test]
     fn windows_netstat_listens_parse_to_port_pid() {
         let out = "\
@@ -420,12 +435,32 @@ node      12345      adam   25u  IPv4  0x9f31a2b3c4d5e6fa      0t0  TCP 192.168.
   Proto  Local Address          Foreign Address        State           PID
   TCP    0.0.0.0:8000           0.0.0.0:0              LISTENING       4128
   TCP    [::]:8080              [::]:0                 LISTENING       2222
-  TCP    127.0.0.1:139          0.0.0.0:0              ESTABLISHED     1000
+  TCP    127.0.0.1:139          192.168.1.5:51000      ESTABLISHED     1000
   TCP    192.168.1.10:49152     93.184.216.34:443      TIME_WAIT       0
 ";
         let mut got = parse_netstat_listen(out);
         got.sort();
         assert_eq!(got, vec![(8000u16, 4128u32), (8080, 2222)]);
+    }
+
+    // T-W1b (locale fix 2026-09-11): netstat TRANSLATES the State column —
+    //   Polish Windows says NASŁUCHIWANIE/Ustanowiono — so the parser must
+    //   key on the all-zero FOREIGN address, not the state word. The exact
+    //   fixture Adam's machine produces must yield both listeners.
+    #[test]
+    fn netstat_rows_parse_on_a_localized_non_english_windows() {
+        let out = "\
+\n  Aktywne połączenia
+
+  Proto  Adres lokalny           Adres zdalny            Stan            PID
+  TCP    0.0.0.0:5173            0.0.0.0:0               NASŁUCHIWANIE   9999
+  TCP    [::]:3000               [::]:0                  NASŁUCHIWANIE   7777
+  TCP    192.168.1.10:49152      93.184.216.34:443       Ustanowiono     1000
+  UDP    0.0.0.0:5353            *:*                                     800
+";
+        let mut got = parse_netstat_listen(out);
+        got.sort();
+        assert_eq!(got, vec![(3000u16, 7777u32), (5173, 9999)]);
     }
 
     // T-W2 (AC5 — Windows PROCESS TREE source): PowerShell's
