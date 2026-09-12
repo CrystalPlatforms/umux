@@ -225,7 +225,7 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 
 ### umux Core — v1.7.0 (branch `core`) — added 2026-09-04 as part of the ecosystem scope; **v1.7.0 since 2026-09-12**
 
-> 🔎 Ecosystem on dev. Shipping v3.0.0. This file: umux Core only.
+> Ecosystem on dev. Shipping v3.0.0. This file has umux Core only.
 
 105. As a developer, I want Core to keep my terminal sessions alive after I close umux Desktop or umux Terminal, so that a closed window never kills a running agent or long job.
 106. As a developer, I want `umux attach` to reattach Desktop, Terminal, or the CLI to Core's living sessions, so that coming back costs seconds and loses nothing.
