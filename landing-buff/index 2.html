@@ -1,0 +1,850 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>umux — terminal workspaces for Linux, Windows & macOS</title>
+  <meta name="description" content="umux is an open-source terminal workspace manager: group terminals into workspaces, split them into panels, and get a desktop notification when your AI CLI finishes a task.">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0d1117">
+  <link rel="icon" href="assets/umux-favicon.ico">
+  <!-- Link-preview cards (X, Discord, LinkedIn, Slack) render these. -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="umux">
+  <meta property="og:title" content="umux — terminal workspaces for Linux, Windows &amp; macOS">
+  <meta property="og:description" content="Group terminals into workspaces, split them into panels, and get a desktop notification when your AI CLI finishes a task.">
+  <meta property="og:url" content="https://umux.pages.dev/">
+  <meta property="og:image" content="https://umux.pages.dev/assets/og.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The umux main window: workspaces sidebar, terminal tab and the umux logo">
+  <meta name="twitter:card" content="summary_large_image">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1a212b;
+      --border: #2a313c;
+      --border-strong: #3b4552;
+      --text: #e6edf3;
+      --text-strong: #f4f7fa;
+      --muted: #8a929c;
+      --accent: #34d399;
+      --accent-strong: #5eead4;
+      --accent-dim: rgba(52, 211, 153, 0.12);
+      --accent-ink: #06281c;
+      --ring: rgba(52, 211, 153, 0.45);
+    }
+    * { box-sizing: border-box; margin: 0; }
+    ::selection { background: rgba(52, 211, 153, 0.28); }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      /* Ambient light: soft emerald/cyan glows painted once behind everything
+         (fixed, zero-paint-on-scroll). A barely-there dot grid fades in at the
+         top to give the flat dark canvas some depth. */
+      background-image:
+        radial-gradient(1000px 520px at 12% -10%, rgba(52, 211, 153, 0.09), transparent 62%),
+        radial-gradient(820px 460px at 92% -6%, rgba(56, 189, 248, 0.05), transparent 64%),
+        radial-gradient(1100px 700px at 50% 118%, rgba(52, 211, 153, 0.06), transparent 60%);
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+    }
+    .top, .hero, .features, .install-cli, .first-run, .cta, footer {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+    /* ----- Sticky header ----- */
+    .top {
+      position: sticky;
+      top: 0;
+      z-index: 80;
+      width: 100%;
+      max-width: none;
+      padding: 0;
+      background: rgba(13, 17, 23, 0.72);
+      -webkit-backdrop-filter: blur(14px) saturate(1.35);
+      backdrop-filter: blur(14px) saturate(1.35);
+      border-bottom: 1px solid transparent;
+      transition: background-color 0.25s ease, border-color 0.25s ease,
+                  box-shadow 0.25s ease;
+    }
+    .top.scrolled {
+      background: rgba(10, 14, 19, 0.86);
+      border-bottom-color: var(--border);
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 12px 28px -20px rgba(0, 0, 0, 0.7);
+    }
+    .top-inner {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    .header-actions { display: flex; gap: 8px; }
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--muted);
+    }
+    .icon-btn:hover { color: var(--text); border-color: var(--border-strong); }
+    .icon-btn svg { width: 20px; height: 20px; }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 1.2rem;
+      letter-spacing: -0.01em;
+      text-decoration: none;
+    }
+    .brand img { height: 30px; width: auto; }
+    /* ----- Hero ----- */
+    .hero {
+      text-align: center;
+      padding-top: clamp(44px, 7vw, 88px);
+      padding-bottom: 20px;
+      position: relative;
+    }
+    .hero-logo {
+      width: min(300px, 74vw);
+      height: auto;
+      margin: 0 auto 18px;
+      display: block;
+      filter: drop-shadow(0 14px 34px rgba(52, 211, 153, 0.14));
+    }
+    h1 {
+      font-size: clamp(2rem, 5.4vw, 3.35rem);
+      line-height: 1.12;
+      letter-spacing: -0.03em;
+      font-weight: 800;
+      max-width: 22ch;
+      margin: 0 auto;
+      text-wrap: balance;
+      background: linear-gradient(180deg, #f6f9fb 0%, #cfd9e2 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .pitch {
+      color: #9aa4b0;
+      font-size: clamp(1.05rem, 1.6vw, 1.15rem);
+      line-height: 1.65;
+      max-width: 46rem;
+      margin: 18px auto 0;
+      text-wrap: pretty;
+    }
+    .badges {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 22px;
+      opacity: 0.9;
+    }
+    .badges img { border-radius: 6px; }
+    .downloads {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 26px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 44px;
+      padding: 10px 20px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 0.98rem;
+      font-weight: 600;
+      line-height: 1.2;
+      text-decoration: none;
+    }
+    .btn-primary {
+      background: linear-gradient(180deg, #3ce0a6 0%, #27c08a 100%);
+      border-color: rgba(52, 211, 153, 0.85);
+      color: var(--accent-ink);
+      box-shadow: 0 10px 24px -12px rgba(52, 211, 153, 0.55),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    }
+    .btn-ghost {
+      background: rgba(255, 255, 255, 0.02);
+      font-weight: 500;
+      color: var(--muted);
+    }
+    summary.btn { list-style: none; cursor: pointer; }
+    summary.btn::-webkit-details-marker { display: none; }
+    .dropdown { position: relative; }
+    .dropdown .menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      min-width: 240px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 6px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+    }
+    .dropdown[open] .menu { display: grid; }
+    .dropdown .menu a {
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.95rem;
+      padding: 10px 12px;
+      border-radius: 8px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+    }
+    .dropdown .menu a:hover { background: rgba(255, 255, 255, 0.05); }
+    /* Platform glyphs (Apple / Windows / Tux) drawn from the hidden sprite. */
+    .os-ic { width: 16px; height: 16px; flex: none; color: currentColor; }
+    .btn .os-ic { color: inherit; }
+    /* Screenshot frame with a subtle gradient hairline + glow. */
+    .demo-frame { margin: clamp(28px, 5vw, 44px) auto 0; max-width: 920px; position: relative; }
+    .demo-frame::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      border-radius: 15px;
+      padding: 1px;
+      background: linear-gradient(180deg, rgba(210, 220, 230, 0.28),
+                  rgba(52, 211, 153, 0.22) 30%, rgba(52, 211, 153, 0.06) 75%, transparent);
+      -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      mask-composite: exclude;
+      pointer-events: none;
+    }
+    .demo-frame img {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface);
+      box-shadow: 0 34px 90px -34px rgba(52, 211, 153, 0.4),
+                  0 24px 60px -26px rgba(0, 0, 0, 0.75),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+    /* ----- Feature tiles ----- */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      padding-top: clamp(44px, 6vw, 64px);
+      padding-bottom: 8px;
+    }
+    .feature {
+      position: relative;
+      background: linear-gradient(180deg, var(--surface) 0%, #141a22 100%);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      overflow: hidden;
+    }
+    .feature::after {
+      /* Soft accent sheen that appears on hover. */
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(420px 180px at 50% -40%, rgba(52, 211, 153, 0.1), transparent 70%);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+    .feature:hover::after { opacity: 1; }
+    .feature-img {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 14px;
+      background: var(--bg);
+    }
+    .feature-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; position: relative; z-index: 1; }
+    .feature-head h2 { margin: 0; font-size: 1.04rem; letter-spacing: -0.01em; }
+    .feature-head svg { width: 18px; height: 18px; color: var(--accent); flex: none; }
+    .feature p { color: var(--muted); font-size: 0.95rem; line-height: 1.6; position: relative; z-index: 1; }
+    .feature h2 { font-size: 1.04rem; margin-bottom: 8px; color: var(--accent); }
+    .soon {
+      flex: none;
+      margin-left: auto;
+      padding: 2px 9px;
+      border-radius: 999px;
+      background: var(--accent-dim);
+      color: var(--accent-strong);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    /* ----- Section headings ----- */
+    .install-cli { padding-top: clamp(44px, 6vw, 64px); padding-bottom: 16px; }
+    .install-cli .cli-inner { max-width: 640px; margin: 0 auto; text-align: center; }
+    .install-cli h2, .first-run h2, .cta h2 {
+      font-size: clamp(1.3rem, 2.4vw, 1.55rem);
+      letter-spacing: -0.02em;
+    }
+    .install-cli p { color: var(--muted); font-size: 0.95rem; }
+    .install-cli .note { font-size: 0.85rem; margin-top: 14px; color: #7d8691; }
+    .install-cli a, .first-run a, footer a { color: var(--accent); text-decoration: none; }
+    .install-cli a:hover, .first-run a:hover, footer a:hover { text-decoration: underline; }
+    .install-cli p code, .feature code, .first-run code {
+      color: var(--accent-strong);
+      font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .terminal {
+      margin: 18px auto 0;
+      text-align: left;
+      background: linear-gradient(180deg, #12171e 0%, var(--surface) 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.7),
+                  0 0 0 1px rgba(52, 211, 153, 0.05),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 12px;
+      background: rgba(10, 13, 18, 0.7);
+      border-bottom: 1px solid var(--border);
+    }
+    .terminal-bar .dot { width: 11px; height: 11px; border-radius: 50%; }
+    .dot-red { background: #ff5f57; }
+    .dot-yellow { background: #febc2e; }
+    .dot-green { background: #28c840; }
+    .terminal-bar .term-title {
+      margin-left: 6px;
+      color: var(--muted);
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .copy-btn {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 4px 12px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      cursor: pointer;
+      transition: color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+    }
+    .copy-btn:hover { color: var(--text); border-color: var(--border-strong); }
+    .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
+    .terminal pre {
+      margin: 0;
+      padding: 14px 16px;
+      overflow-x: auto;
+      font: 13.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .terminal .prompt { color: var(--accent); user-select: none; }
+    .terminal code { color: var(--text); }
+    /* ----- First run: three per-platform cards ----- */
+    .first-run { padding-top: clamp(28px, 4vw, 40px); padding-bottom: 8px; }
+    .first-run > p { color: var(--muted); font-size: 0.95rem; margin-top: 8px; max-width: 60ch; }
+    .first-run ul { padding-left: 0; list-style: none; }
+    .frun-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin: 18px 0 6px;
+    }
+    .frun-card {
+      background: linear-gradient(180deg, var(--surface) 0%, #141a22 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+    }
+    .frun-card h3 {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.95rem;
+      color: var(--text-strong);
+      margin-bottom: 6px;
+    }
+    .frun-card h3 .os-ic { width: 15px; height: 15px; color: var(--accent); }
+    .frun-card p { color: var(--muted); font-size: 0.88rem; line-height: 1.55; }
+    /* ----- Final CTA band ----- */
+    .cta { text-align: center; padding-top: clamp(40px, 6vw, 64px); padding-bottom: 12px; }
+    .cta-panel {
+      position: relative;
+      overflow: hidden;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: clamp(40px, 6vw, 60px) clamp(24px, 6vw, 60px);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background:
+        radial-gradient(640px 300px at 50% -60%, rgba(52, 211, 153, 0.16), transparent 70%),
+        linear-gradient(180deg, var(--surface) 0%, #131920 100%);
+      box-shadow: 0 30px 90px -40px rgba(52, 211, 153, 0.35),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+    .cta-panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(rgba(230, 237, 243, 0.035) 1px, transparent 1.4px);
+      background-size: 22px 22px;
+      -webkit-mask-image: radial-gradient(ellipse 90% 90% at 50% 0%, #000 10%, transparent 75%);
+      mask-image: radial-gradient(ellipse 90% 90% at 50% 0%, #000 10%, transparent 75%);
+      pointer-events: none;
+    }
+    .cta-panel > * { position: relative; }
+    .cta h2 { color: var(--text-strong); }
+    .cta p { color: var(--muted); margin-top: 10px; }
+    .cta-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 24px; }
+    footer { text-align: center; color: var(--muted); font-size: 0.9rem; padding-top: 32px; padding-bottom: 48px; }
+    .visually-hidden {
+      position: absolute;
+      width: 1px; height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+    }
+    /* Shared interaction states. */
+    .feature, .btn, .icon-btn, .copy-btn {
+      transition: transform 0.18s ease, border-color 0.18s ease,
+                  box-shadow 0.18s ease, background 0.18s ease, color 0.18s ease;
+    }
+    .feature:hover {
+      transform: translateY(-3px);
+      border-color: var(--border-strong);
+      box-shadow: 0 18px 44px -18px rgba(0, 0, 0, 0.7),
+                  0 0 0 1px rgba(52, 211, 153, 0.08);
+    }
+    .btn:hover, .icon-btn:hover { border-color: var(--border-strong); }
+    .btn-primary:hover {
+      filter: brightness(1.05);
+      box-shadow: 0 14px 30px -12px rgba(52, 211, 153, 0.65),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      transform: translateY(-1px);
+    }
+    .btn:active, .icon-btn:active, .copy-btn:active { transform: scale(0.98); }
+    .btn-primary:active { transform: scale(0.98) translateY(0); }
+    .btn:focus-visible, .icon-btn:focus-visible, .copy-btn:focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: 2px;
+    }
+    /* Motion: subtle, JS-gated (no JS = everything visible), reduced-motion
+       users get content instantly with zero transitions. */
+    html { scroll-behavior: smooth; }
+    .js .reveal {
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+    .js .reveal.in { opacity: 1; transform: none; }
+    .js .reveal-delay-1 { transition-delay: 0.08s; }
+    .js .reveal-delay-2 { transition-delay: 0.16s; }
+    .js .reveal-delay-3 { transition-delay: 0.24s; }
+    @media (prefers-reduced-motion: no-preference) {
+      .dropdown[open] .menu { animation: menu-in 0.16s ease; }
+    }
+    @keyframes menu-in {
+      from { opacity: 0; transform: translate(-50%, -4px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .js .reveal { opacity: 1; transform: none; transition: none; }
+      .feature:hover, .feature:hover::after, .btn:hover, .icon-btn:hover,
+      .btn:active, .icon-btn:active, .copy-btn:active { transform: none; }
+      .top, .feature, .btn, .icon-btn, .copy-btn { transition: none; }
+    }
+    dialog#after-download {
+      /* margin: auto restores the UA centering wiped by the `* { margin: 0 }`
+         reset below — without it the dialog sticks to the corner. */
+      margin: auto;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px 36px;
+      width: min(680px, calc(100% - 40px));
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.8);
+    }
+    dialog#after-download::backdrop { background: rgba(4, 8, 12, 0.72); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
+    dialog#after-download h2 { font-size: 1.3rem; margin-bottom: 12px; }
+    dialog#after-download p { color: var(--muted); font-size: 1rem; }
+    dialog#after-download code {
+      display: block;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 10px;
+      font-size: 0.85rem;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    dialog#after-download a { color: var(--accent); }
+    dialog#after-download form { margin-top: 18px; text-align: right; }
+    @media (max-width: 980px) {
+      .features { grid-template-columns: repeat(2, 1fr); }
+      .frun-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .features { grid-template-columns: 1fr; }
+      .hero { padding-top: 36px; }
+      .cta-actions .btn { width: 100%; }
+    }
+  </style>
+  <script>document.documentElement.classList.add("js");</script>
+</head>
+<body>
+  <!-- Inline SVG sprite: the platform glyphs reused by the download buttons and
+       the first-run cards. Zero network requests — just <use> references. -->
+  <svg xmlns="http://www.w3.org/2000/svg" class="visually-hidden" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="os-apple" viewBox="0 0 384 512">
+        <path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.7-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/>
+      </symbol>
+      <symbol id="os-windows" viewBox="0 0 448 512">
+        <path fill="currentColor" d="M0 93.7l183.6-25.3v177.4H0V93.7zm0 324.6l183.6 25.3V260.4H0v157.9zm203.8 28L448 480V268.4H203.8v177.9zm0-380.6v180.1H448V32L203.8 65.7z"/>
+      </symbol>
+      <symbol id="os-linux" viewBox="0 0 512 512">
+        <path fill="currentColor" d="M176 256c0-26.5-21.5-48-48-48s-48 21.5-48 48 21.5 48 48 48 48-21.5 48-48zm-64-16c8.8 0 16 7.2 16 16s-7.2 16-16 16-16-7.2-16-16 7.2-16 16-16zm272 16c0-26.5-21.5-48-48-48s-48 21.5-48 48 21.5 48 48 48 48-21.5 48-48zm-64-16c8.8 0 16 7.2 16 16s-7.2 16-16 16-16-7.2-16-16 7.2-16 16-16zm82.1 101.8c-3.3-7.3-7.2-12.9-12-17.2l-1.6-1.3c-6.5-4.7-12.6-5.6-17.6-3.5-6.6 2.8-12.4 7.4-12.4 15.3 0 4.5 1.6 7.7 4.3 10.5 1.8 1.8 1.5 4.3-.2 5.9-2 1.8-5.2 1.8-8 .7-4.8-2-7.9-8.3-9.4-14.8-1.5-6.9-1.1-16.5 1.6-23.6 1.7-4.5 4-7.8 6.8-10.4 4.7-4.2 11.8-6.1 21-6.1 13.2 0 26.4 3.8 37.2 10.8 8.9 5.7 15.1 13.1 18.3 20.4 5.4 12.3 3.7 28.9-4.2 39.6-5.4 7.3-12.3 11.3-19.9 12.2-14.4 1.6-29.6-3.9-45.7-17.3-5.2-4.3-11.4-6.6-17.5-6.6-9.8 0-19.1 5.4-26.2 14.9-9.3 12.6-13.2 29.5-10.7 45.6 2.1 13.5 8.5 27 18.2 36.7-5.1 8.5-4.5 19.2 1.7 28.9 4.5 7 11.4 11.1 18.9 11.1 2.2 0 4.4-.3 6.6-1 9.4-2.5 17.3-11.4 22.3-20.3 4.2 1.5 8.6 2.3 13.3 2.3 28.5 0 51.8-25.1 55-56.3 1.2-11.7-1.2-23.3-4.4-33.4zM296.4 416c-6.2 6.1-15.5 9.6-25 10.2-5.5.3-11.5-.2-16.7-1.7 6-8.4 11.7-20.4 14.6-33.4 3.3-15 2.2-28.8-2.5-39.1 8.9 5.9 20.8 9.2 33.5 9.2 2.8 0 5.6-.1 8.4-.4 0 7.7-1 14.8-3.1 20.9-3.7 10.6-7.5 17.4-10.4 22.2 2.1 1.5 4.7 2.7 7.7 3.2.8.2 1.7.3 2.6.3 6.2 0 12.5-2.5 18.9-7.2 2.7-2 5.4-3.9 8-6.1-1.7 11.1-5.1 20.3-10.3 27.9z"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="https://github.com/CrystalPlatforms/umux"><img src="assets/umux-logo.png" alt="umux logo" width="1513" height="480"></a>
+      <div class="header-actions">
+        <a class="icon-btn" href="https://github.com/CrystalPlatforms/umux" aria-label="umux on GitHub" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+        <a class="icon-btn" href="https://crystal-studio.dev" aria-label="Crystal Studio website" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <section class="hero">
+    <img class="hero-logo reveal" src="assets/umux-logo-hero.png" alt="umux — terminal workspace manager" width="1513" height="480">
+    <h1>Terminal workspaces for Linux, Windows &amp; macOS</h1>
+    <p class="pitch reveal">Group your terminals into named workspaces, split them into as many resizable panels as you need, and get a desktop notification the moment your AI CLI finishes a long-running task.</p>
+    <div class="badges reveal reveal-delay-1">
+      <img src="https://img.shields.io/github/v/release/CrystalPlatforms/umux?label=release" alt="Latest release" height="20" decoding="async">
+      <img src="https://img.shields.io/github/license/CrystalPlatforms/umux" alt="License: MIT" height="20" decoding="async">
+      <img src="https://img.shields.io/github/downloads/CrystalPlatforms/umux/total" alt="Total downloads" height="20" decoding="async">
+    </div>
+    <div class="downloads reveal reveal-delay-2">
+      <a class="btn btn-primary" data-platform="macos" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_universal.dmg"><svg class="os-ic" aria-hidden="true"><use href="#os-apple" xlink:href="#os-apple"/></svg>Download for macOS</a>
+      <a class="btn btn-primary" data-platform="windows" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_x64-setup.exe"><svg class="os-ic" aria-hidden="true"><use href="#os-windows" xlink:href="#os-windows"/></svg>Download for Windows</a>
+      <details class="dropdown">
+        <summary class="btn btn-primary"><svg class="os-ic" aria-hidden="true"><use href="#os-linux" xlink:href="#os-linux"/></svg>Download for Linux</summary>
+        <div class="menu">
+          <a data-install="AppImage" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_amd64.AppImage">.AppImage — any distro</a>
+          <a data-install=".deb" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux_1.0.4_amd64.deb">.deb — Ubuntu / Debian</a>
+          <a data-install=".rpm" href="https://github.com/CrystalPlatforms/umux/releases/latest/download/umux-1.0.4-1.x86_64.rpm">.rpm — Fedora / openSUSE</a>
+        </div>
+      </details>
+      <a class="btn btn-ghost" href="https://github.com/CrystalPlatforms/umux/releases/latest">All releases</a>
+    </div>
+
+    <figure class="demo-frame reveal reveal-delay-3">
+      <picture>
+        <source type="image/webp" srcset="assets/umux-first.webp">
+        <img src="assets/umux-first.png" alt="umux — workspaces, tabs and resizable panels" width="1596" height="898" decoding="async"
+             onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+      </picture>
+      <figcaption class="visually-hidden">umux main window — workspaces, tabs and panels</figcaption>
+    </figure>
+  </section>
+
+  <section class="features">
+    <div class="feature reveal">
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2.5"/><path d="M9.5 3.5v17"/><path d="M15.5 3.5v17"/></svg>
+        <h2>Workspaces &amp; panels</h2>
+      </div>
+      <p>One workspace per project, tabs inside it, and any tab splits into as many resizable panels as you need — with a minimum size enforced so nothing collapses. Workspaces persist across restarts and can be pinned to stay on top.</p>
+    </div>
+    <div class="feature reveal">
+      <picture>
+        <source type="image/webp" srcset="assets/umux-agent.webp">
+        <img class="feature-img" loading="lazy" decoding="async" width="1588" height="890" src="assets/umux-agent.png" alt="Agent status indicators in umux panels"
+             onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+      </picture>
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 6.6 2.6 8.6 2.6 8.6H3.4S6 15.6 6 9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+        <h2>Agent status &amp; notifications</h2>
+      </div>
+      <p>umux reads the standard OSC completion signals emitted by AI CLIs (Claude Code, Codex, Gemini CLI, Aider…) and fires a native desktop notification when a long-running task finishes. Each panel shows a live agent status — working, needs-attention, idle — detected from escape sequences and process names, never from your terminal content.</p>
+    </div>
+    <div class="feature reveal">
+      <picture>
+        <source type="image/webp" srcset="assets/umux-session.webp">
+        <img class="feature-img" loading="lazy" decoding="async" width="1588" height="890" src="assets/umux-session.png" alt="Restored umux session with workspaces and panels"
+             onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+      </picture>
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+        <h2>Session restore</h2>
+      </div>
+      <p>Close the app, come back tomorrow: your workspaces, tabs and panel layouts are restored exactly as you left them.</p>
+    </div>
+    <div class="feature reveal">
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <h2>Import from cmux</h2>
+      </div>
+      <p>Moving over from cmux? One command — <code>umux import cmux</code> — or the in-app wizard carries your workspaces, groups, working directories and tabs across. Nothing is overwritten: colliding names get a <code>from cmux</code> suffix, and cmux's own files stay read-only.</p>
+    </div>
+    <div class="feature reveal">
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <h2>Import from herdr</h2>
+        <span class="soon">Coming soon</span>
+      </div>
+      <p>On the roadmap: the same one-step import for herdr — workspaces, layout and agent sessions carried over, so switching costs you nothing.</p>
+    </div>
+    <div class="feature reveal">
+      <div class="feature-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <h2>Embedded terminal</h2>
+        <span class="soon">Coming soon</span>
+      </div>
+      <p>In the works: a true terminal surface — colors, cursor movement, alternate screen — so vim, htop and fzf render exactly right, opening your own shell (<code>$SHELL</code>; PowerShell on Windows).</p>
+    </div>
+  </section>
+
+  <section class="install-cli reveal" id="install-cli">
+    <div class="cli-inner">
+      <h2>Install the CLI</h2>
+      <p>Prefer the terminal? This drops the <code>umux</code> command-line tool into <code>~/.local/bin</code> — it reads and writes the same store as the desktop app.</p>
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="dot dot-red"></span><span class="dot dot-yellow"></span><span class="dot dot-green"></span>
+          <span class="term-title">sh</span>
+          <button class="copy-btn" type="button" data-copy aria-label="Copy the install command">Copy</button>
+        </div>
+        <pre><span class="prompt" aria-hidden="true">$ </span><code>curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh</code></pre>
+      </div>
+      <p class="note">Look before you leap: append <code>-- --dry-run</code> to preview what it would do. The CLI manages umux's saved store — it can't control a running app live yet; that's on the roadmap for a future version. macOS and Linux (x86_64). The desktop installers already carry the CLI too — details in the <a href="https://github.com/CrystalPlatforms/umux#umux-on-your-path" target="_blank" rel="noopener">README</a>.</p>
+    </div>
+  </section>
+
+  <section class="first-run reveal">
+    <h2>First run — unsigned builds</h2>
+    <p>umux is free &amp; open source and ships without a paid code-signing certificate, so your system may ask for confirmation once:</p>
+    <div class="frun-grid">
+      <div class="frun-card">
+        <h3><svg class="os-ic" aria-hidden="true"><use href="#os-apple" xlink:href="#os-apple"/></svg>macOS</h3>
+        <p>Right-click the app → <em>Open</em>, or System Settings → Privacy &amp; Security → <em>Open Anyway</em>.</p>
+      </div>
+      <div class="frun-card">
+        <h3><svg class="os-ic" aria-hidden="true"><use href="#os-windows" xlink:href="#os-windows"/></svg>Windows</h3>
+        <p>On the SmartScreen prompt choose <em>More info</em> → <em>Run anyway</em>.</p>
+      </div>
+      <div class="frun-card">
+        <h3><svg class="os-ic" aria-hidden="true"><use href="#os-linux" xlink:href="#os-linux"/></svg>Linux</h3>
+        <p>AppImage needs <code>chmod +x</code> once; .deb/.rpm install normally.</p>
+      </div>
+    </div>
+    <p><a href="https://github.com/CrystalPlatforms/umux#installation">Full installation instructions →</a></p>
+  </section>
+
+  <section class="cta reveal">
+    <div class="cta-panel">
+      <h2>Ready to run your terminals in umux?</h2>
+      <p>Free &amp; open source — no accounts, no telemetry, no cookies.</p>
+      <div class="cta-actions">
+        <a class="btn btn-primary" id="cta-download" href="https://github.com/CrystalPlatforms/umux/releases/latest"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:18px;height:18px"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>Download umux</a>
+        <a class="btn btn-ghost" href="https://github.com/CrystalPlatforms/umux" target="_blank" rel="noopener">Star on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p><a href="https://github.com/CrystalPlatforms/umux">github.com/CrystalPlatforms/umux</a> · MIT License · built with Tauri, React &amp; xterm.js</p>
+  </footer>
+
+  <dialog id="after-download">
+    <h2 id="dlg-title"></h2>
+    <div id="dlg-body"></div>
+    <form method="dialog"><button class="btn">Close</button></form>
+  </dialog>
+
+  <script>
+    (function () {
+      var dlg = document.getElementById("after-download");
+      var title = document.getElementById("dlg-title");
+      var body = document.getElementById("dlg-body");
+      function openDialog(t, html) {
+        title.textContent = t;
+        body.innerHTML = html;
+        try {
+          if (typeof dlg.showModal === "function") { dlg.showModal(); return; }
+        } catch (e) { /* fall through to the plain open attribute */ }
+        dlg.setAttribute("open", "");
+      }
+      var thanks =
+        "<p>Your download has started. We wish you'll have many productive sessions in umux, " +
+        "hope you'll become a regular. 😃</p>" +
+        '<p><a href="https://github.com/CrystalPlatforms/umux#installation" target="_blank" rel="noopener">Installation &amp; first-run notes →</a></p>';
+      var install = {
+        "AppImage":
+          "<p>No install needed — make it executable and run:</p>" +
+          "<code>chmod +x umux_1.0.4_amd64.AppImage &amp;&amp; ./umux_1.0.4_amd64.AppImage</code>",
+        ".deb":
+          "<p>Install from the downloaded file:</p>" +
+          "<code>sudo apt install ./umux_1.0.4_amd64.deb</code>",
+        ".rpm":
+          "<p>Install from the downloaded file:</p>" +
+          "<code>sudo dnf install ./umux-1.0.4-1.x86_64.rpm</code> (openSUSE: <code>zypper in</code>)",
+      };
+      document.querySelectorAll("[data-platform]").forEach(function (a) {
+        a.addEventListener("click", function () {
+          openDialog("Thanks for downloading umux! 🎉", thanks);
+        });
+      });
+      document.querySelectorAll("[data-install]").forEach(function (a) {
+        a.addEventListener("click", function () {
+          var key = a.getAttribute("data-install");
+          var extra =
+            '<p>Full guide: <a href="https://github.com/CrystalPlatforms/umux#installation" target="_blank" rel="noopener">README → Installation</a></p>';
+          openDialog("Installing umux on Linux", (install[key] || "") + extra);
+        });
+      });
+
+      // OS detection used by the CTA swap and the hero-button ordering below.
+      function detectOs() {
+        var ua = navigator.userAgent;
+        return /Win/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : "linux";
+      }
+
+      // Conversion touch: bring the visitor's own platform to the front of
+      // the hero downloads. No JS = buttons stay in their authored order.
+      var downloads = document.querySelector(".downloads");
+      if (downloads) {
+        var osBtn = downloads.querySelector('a[data-platform="' + detectOs() + '"]');
+        if (osBtn && osBtn !== downloads.firstElementChild) {
+          downloads.insertBefore(osBtn, downloads.firstElementChild);
+        }
+      }
+
+      // Scroll-reveal: hide only when JS is running (html.js), show each
+      // section as it enters the viewport; no-JS and reduced-motion users
+      // see everything instantly (CSS handles both).
+      var revealEls = document.querySelectorAll(".reveal");
+      if ("IntersectionObserver" in window) {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (en) {
+            if (en.isIntersecting) {
+              en.target.classList.add("in");
+              io.unobserve(en.target);
+            }
+          });
+        }, { threshold: 0.12, rootMargin: "0px 0px -40px 0px" });
+        revealEls.forEach(function (el) { io.observe(el); });
+      } else {
+        revealEls.forEach(function (el) { el.classList.add("in"); });
+      }
+
+      // Sticky header: gain definition once the page is actually scrolled.
+      var top = document.querySelector(".top");
+      function paintTop() {
+        if (top) top.classList.toggle("scrolled", (window.scrollY || 0) > 8);
+      }
+      window.addEventListener("scroll", paintTop, { passive: true });
+      paintTop();
+
+      // One-click copy of the CLI install command.
+      var copyBtn = document.querySelector("[data-copy]");
+      if (copyBtn) {
+        copyBtn.addEventListener("click", function () {
+          var cmd = document.querySelector(".terminal code");
+          if (!cmd) return;
+          var done = function () {
+            copyBtn.classList.add("copied");
+            copyBtn.textContent = "Copied!";
+            setTimeout(function () {
+              copyBtn.classList.remove("copied");
+              copyBtn.textContent = "Copy";
+            }, 1600);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(cmd.textContent).then(done, function () {});
+          } else {
+            try {
+              var range = document.createRange();
+              range.selectNodeContents(cmd);
+              var sel = window.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+              document.execCommand("copy");
+              sel.removeAllRanges();
+              done();
+            } catch (e) { /* clipboard unavailable — the user can still select manually */ }
+          }
+        });
+      }
+
+      // Final CTA: point the single button at the visitor's platform.
+      // Linux/unknown goes to the release page to pick a package format.
+      var cta = document.getElementById("cta-download");
+      if (cta) {
+        var os = detectOs();
+        var pick = os === "windows"
+          ? ["windows", "Download for Windows"]
+          : os === "macos"
+            ? ["macos", "Download for macOS"]
+            : null;
+        var source = pick && document.querySelector('a[data-platform="' + pick[0] + '"]');
+        if (source) {
+          cta.href = source.href;
+          cta.textContent = pick[1];
+          cta.setAttribute("data-platform", pick[0]);
+        } else {
+          cta.textContent = "Download for Linux";
+        }
+      }
+    })();
+  </script>
+
+  <!-- Cookie-free page stats (GoatCounter, free tier: non-commercial use,
+       up to 100k views/month). Account: crystalstudio.goatcounter.com -->
+  <script data-goatcounter="https://crystalstudio.goatcounter.com/count"
+          async src="https://gc.zgo.at/count.v1.js"></script>
+</body>
+</html>

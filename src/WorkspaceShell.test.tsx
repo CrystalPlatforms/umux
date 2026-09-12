@@ -39,9 +39,14 @@ const openUrlMock = vi.fn()
 const openPathMock = vi.fn()
 const revealItemInDirMock = vi.fn()
 vi.mock('@tauri-apps/plugin-opener', () => ({
-  openUrl: (...args: unknown[]) => openUrlMock(...args),
-  openPath: (...args: unknown[]) => openPathMock(...args),
-  revealItemInDir: (...args: unknown[]) => revealItemInDirMock(...args),
+  // Wrapped in Promise.resolve: the real plugin returns promises and the
+  // component chains .catch, but a bare vi.fn() with no impl returns
+  // undefined and the chain threw TypeError — which leaked across tests as
+  // unhandled errors (the red WorkspaceShell file in full-suite runs).
+  // A rejected mock (mockRejectedValueOnce) still propagates through.
+  openUrl: (...args: unknown[]) => Promise.resolve(openUrlMock(...args)),
+  openPath: (...args: unknown[]) => Promise.resolve(openPathMock(...args)),
+  revealItemInDir: (...args: unknown[]) => Promise.resolve(revealItemInDirMock(...args)),
 }))
 
 // Boundary: Tauri events. We capture the `config_fallback` handler so a test
@@ -68,7 +73,9 @@ const winMock = {
   minimize: vi.fn(),
   toggleMaximize: vi.fn(),
   close: vi.fn(),
-  destroy: vi.fn(),
+  // destroy() chains .catch in the component; a bare vi.fn() returns
+  // undefined and the chain threw an unhandled TypeError across tests.
+  destroy: vi.fn().mockResolvedValue(undefined),
   closeRequested: null as ((e: { preventDefault: () => void }) => void) | null,
   onCloseRequested: (handler: (e: { preventDefault: () => void }) => void) => {
     winMock.closeRequested = handler
