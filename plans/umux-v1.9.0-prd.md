@@ -1,60 +1,59 @@
-# umux v1.9.0 — PRD (lucide icons, spring press feedback, pinned tabs)
+# umux v1.9.0 — PRD (umux Terminal, the TUI)
 
-**Status:** planned _(icons/press discovery 2026-09-01, "umux v1.5.0, v1.6.0 plan" session; renumbered v1.6.0 → v1.9.0 on 2026-09-07 — the cross-platform shell picker took v1.6.0; builds last)_
+**Status:** planned — was v1.7.0 scope ("umux Terminal + live control"); **renumbered 2026-09-12** into its own release, after the live CLI (v1.8.0).
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
-**Scope:** last of the pre-v2.0 UI releases — lucide-react icons, spring press feedback everywhere, pinned-tab rebuild.
+**Confirmed:** 2026-08-31 ("versions cleanup" discovery) — prefix key, all-platform release gate, separate states.
 
 ## Problem Statement
 
-Every icon is a hand-rolled SVG component (17 in `WorkspaceShell`, plus three duplicated inline close SVGs and a CSS-tricked mute bell) — the set drifts from any standard and invites divergence. Press feedback is inconsistent: most buttons scale on `:active` with a plain ease-out, while menu items, tab close buttons, sidebar rows, and Settings switches give no feedback at all. And pinned tabs are only a hidden flag: a pinned tab still shows the close button and can be closed — or closed from the context menu — by accident, and it doesn't hold a stable place in the tab bar.
+umux is GUI-only, which excludes terminal-native users: people who live over SSH, work on headless machines, or simply prefer the keyboard-first multiplexer workflow.
 
 ## Solution
 
-Switch all icons to **lucide-react** (1:1 — the hand-rolled set already mimics Lucide geometry). Give **every interactive element** a springy, Apple-style press effect — labeled buttons, icon buttons, menu items, tab close, workspace/group/tab rows, switches — and make it a standing rule for all future ones. **Rebuild pinned tabs:** the pin indicator replaces the close button entirely, pinned tabs cannot be closed until unpinned, and pinned tabs always sort to the front of the tab bar.
+**umux Terminal** — a full TUI (sidebar, tabs, unlimited panes, tmux-style prefix shortcuts with **Ctrl+B**, mouse support from day one) with the same OSC agent statuses as the desktop app, usable inside any terminal, over SSH, or headless. Desktop and Terminal keep **separate saved states**, with export/import in both directions. With Core (v1.7.0) enabled, the TUI attaches to the **same living sessions** as the desktop app (story #112).
 
 ## User Stories
 
-_(story numbers match the master PRD)_
+*(story numbers match the master PRD)*
 
-- **100.** As a user, I want all app icons to come from lucide-react (1:1 replacements for the hand-rolled set), so that the icon language is consistent and maintainable.
-- **101.** As a user, I want a springy Apple-style press effect on every interactive element — buttons with icons and labels, menu items, workspace/group/tab rows, switches — so that the UI feels alive and consistent; every future interactive element ships with it. _(Standing rule, like story #84.)_
-- **102.** As a developer, I want a pinned tab to show a pin indicator in place of the close button (non-interactive; unpin from the context menu), so that pinning is visible at a glance.
-- **103.** As a developer, I want pinned tabs to be unclosable — no close button, "Close tab" disabled in the context menu — until I unpin them, so that I never lose a pinned terminal by accident.
-- **104.** As a developer, I want pinned tabs to always sit at the front of the tab bar (user order kept within the pinned and unpinned zones), so that they are always in the same place.
+- **75.** As a developer, I want `umux --term` (or `--terminal`) to launch umux Terminal — a full TUI with sidebar, tabs, and unlimited panes — so that I can use umux inside any terminal, over SSH, or on a headless machine.
+- **76.** As a developer, I want tmux-style prefix shortcuts plus mouse support in the TUI, so that panel management matches multiplexer conventions. *(Prefix key: **Ctrl+B** — confirmed 2026-08-31.)*
+- **77.** As a developer, I want agent status (working / waiting / idle) shown in the TUI sidebar and panel titles, derived from the same OSC detection as the desktop app, so that agent awareness is identical in both modes.
+- **78.** As a Terminal-first user, I want a setting (in desktop Settings and via `umux config set`) that makes plain `umux` launch Terminal instead of printing help, so that I skip a keystroke every time.
+- **79.** As a developer, I want Desktop and Terminal to keep separate saved states, so that neither mode surprises the other.
+- **80.** As a developer, I want export/import between the Desktop and Terminal states (CLI commands and UI buttons), so that I can move my setup between modes in both directions.
+- **81.** As a developer, I want the release to ship only once umux Terminal works on **all three platforms** — Linux, macOS, and Windows (ConPTY) — so that no platform receives a half-finished TUI. *(Changed 2026-08-31: the old "Linux + macOS first, Windows later" split was rejected by the PO.)*
+- **112.** *(completes here)* As a developer, I want the TUI to attach to the same Core sessions as the desktop app. *(Attach itself is v1.7.0 scope; the TUI side lands with this release.)*
 
 ## Implementation Decisions
 
-- **lucide-react** (tree-shaken, pinned version) replaces all hand-rolled SVGs: the 17 icon components in `WorkspaceShell.tsx`, the three duplicated inline close SVGs (`SettingsDialog.tsx`, `CmuxImportWizard.tsx`, the update banner), and the mute bell — which becomes a lucide `Bell`/`BellOff` pair instead of the CSS strike-through. Sizes and stroke width come from lucide props; visual output stays 1:1 where lucide has an identical shape.
-- **Press effect:** the existing `--press-scale` token is extended to the elements that lack it (`.menu-item`, `.tab-close`, workspace/group/tab rows, Settings switches) and the easing is upgraded from plain ease-out to a spring-like return per /apple-design, so every element presses and releases with the same feel. `prefers-reduced-motion` continues to disable all of it (already wired).
-- **Standing rule:** recorded in Claude's MEMORY and as story #101 — every future interactive element in umux ships with the press effect from day one.
-- **Pinned tabs:** `Tab.pinned` already exists and persists — no model change. When pinned, the close button is not rendered; a **non-interactive** pin indicator sits in its place (a span, not a disabled button). Unpinning stays in the context menu. "Close tab" is disabled (with a hint) while pinned. The tab-bar render list sorts pinned tabs before unpinned ones — stable within each zone; dragging a pinned tab into the unpinned zone is blocked, and dragging an unpinned tab before the pinned zone lands it after the pinned block.
+- **umux Terminal (TUI)** — a terminal-native frontend (Rust, no webview). Reuses PtyService and OscParser; keeps its **own** store, separate from the desktop store (decided 2026-08-28).
+- **Sessions lifetime:** closing the terminal ends its sessions — **unless Core is on** (v1.7.0), in which case the TUI was only one attached view.
+- **Launch model** — `umux --term` launches the TUI; bare `umux` prints help; a Settings/`umux config set` option flips bare `umux` to Terminal (confirmed 2026-08-31).
+- **Export/import** — Desktop ↔ Terminal state moves work via CLI commands **and** UI buttons (decided 2026-08-28).
+- Platform note: the Windows TUI rides the ConPTY path the desktop app already uses.
 
 ## Assumptions
 
-- The pin change affects **tabs only** — pinned workspaces and groups keep today's rendering.
-- Clicking the pin indicator does nothing (PO decision 2026-09-01: indicator only, unpin via context menu).
-- The unclosable rule is per-tab: closing a **whole workspace** that contains pinned tabs still works and closes them with it.
-- The pinned-first sort is a render-time ordering; the saved `order` data is not rewritten by it.
+- The TUI can reuse the PtyService/OscParser abstractions without a backend rewrite.
+- The Windows porting risk is the TUI frontend, not ConPTY itself — the desktop line already proves the transport.
 
 ## Tradeoffs Considered
 
-- **Click-to-unpin on the pin indicator** — rejected by the PO: the indicator is not a button; unpinning stays in the context menu.
-- **Keeping a disabled X on pinned tabs** — rejected by the PO: the pin takes its place ("the X shouldn't exist").
-- **Icon redesign freedom while switching libraries** — rejected: strict 1:1 swap, same shapes (PO choice).
-- **Keeping plain ease-out on the already-covered buttons** — rejected: one spring feel everywhere instead of two (PO choice, /apple-design).
+- **Shipping without the Windows TUI** — rejected by the PO (2026-08-31): the release waits until the TUI works on all three platforms, even though this delays it.
+- **Prefix-less (direct) TUI shortcuts** — rejected: they collide with programs running inside panels; tmux-style prefix + mouse chosen instead.
+- **Screen-content agent-state classification in the TUI** — rejected: agent state stays OSC-derived (plus the known-CLI process-presence check), identical to the desktop.
 
 ## Validation Strategy
 
-- **Automated:** pinned-first ordering of the tab-bar render list (pure function test); close-blocked logic (pinned tab produces no close path); type-check/build with lucide imports; no remaining hand-rolled `<svg>` in `src/`.
-- **HITL (Adam):** pin a tab — the pin icon replaces X, clicking it does nothing, context-menu "Close tab" is disabled; unpin — X returns and closing works; pinned tabs stay in front after dragging and after a restart; close a workspace with a pinned tab inside — still closes; every menu item, row, switch, and button presses with a springy return; reduced-motion on — no animation; all icons render in Settings, the import wizard, the update banner, and the mute button (Bell/BellOff states).
+- **TUI over SSH (story #75):** Adam drives umux Terminal over SSH on Ubuntu — sidebar, tabs, panes, Ctrl+B-prefixed shortcuts, mouse.
+- **Agent parity (story #77):** statuses shown in the TUI match the desktop app for the same sessions.
+- **State moves (stories #79–#80):** export/import moves setups between Desktop and Terminal in both directions; the two stores never mix on their own.
+- **Core attach (story #112):** with Core ON, the TUI and the desktop app show and steer the same live sessions.
+- **Release gate (story #81):** the TUI runs on Windows (ConPTY) with the same feature set before the release ships.
 
 ## Out of Scope
 
-- Pinning behavior changes for workspaces and groups; a tmux-style pinned zone with separators; auto-pinning new tabs.
-- Everything in the sibling patch: colors, port-click open, rename cleanup ([`umux-v1.5.0-prd.md`](./umux-v1.5.0-prd.md)).
-
-## Further Notes
-
-- The press-effect standing rule was saved to Claude's persistent MEMORY on 2026-09-01 and applies to all future umux work, not only this version.
-- Standing rule (story #84): the pinned-tab actions keep their context-menu entries; their native-menu entries arrive with the v1.8.0 menu registry.
-- Build order: v1.5.x → v1.6.0 (cross-platform shell picker, [`umux-v1.6.0-prd.md`](./umux-v1.6.0-prd.md)) → v1.7.0 → v1.8.0 → **v1.9.0 (this package — last)**. Renumbered from v1.6.0 on 2026-09-07 when the PO swapped the two packages.
+- Background daemon — v1.7.0 (umux Core); the TUI is a client of it, not its replacement.
+- Live CLI/socket surface — v1.8.0.
+- herdr importer — v2.1.0.

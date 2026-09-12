@@ -1,82 +1,76 @@
-# umux v1.7.0 — PRD (umux Terminal + live control)
+# umux v1.7.0 — PRD (umux Core + landing-page revamp)
 
-**Status:** planned — builds after v1.6.0
+**Status:** planned — the next build target. Discovered 2026-09-04 (the "umux Ecosystem" /ask + /blueprint session) as part of v2.0; **rescheduled 2026-09-12 (PO decision)** to be v1.7.0 — the first ecosystem piece to ship. Built on branch **`core`**, released from `main` like any 1.x version.
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
-**Confirmed:** 2026-08-31 ("versions cleanup" discovery) — prefix key, release gate, full live parity, herdr stays.
+**Scope:** the optional umux Core daemon (stories #105–#113) plus the landing-page revamp (story #136 — docs section and more; exact scope decided at v1.7.0 planning).
+**HITL order (PO decision 2026-09-12):** macOS and Windows first, Ubuntu after.
 
 ## Problem Statement
 
-umux is GUI-only, which excludes terminal-native users: people who live over SSH, work on headless machines, or simply prefer the keyboard-first multiplexer workflow. Meanwhile the shipped CLI (tags v1.0.3–v1.0.4) is offline-only — scripts and AI agents can inspect and edit *saved definitions*, but cannot see or steer a *running* app. And while cmux users have an import path, herdr users — the closest audience umux has — are left out.
+Closing the umux window kills every session: agents stop mid-task, long jobs die, and there is nothing to reattach to — the work existed only as long as the window did. The desktop app, the future TUI, and the CLI live as separate islands with separate lifetimes instead of views on the same running work. (And on the web, umux's landing page is a one-pager — a visitor who wants to *learn* the tool has to dig through the repo.)
 
 ## Solution
 
-v1.7.0 ships three things that share one engine:
+**umux Core** — an optional background daemon, **off by default**, that owns the terminal sessions:
 
-1. **umux Terminal** — a full TUI (sidebar, tabs, unlimited panes, tmux-style prefix shortcuts with **Ctrl+B**, mouse support from day one) with the same OSC agent statuses as the desktop app, usable inside any terminal, over SSH, or headless.
-2. **Live control** — the `umux` CLI gains live commands and a local socket API with **full parity with the running app**: anything the UI can do, the CLI/socket can do live.
-3. **herdr importer** — a one-time import of herdr's saved session state, mirroring the cmux wizard.
+- With Core on, closing every window leaves agents and long jobs alive; **`umux attach`** brings any view back.
+- A dedicated **Core section in Settings** (daemon on/off, autostart on/off, live status) styled like the import wizard.
+- Optional **autostart at login**, so a reboot never orphans the setup.
+- The **CLI drives Core headlessly** while no window is open.
+- Core ships **inside the normal installers** and updates with the app — enabling it never means installing something extra.
 
-Desktop and Terminal keep **separate saved states**, with export/import in both directions.
+With Core OFF, the desktop app behaves exactly like today — the daemon is pure opt-in. Beside the daemon, this release **expands the landing page** (docs and more — scope at planning).
 
 ## User Stories
 
-*(story numbers match the master PRD)*
+*(story numbers match the master PRD; #105–#113 formed the Core block of the old v2.0 ecosystem scope)*
 
-- **53.** As a developer, I want `umux list` / `umux status` to print workspaces, tabs, panels, and agent states as JSON, so that scripts and agents can inspect the current setup. *(v1.7.0 — live)*
-- **54.** As a developer, I want control commands (`umux new-workspace`, `umux new-tab`, `umux split`, `umux send`), so that external tooling can build and drive layouts. *(v1.7.0 — live)*
-- **55.** As an AI agent, I want the same surface exposed over a local socket API, so that I can orchestrate umux programmatically without parsing CLI text. *(v1.7.0)*
-- **87.** As a developer, I want the live CLI/socket surface to cover **everything the running app can do** — every workspace, group, tab, pane, split, rename, send, and settings action, not a curated subset — so that anything achievable in the UI is scriptable live. *(confirmed 2026-08-31)*
-- **65.** As a developer moving from herdr, I want the same wizard reading herdr's saved session state (workspaces, tabs, panes, working directories — optionally worktree checkouts and agent sessions on explicit opt-in), so that switching to umux is equally painless.
-- **75.** As a developer, I want `umux --term` (or `--terminal`) to launch umux Terminal — a full TUI with sidebar, tabs, and unlimited panes — so that I can use umux inside any terminal, over SSH, or on a headless machine.
-- **76.** As a developer, I want tmux-style prefix shortcuts plus mouse support in the TUI, so that panel management matches multiplexer conventions. *(Prefix key: **Ctrl+B** — confirmed 2026-08-31.)*
-- **77.** As a developer, I want agent status (working / waiting / idle) shown in the TUI sidebar and panel titles, derived from the same OSC detection as the desktop app, so that agent awareness is identical in both modes.
-- **78.** As a Terminal-first user, I want a setting (in desktop Settings and via `umux config set`) that makes plain `umux` launch Terminal instead of printing help, so that I skip a keystroke every time.
-- **79.** As a developer, I want Desktop and Terminal to keep separate saved states, so that neither mode surprises the other.
-- **80.** As a developer, I want export/import between the Desktop and Terminal states (CLI commands and UI buttons), so that I can move my setup between modes in both directions.
-- **81.** As a developer, I want the v1.7.0 release to ship only once umux Terminal works on **all three platforms** — Linux, macOS, and Windows (ConPTY) — so that no platform receives a half-finished TUI. *(Changed 2026-08-31: the old "Linux + macOS first, Windows later" split was rejected by the PO.)*
+- **105.** As a developer, I want Core to keep my terminal sessions alive after I close umux Desktop, so that a closed window never kills a running agent or long job.
+- **106.** As a developer, I want `umux attach` to reattach the desktop app or the CLI to Core's living sessions, so that coming back costs seconds and loses nothing.
+- **107.** As a user, I want Core OFF to leave the desktop app behaving exactly as today (sessions end when the app closes), so that the daemon is pure opt-in.
+- **108.** As a user, I want a dedicated Core section in Settings — daemon on/off, autostart on/off, and running status — styled like the import wizard, so that all ecosystem controls live in one obvious place.
+- **109.** As a user, I want Core to start automatically at login when autostart is enabled, so that the ecosystem reaches my machine even after a reboot.
+- **110.** As a developer, I want stopping Core to terminate its shells cleanly (no orphan processes) and a crashed Core's leftovers to be detected and cleaned on the next start, so that the daemon never litters my system.
+- **111.** As a developer, I want the CLI's commands to work against Core while no window is open, so that scripts and agents can drive umux headlessly. *(The full live surface completes at v1.8.0.)*
+- **112.** As a developer, I want umux Terminal (TUI) to be able to attach to the same Core sessions as the desktop app, so that both are interchangeable views on the same work. *(Store separation (v1.9.0) untouched; this story completes when the TUI ships in v1.9.0.)*
+- **113.** As a user, I want Core to ship inside the normal installers and update with the app, so that enabling it never means installing something extra.
+- **136.** As a visitor, I want an expanded umux landing page — a documentation section and more content beyond the current one-pager — so that I can learn and adopt umux without digging through the repo. *(Scope decided at v1.7.0 planning.)*
 
 ## Implementation Decisions
 
-- **umux Terminal (TUI)** — a terminal-native frontend (Rust, no webview). Reuses PtyService and OscParser; keeps its **own** store, separate from the desktop store (decided 2026-08-28). No background daemon — closing the terminal ends its sessions (daemon is v2.0). Runs on all three platforms; **the release waits until the Windows (ConPTY) TUI works** (2026-08-31).
-- **CliGateway** — a local socket server inside the running app exposing the live surface at full parity (2026-08-31) to the CLI and directly to agents; the CLI and the socket expose the same surface. Detailed design (socket path/protocol, security) at /carve time.
-- **HerdrImporter** *(deep, pure)* — same interface and parse → plan → apply pipeline as CmuxImporter; reads herdr's saved session state (unofficial format); worktree checkouts and agent sessions import only on explicit opt-in; `from herdr` collision suffix.
-- **Launch model** — `umux --term` launches the TUI; bare `umux` prints help; a Settings/`umux config set` option flips bare `umux` to Terminal (confirmed 2026-08-31).
-- **Export/import** — Desktop ↔ Terminal state moves work via CLI commands **and** UI buttons (decided 2026-08-28).
-- Platform note: Windows TUI rides the ConPTY path the desktop app already uses.
+- **SessionCore** *(deep module)* — one session-management interface with two interchangeable drivers: *in-process* (today's behavior, Core OFF) and *daemon-client* (all operations proxied to umux Core over the local socket, Core ON). Desktop and CLI become views; the UI never knows which driver is active.
+- **umux Core** *(deep module)* — headless Rust binary owning PTYs and session state: serves the **local socket API**, survives app close, optional per-OS autostart (mechanism per platform decided at /carve), clean shutdown with no orphan shells, crash-leftover cleanup on next start.
+- **Socket protocol ownership (2026-09-12):** because Core now **precedes** the live CLI, umux Core defines the local-socket protocol; the desktop CliGateway (v1.8.0) joins it. The protocol is designed extensible from day one.
+- **Settings → Core section** — daemon on/off (default off), autostart on/off, live status; the paired-devices list with revoke fills in later with the Bridge work (`development` branch).
+- **Branch model (PO decision 2026-09-12):** development happens on a long-lived **`core` branch**; releases are tagged from `main` as normal versions. Test instances run against an **isolated data directory** (separate store, socket, sessions — e.g. `~/.umux-test`) so the test daemon never touches a daily-use umux.
+- **Additive by design:** with Core never enabled, the app behaves exactly like v1.6.x.
+- **Landing page** — lives in the existing Cloudflare Pages deployment (umux.pages.dev); scope (docs structure, sections, content) decided at v1.7.0 planning with Adam.
 
 ## Assumptions
 
-- The TUI can reuse the PtyService/OscParser abstractions without a backend rewrite.
-- The Windows porting risk is the TUI frontend, not ConPTY itself — the desktop line already proves the transport.
-- herdr's `session.json` is parseable and stable enough for an unofficial importer (no supported import path is documented; the format may change without notice — fixes are best-effort, after the fact).
-- A local, per-user socket is an acceptable security boundary for the live API (no remote exposure).
+- A local, per-user socket is an acceptable security boundary (no remote exposure).
+- Cloudflare Workers/Pages free tiers keep covering the landing page (unchanged hosting).
+- Per-OS autostart mechanisms (systemd user unit / LaunchAgent / Windows autostart) are enough for story #109; exact choice at /carve.
+- The zero-cost policy holds — Core is just another binary in the existing installers.
 
 ## Tradeoffs Considered
 
-- **Background daemon in v1.7.0** — rejected: the single most complex component (autostart, crash recovery, secure socket); deferred to v2.0 (explained to the PO, 2026-08-28).
-- **Shipping v1.7.0 without the Windows TUI** — rejected by the PO (2026-08-31): the release waits until the TUI works on all three platforms, even though this delays it.
-- **A curated live-command subset in v1.7.0** — rejected by the PO (2026-08-31): full parity chosen — anything the UI can do, the live CLI/socket must do.
-- **herdr importer earlier than v1.7.0** — rejected: unofficial format; it ships alongside the TUI (re-confirmed 2026-08-31).
-- **Prefix-less (direct) TUI shortcuts** — rejected: they collide with programs running inside panels; tmux-style prefix + mouse chosen instead.
-- **Screen-content agent-state classification in the TUI** — rejected: agent state stays OSC-derived (plus the known-CLI process-presence check), identical to the desktop.
+- **Background daemon** — was rejected on 2026-08-28 as the single most complex component and deferred; **superseded 2026-09-12** — the PO pulled it forward as v1.7.0, accepting the complexity to get attach-first.
+- **Core mandatory for the desktop app** — rejected (2026-09-04): the app stays fully standalone; Core optional and off by default.
+- **Autostart always-on** — rejected (2026-09-04): user-controlled switches in the dedicated Core Settings section.
+- **Building Core on the `development` branch** — superseded 2026-09-12: Core gets its own `core` branch; the `development` branch remains reserved for the Bridge/PWA ecosystem finale.
 
 ## Validation Strategy
 
-- **TUI over SSH (story #75):** Adam drives umux Terminal over SSH on Ubuntu — sidebar, tabs, panes, Ctrl+B-prefixed shortcuts, mouse.
-- **Agent parity (story #77):** statuses shown in the TUI match the desktop app for the same sessions.
-- **Live control (stories #53–#55, #87):** with the app running, `umux status`/`send`/split steer it live; the socket API returns the same data; every app action is reachable through the CLI/socket (full parity check against the action list).
-- **herdr import (story #65):** herdr import brings in Adam's Ubuntu workspaces; herdr files untouched (checksum before/after); collisions suffixed.
-- **State moves (stories #79–#80):** export/import moves setups between Desktop and Terminal in both directions; the two stores never mix on their own.
-- **Release gate (story #81):** the TUI runs on Windows (ConPTY) with the same feature set before the release ships.
-- **HerdrImporter:** unit tests against committed fixture files — happy path, missing/extra fields, collisions, malformed input, read-only proof (same suite structure as CmuxImporter).
+- **Core ON:** Adam starts an agent, closes every umux window — the agent keeps running (`umux status` answers against Core, output still growing); `umux attach` restores the view.
+- **Core OFF:** everything matches v1.6.x behavior exactly.
+- **Lifecycle:** stopping Core leaves zero orphan shells (process audit); a hard-killed Core leaves no garbage after the next start; autostart actually launches Core after a reboot.
+- **Settings:** the Core section's toggles persist; status reflects reality.
+- **HITL order:** macOS and Windows first, then Ubuntu (PO decision 2026-09-12).
+- **Landing page:** the new docs render on umux.pages.dev and the deploy stays zero-cost.
 
 ## Out of Scope
 
-- Background daemon / `umux attach` / headless CLI with the window closed — v2.0.
-- Plugin system and the scriptable browser pane — v2.0.
-- Live synchronization with herdr — import is strictly one-time.
-
-## Further Notes
-
-- Build order: v1.7.0 → v1.8.0 → v1.9.0 (kept per the master Roadmap, 2026-08-31).
-- The 2026-08-28 discovery notes ("umux upgrade" session) were removed in the 2026-08-31 plans/ cleanup; their decisions live in the master PRD and this file.
+- The rest of the ecosystem (Bridge, PWA, NativeApps) — `development` branch, ships as v3.0.0 (documented in the Ecosystem PRD there).
+- The TUI itself and full live-CLI parity — v1.9.0 and v1.8.0 respectively.
+- Plugins, marketplace, browser pane — Beyond the Ecosystem. Cross-machine synchronization — out of scope (remote access is control, not sync).
