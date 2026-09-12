@@ -1,7 +1,7 @@
-# umux v2.0.0 — PRD — umux Ecosystem
+# umux v3.0.0 — PRD — umux Ecosystem
 
-**Status:** discovered 2026-09-04 (dedicated /ask session, 30 questions in 4 series + /blueprint component sketch) — replaces the former outline of the same file. Implementation starts **after v1.5.0–v1.9.0**, on a long-lived `development` branch, no deadline.
-**Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins. Story numbering below continues the master's (#105+).
+**Status:** discovered 2026-09-04 (dedicated /ask session, 30 questions in 4 series + /blueprint component sketch). **Renamed from `umux-v2.0.0-prd.md` and rescheduled to v3.0.0 on 2026-09-12** (PO decision): umux Core left the ecosystem (ships as **v1.7.0** from `main`, branch `core`) and **umux NativeApp for Android & iOS** joined it. Implementation on this long-lived `development` branch, unversioned until done; the finished ecosystem ships as **v3.0.0** — no deadline.
+**Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins. Story numbering continues the master's (#105+); stories #130–#140 (SSH View, multi-window, accent colors) belong to the main-roadmap releases and are documented there.
 
 ## Problem Statement
 
@@ -9,30 +9,24 @@ Closing the umux window kills every session: agents stop mid-task, long jobs die
 
 ## Solution
 
-**umux Ecosystem** — five named pieces that turn umux from "an app" into a workspace platform:
+**umux Ecosystem** — six named pieces that turn umux from "an app" into a workspace platform:
 
 1. **umux Desktop** — the existing app; gains the ability to run attached to Core.
 2. **umux Terminal** — the existing TUI; same ability.
-3. **umux Core** — an optional background daemon (off by default) that owns the terminal sessions. With Core on, closing every window leaves agents and long jobs alive; `umux attach` brings any view back; the CLI and TUI drive the same live sessions while no window is open.
+3. **umux Core** — an optional background daemon (off by default) that owns the terminal sessions. With Core on, closing every window leaves agents and long jobs alive; `umux attach` brings any view back; the CLI and TUI drive the same live sessions while no window is open. *(Since 2026-09-12 Core ships earlier, as v1.7.0 from `main` — see below.)*
 4. **umux Application** — an installable PWA: sign in (Google or GitHub), see your paired machines and their workspaces, tabs, and agent statuses, watch an agent's output read-only ("like on the computer"), send a message to a running agent, and get a push notification when an agent finishes or waits for approval.
 5. **umux Bridge** — the remote-access link between the PWA and a paired machine: one-time-code pairing, device list with revoke, one-year pairing expiry, relayed through Cloudflare with TLS so the machine opens no inbound ports.
+6. **umux NativeApp (Android & iOS)** — the ecosystem as native phone apps, with the same capabilities as the PWA; Android ships as a **sideloaded `.apk` from GitHub Releases**, iOS at the same moment (channel in discovery). Both prototyped by the PO on 2026-09-12.
 
 The cloud is a dumb cable joiner: it relays encrypted traffic and holds accounts/pairings — never message content. No plugins, no marketplace, no browser pane (all moved to **Beyond 2.0**).
 
 ## User Stories
 
-### umux Core (daemon) — v2.0
-105. As a developer, I want Core to keep my terminal sessions alive after I close umux Desktop or umux Terminal, so that a closed window never kills a running agent or long job.
-106. As a developer, I want `umux attach` to reattach Desktop, Terminal, or the CLI to Core's living sessions, so that coming back costs seconds and loses nothing.
-107. As a user, I want Core OFF to leave the desktop app behaving exactly as today (sessions end when the app closes), so that the daemon is pure opt-in.
-108. As a user, I want a dedicated Core section in Settings — daemon on/off, autostart on/off, and running status — styled like the import wizard, so that all ecosystem controls live in one obvious place.
-109. As a user, I want Core to start automatically at login when autostart is enabled, so that Bridge/PWA reach my machine even after a reboot.
-110. As a developer, I want stopping Core to terminate its shells cleanly (no orphan processes) and a crashed Core's leftovers to be detected and cleaned on the next start, so that the daemon never litters my system.
-111. As a developer, I want the CLI's live commands to work against Core while no window is open, so that scripts and agents can drive umux headlessly.
-112. As a developer, I want umux Terminal (TUI) to be able to attach to the same Core sessions as the desktop app, so that both are interchangeable views on the same work. *(Store separation from v1.7.0 is untouched; this is about live sessions only.)*
-113. As a user, I want Core to ship inside the normal installers and update with the app, so that enabling it never means installing something extra.
+### umux Core (daemon) — moved out on 2026-09-12
 
-### umux Application (PWA) — v2.0
+> **umux Core (former stories #105–#113) left the ecosystem on 2026-09-12** — it ships as **v1.7.0** from `main` (branch `core`); see the master PRD there. This branch carries the ecosystem docs only.
+
+### umux Application (PWA) — v3.0.0
 114. As a user, I want to install the umux Application on my phone straight from the browser (PWA), so that the ecosystem travels with me without an app store.
 115. As a user, I want to sign in with Google or GitHub, so that I don't create yet another password.
 116. As a user, I want to see my paired machines with their workspaces, tabs, and agent statuses (or "offline"), so that I know what is running from anywhere.
@@ -42,13 +36,20 @@ The cloud is a dumb cable joiner: it relays encrypted traffic and holds accounts
 120. As a user, I want a push notification when an agent finishes or waits for my approval, so that I come back exactly when needed.
 121. As a user, I want everything in the PWA read-only except the single "send message to agent" action, so that a stolen session can never type shell commands.
 
-### umux Bridge (remote access) — v2.0
+### umux Bridge (remote access) — v3.0.0
 122. As a user, I want to pair a machine with my account using a one-time code shown on the machine and entered in the PWA, so that only I can reach my computers.
 123. As a user, I want to see and revoke paired devices in Settings, so that a lost device can be cut off instantly.
 124. As a user, I want pairings to expire after one year, so that stale authorizations don't live forever. *(Re-pair to continue.)*
 125. As a user, I want all remote traffic relayed through Cloudflare over TLS with the machine holding no open inbound ports, so that remote access is safe from any network.
 126. As a maintainer, I want the relay to store no message content (pass-through only; accounts and pairings are the only persisted data), so that the privacy-friendly story stays true.
 127. As a maintainer, I want accounts limited to 3 paired machines, so that free-tier limits are protected from abuse.
+
+### umux NativeApp (Android + iOS) — v3.0.0 — added 2026-09-12
+
+> **Prototypes exist (2026-09-12, built by the PO):** Android — native **Kotlin/Compose** project generated in Google AI Studio (Splash, Workspaces + details, Notifications, Settings; Google/GitHub/Apple sign-in assets); iOS — **SwiftUI** project built in Xcode (the same views; official Apple components with Liquid Glass, iOS 26+; umux-green accent). Both carry mock data only and mirror the PWA scope. **Both ship at the same moment.** The prototypes live in the [`NativeApps/`](../NativeApps/) folder of this branch.
+
+141. As a user, I want the umux NativeApp for Android — the same capabilities as the PWA (Google/GitHub sign-in, paired machines and their statuses, read-only agent output, message-to-agent, push) as a native Kotlin app — installed as a **sideloaded `.apk` from GitHub Releases**, so the ecosystem lives on my phone without any store.
+142. As a user, I want the umux NativeApp for iOS with the same functionality, **shipped at the same moment as Android**; distribution is **in discovery** — App Store/TestFlight/push require the $99/year Apple Developer Program, and the only free path today is a 7-day personal sideload without push ([Apple: compare memberships](https://developer.apple.com/support/compare-memberships/)). *(PO, 2026-09-12: iOS is "planned — in discovery", not rejected.)*
 
 ## Implementation Decisions
 
@@ -75,6 +76,7 @@ The cloud is a dumb cable joiner: it relays encrypted traffic and holds accounts
 **Frontend (main repo):**
 
 6. **Settings → Core section** — Import-wizard-style section: daemon on/off (default off), autostart on/off, live status, paired-devices list with revoke.
+7. **umux NativeApp (Android + iOS)** — Native Bridge clients: Android in **Kotlin/Compose** (prototype generated in Google AI Studio, 2026-09-12), iOS in **SwiftUI** (prototype built in Xcode, 2026-09-12; official Apple components + Liquid Glass). Same capabilities as the PWA (#114–#121); the prototypes carry mock data — the real data plane arrives with Bridge. Architecture and the shared Bridge-protocol binding at /carve. Distributed as a sideloaded APK (Android); iOS channel in discovery ($99/yr program vs 7-day sideload).
 
 ### Key data flows (new in v2.0)
 - **Remote view:** PTY output → OscParser/AgentMonitor → status + bounded tail → Core → BridgeAgent → relay (WSS) → PWA.
@@ -121,19 +123,19 @@ The cloud is a dumb cable joiner: it relays encrypted traffic and holds accounts
 Adam tests on **Windows 11, macOS, and Ubuntu** using a **test instance** built from the `development` branch with the isolated data directory; the daily-use umux must be untouched throughout.
 
 ### Per-user-story verification
-- **Core (#104–#112):** with Core ON, close the desktop mid-agent-run → the agent keeps running (`umux status` live, output still growing); `umux attach` restores the view; with Core OFF everything matches v1.9.x behavior; clean stop leaves zero orphan shells (process audit per platform); a hard-killed Core leaves no garbage after the next start; autostart actually launches Core after a reboot on each OS; the Core Settings section's toggles persist.
-- **PWA (#113–#120):** installable to the phone home screen; sign-in works with both Google and GitHub; machines/workspaces/statuses match what the desktop shows, including "offline" for a sleeping machine; the read-only view shows the same content as the panel; sent messages appear in the agent session; a push arrives on finish and on waiting; the protocol contains no terminal-input or command message type (enforced by tests over BridgeAgent's codec).
-- **Bridge (#121–#126):** an unpaired device cannot connect; a revoked device is cut off within seconds; expiry enforced (TTL shortened in a test environment); relay code review confirms no content persistence; a fourth machine is refused with a clear message.
+- **PWA (#114–#121):** installable to the phone home screen; sign-in works with both Google and GitHub; machines/workspaces/statuses match what the desktop shows, including "offline" for a sleeping machine; the read-only view shows the same content as the panel; sent messages appear in the agent session; a push arrives on finish and on waiting; the protocol contains no terminal-input or command message type (enforced by tests over BridgeAgent's codec).
+- **Bridge (#122–#127):** an unpaired device cannot connect; a revoked device is cut off within seconds; expiry enforced (TTL shortened in a test environment); relay code review confirms no content persistence; a fourth machine is refused with a clear message.
+- **NativeApp (#141–#142):** the Android `.apk` installs by sideload and mirrors the PWA end to end (sign-in, machines, read-only output, message, push); iOS is verified on its shipping channel once distribution discovery lands; both apps ship at the same moment.
+*(umux Core verification moved with the story set — see the v1.7.0 docs on `main`.)*
 
 ### Component "done" criteria
-- **SessionCore:** unit tests over the interface with a fake driver + integration tests with both drivers proving identical observable behavior for every operation.
-- **umux Core:** integration tests — spawn, write, resize, close, clean shutdown, crash-recovery scan; no orphan processes after every path.
+- **SessionCore / umux Core:** done-criteria moved with them to v1.7.0 (see the v1.7.0 docs on `main`).
 - **AgentMonitor:** unit tests with fixed byte fixtures — each state transition, tail bounds, push-trigger conditions.
 - **BridgeAgent:** unit tests over the codec (whitelist exhaustive; unknown message types rejected).
 - **Relay/Auth:** integration tests against a staging Worker — OAuth both providers, pairing happy path + wrong code + expired + revoked, machine limit enforced, relay forwards bytes without storing them.
 
-### Acceptance threshold (v2.0.0)
-Adam, with test instances on all three machines: starts an agent on the Mac, closes every umux window, leaves home, opens the PWA on his phone, sees the agent still running, reads its output, sends it a message, receives a push when it finishes, and — back at the Mac — `umux attach` restores everything. On Windows, with Core never enabled, umux behaves exactly like v1.9.x. Monthly Cloudflare usage stays within the free tier.
+### Acceptance threshold (v3.0.0)
+Adam, with test instances on all three machines: starts an agent on the Mac, closes every umux window, leaves home, opens the PWA on his phone, sees the agent still running, reads its output, sends it a message, receives a push when it finishes, and — back at the Mac — `umux attach` restores everything. On his phone the NativeApps mirror the PWA (Android by `.apk` sideload; iOS on its shipping channel). On Windows, with Core never enabled, umux behaves exactly like the v1.x app. Monthly Cloudflare usage stays within the free tier.
 
 ## Out of Scope
 
@@ -143,12 +145,12 @@ Adam, with test instances on all three machines: starts an agent on the Mac, clo
 - Cross-machine synchronization of workspaces (Bridge is remote control, not sync).
 - Full remote terminal (typing shell commands from the PWA) and multiple simultaneous remote viewers driving the same machine.
 - End-to-end encryption (future version); chat-extraction agent view (future version).
-- Native mobile apps (PWA only); sharing machines between accounts; self-hosted or non-Cloudflare relay.
+- ~~Native mobile apps (PWA only)~~ — **superseded 2026-09-12:** umux NativeApp for Android & iOS is ecosystem scope (#141–#142). Sharing machines between accounts and self-hosted or non-Cloudflare relays stay out.
 - Any paid component (certificates, hosting, auth vendors).
 
 ## Further Notes
 
-- Roadmap position: after v1.9.0; **no deadline**; the `development` branch is created when v2.0 work actually starts — nothing changes on `main` today.
+- Roadmap position: the ecosystem is the **v3.0.0** finale (since 2026-09-12; formerly v2.0.0); **no deadline**; work happens on this `development` branch — `main` carries only the 1.x releases plus v1.7.0 (umux Core, branch `core`).
 - Names are working names; final naming may adjust before release.
 - Deep modules (SessionCore, AgentMonitor, BridgeAgent codec) and the per-OS autostart mechanisms get their detailed design at /carve time.
 - Discovery trail: /ask session 2026-09-04 (Q1–Q30), /blueprint component sketch same day; the former outline in this file was replaced by this PRD.
