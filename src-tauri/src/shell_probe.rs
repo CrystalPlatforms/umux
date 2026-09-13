@@ -282,11 +282,6 @@ fn silent_reg() -> std::process::Command {
     c
 }
 
-#[cfg(not(windows))]
-fn silent_reg() -> std::process::Command {
-    std::process::Command::new("reg")
-}
-
 /// Run every probe for the current platform and return the raw results in
 /// probe order (PATH scan first, then the platform extras). Raw only — the
 /// TS ShellDetector owns ranking, dedup, and display names (#77).

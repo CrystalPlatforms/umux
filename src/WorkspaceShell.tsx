@@ -658,35 +658,61 @@ export function WorkspaceShell() {
 
   // --- Sidebar resize (HITL 2026-08-30) --------------------------------------
   // The sidebar's right edge is a drag handle: the user widens/narrows it
-  // (collapse/expand stays a separate gesture). Width is RUNTIME-ONLY (like
-  // collapse itself): null = the CSS default. Floor is the default width
+  // (collapse/expand stays a separate gesture). Floor is the default width
   // (narrower never helps — that's what collapse is for), ceiling ~3/4 of
   // the window so the terminal area always keeps a working slice.
+  // Quickupdate 2026-09-12: the width now PERSISTS — the drag still writes
+  // local state only (per-move save_settings would hammer the disk), and
+  // applySettings saves it once on drag end; load_settings seeds it back on
+  // boot. null = the CSS default.
   const [sidebarWidth, setSidebarWidth] = useState<number | null>(null)
+  // (The settings→width sync effect lives right after applySettings below —
+  // `settings` is declared later in this component and the effect's dependency
+  // array is read during render.)
   const [resizingSidebar, setResizingSidebar] = useState(false)
   const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  // The drag's LIVE width, updated on every pointermove — the save on
+  // release reads THIS, not the state closure, so the persisted value is
+  // always the last-computed width no matter how React batched renders
+  // (quickupdate round 2: a hitl run saw the width come back null).
+  const sidebarLiveWidthRef = useRef<number | null>(null)
   const SIDEBAR_MIN_WIDTH = 240
   const sidebarMaxWidth = () => Math.floor(window.innerWidth * 0.75)
+  // Applied form: a width dragged in a larger window must never eat a
+  // smaller one after a restart — clamp to the live min/max at render time.
+  const appliedSidebarWidth =
+    sidebarWidth != null
+      ? Math.min(Math.max(sidebarWidth, SIDEBAR_MIN_WIDTH), sidebarMaxWidth())
+      : null
   const onSidebarResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
     sidebarDragRef.current = {
       startX: e.clientX,
-      startWidth: sidebarWidth ?? SIDEBAR_MIN_WIDTH,
+      startWidth: appliedSidebarWidth ?? SIDEBAR_MIN_WIDTH,
     }
+    // No move yet — a bare click on the handle saves nothing.
+    sidebarLiveWidthRef.current = null
     setResizingSidebar(true)
   }
   const onSidebarResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = sidebarDragRef.current
     if (drag == null) return
-    const next = drag.startWidth + (e.clientX - drag.startX)
-    setSidebarWidth(Math.min(Math.max(next, SIDEBAR_MIN_WIDTH), sidebarMaxWidth()))
+    const next = Math.min(
+      Math.max(drag.startWidth + (e.clientX - drag.startX), SIDEBAR_MIN_WIDTH),
+      sidebarMaxWidth(),
+    )
+    sidebarLiveWidthRef.current = next
+    setSidebarWidth(next)
   }
   const onSidebarResizeEnd = (e: React.PointerEvent<HTMLDivElement>) => {
     if (sidebarDragRef.current == null) return
     sidebarDragRef.current = null
+    const width = sidebarLiveWidthRef.current
+    sidebarLiveWidthRef.current = null
     setResizingSidebar(false)
+    if (width != null) applySettings({ sidebarWidth: width })
     try {
       e.currentTarget.releasePointerCapture(e.pointerId)
     } catch {
@@ -1351,6 +1377,37 @@ export function WorkspaceShell() {
       setPortsTip(null)
     }
   }
+
+  // Quickupdate 2026-09-12: the dragged sidebar width persists in
+  // settings.json — load_settings seeds the drag state once the boot fetch
+  // resolves. (Placed here because `settings` is declared above; the drag
+  // handlers reference applySettings, a later binding, only at event time.)
+  useEffect(() => {
+    setSidebarWidth(settings.sidebarWidth)
+  }, [settings.sidebarWidth])
+
+  // Ref-stable applySettings for DEFERRED saves: a timeout closure must
+  // merge into the LATEST settings, never the render that scheduled it (a
+  // toggle made inside the debounce window would otherwise be clobbered).
+  const applySettingsRef = useRef(applySettings)
+  applySettingsRef.current = applySettings
+
+  // Quickupdate round 3 — belt and suspenders: the drag-end save depends on
+  // pointerup reaching the handle (a HITL run on macOS/WKWebView saw the
+  // width visual change but never persist). This watcher persists from the
+  // STATE instead: any width the user actually SAW is saved ~400ms after
+  // the last move, whatever the pointer events did. Widths equal to the
+  // saved one (boot restore, drag back) never write; an immediate drag-end
+  // save re-runs this effect and cancels the pending debounce, so a normal
+  // drag still writes exactly once.
+  useEffect(() => {
+    if (sidebarWidth == null || sidebarWidth === settings.sidebarWidth) return
+    const t = window.setTimeout(() => {
+      applySettingsRef.current({ sidebarWidth })
+    }, 400)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarWidth, settings.sidebarWidth])
 
   // The Settings footnote's settings.json mention is a LINK: clicking it
   // opens the file with the platform's default editor (backend command).
@@ -2718,7 +2775,7 @@ export function WorkspaceShell() {
           against is-collapsed's width: 0. */}
       <aside
         className={collapsed ? 'sidebar is-collapsed' : resizingSidebar ? 'sidebar is-resizing' : 'sidebar'}
-        style={!collapsed && sidebarWidth != null ? { width: sidebarWidth } : undefined}
+        style={!collapsed && appliedSidebarWidth != null ? { width: appliedSidebarWidth } : undefined}
         onContextMenu={(e) => openMenu(e, false)}
         onMouseDown={(e) => {
           if (isMenuPress(e)) openMenu(e, false)
@@ -2736,7 +2793,8 @@ export function WorkspaceShell() {
         }}
       >
         {/* Drag handle on the right edge (HITL 2026-08-30): widen/narrow the
-            sidebar. Separate gesture from collapse/expand; runtime-only. */}
+            sidebar. Separate gesture from collapse/expand; the width saves
+            to settings.json on release (quickupdate 2026-09-12). */}
         {!collapsed && (
           <div
             className="sidebar-resizer"
@@ -2756,7 +2814,7 @@ export function WorkspaceShell() {
             follows a dragged width so rows use the full sidebar. */}
         <div
           className="sidebar-inner"
-          style={!collapsed && sidebarWidth != null ? { width: sidebarWidth } : undefined}
+          style={!collapsed && appliedSidebarWidth != null ? { width: appliedSidebarWidth } : undefined}
         >
           <div
             className="sidebar-header"
@@ -3170,12 +3228,17 @@ export function WorkspaceShell() {
                             </span>
                           )
                         })()}
-                      {/* #81 (v1.6.0): one line per tab — chip + folder. Every
-                          tab gets a line, duplicates never merge. The folder
-                          shows its TAIL (parent/target, formatFolderTail) so
-                          the row reads "which folder" — the full path lives on
-                          the tooltip; clicking the folder opens it in the
-                          system file explorer (opener plugin, HITL round). */}
+                      {/* #81 (v1.6.0): chip + folder lines under the row.
+                          Agent status ON → every tab keeps its own line and
+                          its own chip (nothing merges — each line carries
+                          that tab's live status). Agent status OFF → tabs
+                          sharing a folder merge into ONE line (quickupdate
+                          2026-09-12, Adam). A chip-only line (SSH / no cwd)
+                          always stays per tab. The folder shows its TAIL
+                          (parent/target, formatFolderTail) so the row reads
+                          "which folder" — the full path lives on the
+                          tooltip; clicking the folder opens it in the system
+                          file explorer (opener plugin, HITL round). */}
                       {settings.showTabFolders &&
                         state.openIds.includes(entry.workspace.id) &&
                         (() => {
@@ -3186,6 +3249,7 @@ export function WorkspaceShell() {
                             state,
                             statuses,
                             settings.sessionRestoreEnabled,
+                            settings.agentStatusEnabled,
                           )[entry.workspace.id]?.map((line) => (
                             <span
                               key={line.tabId}

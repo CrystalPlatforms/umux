@@ -7,10 +7,11 @@
 // notification events; no payloads; no commands, output, names, or paths
 // can ever leave the machine.
 //
-// Always on with no Settings switch (HITL decision on #27); the
-// `analyticsEnabled` field in settings.json is the kill switch — set it to
-// false and umux never initializes the SDK (checked BEFORE init: zero
-// network calls). Analytics failure of any kind is logged and swallowed.
+// Always on with NO flag anywhere (quickupdate 2026-09-12, Adam — supersedes
+// the old analyticsEnabled kill switch, which is gone from the settings
+// schema on both sides): the Aptabase plugin registers on every startup and
+// nothing can turn it off. Analytics failure of any kind is logged and
+// swallowed.
 
 /// The Aptabase app key (public by design — it identifies the app, not the
 /// user). `A-EU-…` routes events to the EU datacenter.

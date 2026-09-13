@@ -118,6 +118,7 @@ fn list_desk_prints_the_saved_store_as_json() {
                 name: None,
                 pinned: None,
                 color: None,
+                shell: None,
             }],
             pinned: None,
             group_id: None,
@@ -297,6 +298,7 @@ fn split_turns_the_first_tabs_leaf_into_two_panels() {
                 name: Some("Tab 1".into()),
                 pinned: None,
                 color: None,
+                shell: None,
             }],
             ..Default::default()
         }],
@@ -347,6 +349,7 @@ fn split_vertical_flag_stacks_the_panels() {
                 name: Some("Tab 1".into()),
                 pinned: None,
                 color: None,
+                shell: None,
             }],
             ..Default::default()
         }],
@@ -396,6 +399,7 @@ fn split_again_subdivides_the_leftmost_pane() {
                 name: Some("Tab 1".into()),
                 pinned: None,
                 color: None,
+                shell: None,
             }],
             ..Default::default()
         }],

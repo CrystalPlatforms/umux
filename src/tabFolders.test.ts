@@ -1,14 +1,17 @@
-// tabFolders — per-tab folder lines for workspace rows (v1.6.0 / #81).
+// tabFolders — folder lines for workspace rows (v1.6.0 / #81).
 //
 // Assumptions encoded:
 //  - Input: a WorkspaceState with open workspaces, the live per-panel status
-//    map (same shape the workspace-row chips read), and the
-//    session-restore flag (a panel without restore has no saved cwd to show).
-//  - Output: per open workspace, EXACTLY one line per tab (never merged —
-//    duplicate folders stay separate lines, explicit 2026-08-31 decision):
-//    { tabId, panelId, folder, status }. The panel speaking for a tab is its
-//    focused panel when the tab is active, otherwise its first panel (the
-//    same focus rule the branch labels use). No agent → status 'idle'.
+//    map (same shape the workspace-row chips read), the session-restore flag
+//    (a panel without restore has no saved cwd to show), and the agent-status
+//    flag. The panel speaking for a tab is its focused panel when the tab is
+//    active, otherwise its first panel (the same focus rule the branch
+//    labels use). No agent → status 'idle'.
+//  - Output per open workspace, TWO modes (quickupdate round 2, Adam):
+//    agent status ON (default) → EXACTLY one line per tab, nothing merges —
+//    each line carries its tab's live chip; agent status OFF → one line per
+//    DISTINCT folder (tabs sharing a folder merge at the folder's first tab
+//    position), chip-only lines never merge.
 //  - SSH-backed panels have no local folder → folder null (chip-only line).
 //  - NOT tested here: rendering (WorkspaceShell) and live cwd snapshots.
 
@@ -43,7 +46,8 @@ const ws1: Workspace = {
 }
 
 describe('tabFolderLines', () => {
-  it('renders exactly one line per tab — duplicates NOT merged (#81)', () => {
+  // Agent status ON (the default): every tab keeps its own line and chip.
+  it('renders exactly one line per tab when agent status is ON (nothing merges)', () => {
     const lines = tabFolderLines(state([ws1]), {}, true)['ws-1']
 
     expect(lines).toHaveLength(4)
@@ -79,6 +83,31 @@ describe('tabFolderLines', () => {
     const lines = tabFolderLines(state([ws1]), {}, true)['ws-1']
 
     expect(lines[3]).toMatchObject({ tabId: 't-4', folder: null })
+  })
+
+  // Agent status OFF: pure folder names — duplicates merge (quickupdate
+  // round 2, supersedes never-merge).
+  it('merges tabs sharing a folder into ONE line when agent status is OFF', () => {
+    const lines = tabFolderLines(state([ws1]), {}, true, false)['ws-1']
+
+    // t-1 and t-2 both sit in /repo → one /repo line; t-3 (SSH) and t-4 (no
+    // cwd) keep their own chip-only lines.
+    expect(lines).toHaveLength(3)
+    expect(lines.filter((l) => l.folder === '/repo')).toHaveLength(1)
+  })
+
+  it('the merged line sits at the folder\'s FIRST tab position', () => {
+    const lines = tabFolderLines(state([ws1]), {}, true, false)['ws-1']
+
+    expect(lines.map((l) => l.tabId)).toEqual(['t-1', 't-3', 't-4'])
+    expect(lines[0]).toMatchObject({ tabId: 't-1', panelId: 'p-1', folder: '/repo' })
+  })
+
+  it('chip-only lines never merge even when folders dedupe', () => {
+    const lines = tabFolderLines(state([ws1]), {}, true, false)['ws-1']
+
+    expect(lines[1]).toMatchObject({ tabId: 't-3', folder: null })
+    expect(lines[2]).toMatchObject({ tabId: 't-4', folder: null })
   })
 
   it('with session restore off no saved cwd poses as the folder', () => {

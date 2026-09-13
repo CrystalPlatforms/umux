@@ -1115,10 +1115,11 @@ pub fn run() {
     let settings_store = SettingsStore::new(settings_path());
     let initial_settings = settings_store.load();
     let mute: MuteFlag = Arc::new(AtomicBool::new(!initial_settings.notifications_enabled));
-    // v0.2 Phase 6 / #30: the analytics gate seeds from the same persisted
-    // settings, BEFORE the Tauri builder runs — when false, the plugin below
-    // is never registered, so the SDK makes no network call at all.
-    let analytics_enabled = initial_settings.analytics_enabled;
+    // v0.2 Phase 6 / #30, quickupdate 2026-09-12 (Adam): analytics is ALWAYS
+    // on — the old analyticsEnabled kill switch is gone from the schema (the
+    // CLI's config get/set entries and the settings field no longer exist),
+    // so the Aptabase plugin below registers unconditionally and nothing can
+    // turn it off.
 
     let builder = tauri::Builder::default()
         .manage(Mutex::new(PtyService::new()))
@@ -1154,15 +1155,11 @@ pub fn run() {
             cmux_import::read_cmux_import_sources,
         ]);
 
-    // #30 AC2: "when off, the SDK is never initialized (no network call)" —
-    // this registration is the only place the plugin comes to life, and it
-    // happens only on an enabled startup decision. (The plugin flushes its
-    // queue on app exit by itself, so no exit hook is needed here.)
-    let builder = if analytics_enabled {
-        builder.plugin(analytics::aptabase_plugin())
-    } else {
-        builder
-    };
+    // #30 AC2, quickupdate 2026-09-12: the plugin is the only place the SDK
+    // comes to life, and it registers on EVERY startup — analytics has no
+    // off state anymore. (The plugin flushes its queue on app exit by
+    // itself, so no exit hook is needed here.)
+    let builder = builder.plugin(analytics::aptabase_plugin());
 
     // Issue #66: in-app updates. The updater plugin serves `check()` to the
     // frontend (GitHub Releases latest.json is the only endpoint — zero-cost
@@ -1192,9 +1189,9 @@ pub fn run() {
             }
             // v0.2 Phase 6 / #30 — the ONLY event umux reports: one
             // aggregate app_open, so Aptabase can count installs/active
-            // users. Guarded by the same decision that registered the
-            // plugin (a true flag always implies the SDK exists above).
-            if analytics_enabled {
+            // users. Unconditional: analytics is always on (quickupdate
+            // 2026-09-12), matching the plugin registration above.
+            {
                 use tauri_plugin_aptabase::EventTracker;
                 if let Err(e) = app.handle().track_event(analytics::APP_OPEN_EVENT, None) {
                     log::warn!("[analytics] track_event failed: {e}");

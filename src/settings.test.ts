@@ -22,13 +22,20 @@ describe('coerceSettings', () => {
       notificationsEnabled: false,
       agentStatusEnabled: true,
       sessionRestoreEnabled: true,
-      analyticsEnabled: true,
     }
 
     const next = coerceSettings(legacy)
 
     expect(next.portsTooltipEnabled).toBe(true)
     expect(next.notificationsEnabled).toBe(false)
+  })
+
+  // Quickupdate 2026-09-12: analytics is ALWAYS on with no flag — the old
+  // analyticsEnabled key is gone from the schema; a stale key in an old
+  // settings.json is ignored, not coerced into a kill switch.
+  it('ignores a stale analyticsEnabled key (always-on analytics)', () => {
+    expect(coerceSettings({ analyticsEnabled: false } as unknown as Partial<Settings>)).not.toHaveProperty('analyticsEnabled')
+    expect('analyticsEnabled' in coerceSettings({ analyticsEnabled: true })).toBe(false)
   })
 
   it('keeps an explicit portsTooltipEnabled=false (#43 toggle off survives load)', () => {
@@ -96,5 +103,24 @@ describe('coerceSettings', () => {
   it('coerces a non-string or blank defaultShell back to Auto (#77)', () => {
     expect(coerceSettings({ defaultShell: 42 as unknown as string }).defaultShell).toBe(null)
     expect(coerceSettings({ defaultShell: '   ' }).defaultShell).toBe(null)
+  })
+
+  // Quickupdate 2026-09-12: the dragged sidebar width persists across
+  // restarts. null = the CSS default; only a positive finite number is a
+  // width — junk and legacy files without the key coerce back to null.
+  it('defaults sidebarWidth to null for empty and legacy payloads', () => {
+    expect(defaultSettings.sidebarWidth).toBe(null)
+    expect(coerceSettings({}).sidebarWidth).toBe(null)
+    expect(coerceSettings(null)?.sidebarWidth).toBe(null)
+  })
+
+  it('keeps a saved sidebarWidth and coerces junk back to null', () => {
+    expect(coerceSettings({ sidebarWidth: 320 }).sidebarWidth).toBe(320)
+    expect(coerceSettings({ sidebarWidth: null }).sidebarWidth).toBe(null)
+    expect(coerceSettings({ sidebarWidth: 0 }).sidebarWidth).toBe(null)
+    expect(coerceSettings({ sidebarWidth: -5 }).sidebarWidth).toBe(null)
+    expect(
+      coerceSettings({ sidebarWidth: 'wide' as unknown as number }).sidebarWidth,
+    ).toBe(null)
   })
 })

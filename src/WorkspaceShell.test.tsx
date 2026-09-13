@@ -4454,17 +4454,19 @@ describe('#80 git branch on tab rows', () => {
   })
 })
 
-// #81 (v1.6.0) — the Settings switch that puts one folder line per tab on
-// each workspace row: chip + folder. Assumptions encoded:
+// #81 (v1.6.0) — the Settings switch that puts folder lines on each
+// workspace row: chip + folder. Assumptions encoded:
 //  - Default OFF: workspace rows render no folder lines (pre-v1.6.0 look).
-//  - ON: a workspace with N tabs renders exactly N lines, one per tab —
-//    duplicate folders appear as separate lines; a tab without an agent
-//    still gets its line (idle chip).
+//  - ON + agent status ON: one line per TAB, each with its own chip —
+//    nothing merges (quickupdate round 2, Adam).
+//  - ON + agent status OFF: one line per DISTINCT folder — tabs sharing a
+//    folder merge into ONE line; a chip-only tab (SSH / no cwd) keeps its
+//    own line.
 //  - Long paths truncate (fixed truncation class + full path in title) so
 //    the row never breaks its single-line layout.
 //  - NOT tested here: line data mapping (tabFolders.test.ts) and live cwd
 //    snapshots.
-describe('#81 per-tab folder lines on workspace rows', () => {
+describe('#81 folder lines on workspace rows', () => {
   const folderLineCount = (wsId: string) =>
     screen
       .getByTestId(`workspace-row-${wsId}`)
@@ -4501,10 +4503,13 @@ describe('#81 per-tab folder lines on workspace rows', () => {
     expect(folderLineCount('ws-1')).toBe(0)
   })
 
-  it('switch on: one line per tab, duplicates as separate lines', async () => {
+  it('agent status ON: every tab keeps its own line (nothing merges)', async () => {
+    // Two tabs, both in /repo, chips live — each line carries its tab's
+    // live status, so merging would hide one.
     seedTwoTabs()
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_settings')
+        return Promise.resolve({ showTabFolders: true, agentStatusEnabled: true })
       if (cmd === 'load_workspaces')
         return Promise.resolve({
           workspaces: [
@@ -4534,6 +4539,78 @@ describe('#81 per-tab folder lines on workspace rows', () => {
     // Display form is the TAIL (parent/target), not the walk from root.
     expect(folders[0].textContent).toBe('repo')
     expect(folders[1].textContent).toBe('repo')
+  })
+
+  it('agent status OFF: tabs sharing a folder merge into ONE line (quickupdate)', async () => {
+    // Two tabs, both in /repo, no chips rendered — the row shows ONE "repo"
+    // line, not two.
+    seedTwoTabs()
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings')
+        return Promise.resolve({ showTabFolders: true, agentStatusEnabled: false })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [
+                { id: 'p-1', workingDirectory: '/repo' },
+                { id: 'p-2', workingDirectory: '/repo' },
+              ],
+              tabs: [
+                { id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } },
+                { id: 't-2', name: 'two', layout: { kind: 'leaf', id: 'p-2' } },
+              ],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    expect(folderLineCount('ws-1')).toBe(1)
+    const row = screen.getByTestId('workspace-row-ws-1')
+    const folders = [...row.querySelectorAll('.workspace-folder-line__folder')]
+    expect(folders).toHaveLength(1)
+    // Display form is the TAIL (parent/target), not the walk from root.
+    expect(folders[0].textContent).toBe('repo')
+  })
+
+  it('switch on: tabs in DIFFERENT folders keep separate lines', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [
+                { id: 'p-1', workingDirectory: '/Users/panad/Documents/umux' },
+                { id: 'p-2', workingDirectory: '/Users/panad/Documents/wspolniak' },
+              ],
+              tabs: [
+                { id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } },
+                { id: 't-2', name: 'two', layout: { kind: 'leaf', id: 'p-2' } },
+              ],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    expect(folderLineCount('ws-1')).toBe(2)
+    const folders = [
+      ...screen
+        .getByTestId('workspace-row-ws-1')
+        .querySelectorAll('.workspace-folder-line__folder'),
+    ]
+    expect(folders[0].textContent).toBe('Documents/umux')
+    expect(folders[1].textContent).toBe('Documents/wspolniak')
   })
 
   it('a deep path displays parent/target while the title carries the full path', async () => {
@@ -4771,5 +4848,109 @@ describe('#81 chips are never doubled; folder click activates the row', () => {
       expect(screen.getByTestId('workspace-row-ws-2').className).toMatch(/is-active/),
     )
     expect(openPathMock).toHaveBeenCalledWith('/beta')
+  })
+})
+
+// Quickupdate 2026-09-12 — the dragged sidebar width persists. Two halves:
+//   - Release after a drag saves sidebarWidth once through save_settings
+//     (the drag itself stays local — no save per pointermove).
+//   - Boot: load_settings's sidebarWidth comes back as the inline width on
+//     .sidebar (and .sidebar-inner), clamped to the live window so a width
+//     dragged in a larger window cannot eat a smaller one.
+// NOT tested here: the SettingsStore round-trip (cargo tests) and payload
+// coercion (settings.test.ts).
+describe('sidebar width persists across restarts (quickupdate 2026-09-12)', () => {
+  // jsdom ships no pointer capture; a real browser does, and the drag
+  // handle needs it (setPointerCapture on down, release on up — the up one
+  // is try/caught in the shell). Idempotent no-op stubs, same spirit as
+  // setupTests' PointerEvent stub.
+  const heap = HTMLElement.prototype as unknown as Record<string, unknown>
+  if (typeof heap.setPointerCapture !== 'function') heap.setPointerCapture = () => {}
+  if (typeof heap.releasePointerCapture !== 'function')
+    heap.releasePointerCapture = () => {}
+
+  it('a dragged width saves on release via save_settings (once, not per move)', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByTestId('sidebar-resizer')).toBeInTheDocument())
+    // Boot (and deferred settings writes from earlier tests in this file)
+    // may still be settling inside the waitFor above; the gesture below is
+    // fully synchronous, so clearing the history right before it measures
+    // ONLY this test's saves.
+    invokeMock.mockClear()
+
+    // Start 240 (the floor — no width set yet), drag +100 → 340; jsdom's
+    // 1024px window caps at 768, so 340 passes through untouched.
+    const resizer = screen.getByTestId('sidebar-resizer')
+    fireEvent.pointerDown(resizer, { button: 0, clientX: 100 })
+    fireEvent.pointerMove(resizer, { clientX: 160 })
+    fireEvent.pointerMove(resizer, { clientX: 200 })
+    fireEvent.pointerUp(resizer, {})
+
+    const saves = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_settings')
+    expect(saves).toHaveLength(1)
+    expect(saves[0][1]).toMatchObject({ settings: { sidebarWidth: 340 } })
+  })
+
+  it('a width change persists even when pointerup never reaches the handle (state watcher)', async () => {
+    // The real-app failure this guards: the width VISUALLY changed but the
+    // drag-end save never fired. The watcher persists from the state ~400ms
+    // after the last move, so a drag whose pointerup is lost still lands.
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByTestId('sidebar-resizer')).toBeInTheDocument())
+    invokeMock.mockClear()
+
+    const resizer = screen.getByTestId('sidebar-resizer')
+    fireEvent.pointerDown(resizer, { button: 0, clientX: 100 })
+    fireEvent.pointerMove(resizer, { clientX: 260 }) // 240 floor + 160 → 400
+    // Deliberately NO pointerup here.
+    await waitFor(
+      () => {
+        const saves = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_settings')
+        expect(saves.length).toBeGreaterThanOrEqual(1)
+        expect(saves[saves.length - 1][1]).toMatchObject({ settings: { sidebarWidth: 400 } })
+      },
+      { timeout: 2000 },
+    )
+  })
+
+  it('a saved width comes back after restart as the inline width', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ sidebarWidth: 320 })
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(document.querySelector('.sidebar')?.getAttribute('style')).toContain(
+        'width: 320px',
+      ),
+    )
+    expect(document.querySelector('.sidebar-inner')?.getAttribute('style')).toContain(
+      'width: 320px',
+    )
+  })
+
+  it('a width from a larger window clamps to the current one', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      // jsdom's window is 1024px wide → the ceiling is 768px; the stored
+      // 2000px must render as 768px, never eat the whole window.
+      if (cmd === 'load_settings') return Promise.resolve({ sidebarWidth: 2000 })
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() =>
+      expect(document.querySelector('.sidebar')?.getAttribute('style')).toContain(
+        'width: 768px',
+      ),
+    )
   })
 })

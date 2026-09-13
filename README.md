@@ -295,7 +295,7 @@ This is machine-local and reversible (`"auto"` restores the default). Other AI C
 
 ### Privacy & analytics
 
-umux reports a **single anonymous event** — `app_open` at startup — to [Aptabase](https://aptabase.com), so development is guided by how many people actually installed and use the app (Aptabase counts unique users per event). **Nothing else is ever sent**: no terminal content, commands, workspace names, file paths, or any other user data — the one event carries no payload at all. There is no Settings switch for this (a deliberate product decision: the signal is only useful while always on); to opt out entirely, set `"analyticsEnabled": false` in `settings.json` (same directory as `workspaces.json`) — umux then never initializes the analytics SDK, so no network call is made.
+umux reports a **single anonymous event** — `app_open` at startup — to [Aptabase](https://aptabase.com), so development is guided by how many people actually installed and use the app (Aptabase counts unique users per event). **Nothing else is ever sent**: no terminal content, commands, workspace names, file paths, or any other user data — the one event carries no payload at all. Analytics is **always on with no switch and no opt-out** (deliberate product decision, 2026-09-12: the old `analyticsEnabled` kill switch was removed from the settings schema — a stale key in an old `settings.json` is simply ignored).
 
 ---
 

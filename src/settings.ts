@@ -3,16 +3,15 @@
 // The persisted form lives in the Rust SettingsStore (settings.json); this
 // module only mirrors the wire shape so the frontend and backend agree
 // byte-for-byte (camelCase keys). Defaults match the Rust `Settings::default`:
-// notifications on, agent status on, session restore on, analytics on,
-// ports tooltip on (#43). Analytics has NO Settings switch (product decision,
-// HITL follow-up) — the field only gains meaning when Phase 6 initializes
-// Aptabase.
+// notifications on, agent status on, session restore on, ports tooltip on
+// (#43). Analytics is ALWAYS ON with no flag anywhere (quickupdate
+// 2026-09-12, Adam — the old analyticsEnabled kill switch is gone; a stale
+// `analyticsEnabled` key in an old settings.json is ignored by both sides).
 
 export type Settings = {
   notificationsEnabled: boolean
   agentStatusEnabled: boolean
   sessionRestoreEnabled: boolean
-  analyticsEnabled: boolean
   portsTooltipEnabled: boolean
   // #60: written by `umux config set default-launch-mode`; the v1.7.0 TUI
   // launcher reads it. Carried through here so an app save never erases a
@@ -29,18 +28,23 @@ export type Settings = {
   // behavior). A non-empty string is a shell path / custom command, passed
   // to pty_open verbatim. SSH tabs never read it.
   defaultShell: string | null
+  // Quickupdate 2026-09-12: the sidebar's dragged width in px, persisted so
+  // a resize survives restart. null = the CSS default; the shell clamps the
+  // applied value to its own min/max at render time (a width dragged in a
+  // larger window must not eat a smaller one).
+  sidebarWidth: number | null
 }
 
 export const defaultSettings: Settings = {
   notificationsEnabled: true,
   agentStatusEnabled: true,
   sessionRestoreEnabled: true,
-  analyticsEnabled: true,
   portsTooltipEnabled: true,
   defaultLaunchMode: 'gui',
   showTabBranch: true,
   showTabFolders: false,
   defaultShell: null,
+  sidebarWidth: null,
 }
 
 /// Coerce an unknown invoke payload into a complete Settings object: missing
@@ -52,7 +56,6 @@ export function coerceSettings(raw: unknown): Settings {
     notificationsEnabled: r.notificationsEnabled ?? defaultSettings.notificationsEnabled,
     agentStatusEnabled: r.agentStatusEnabled ?? defaultSettings.agentStatusEnabled,
     sessionRestoreEnabled: r.sessionRestoreEnabled ?? defaultSettings.sessionRestoreEnabled,
-    analyticsEnabled: r.analyticsEnabled ?? defaultSettings.analyticsEnabled,
     portsTooltipEnabled: r.portsTooltipEnabled ?? defaultSettings.portsTooltipEnabled,
     defaultLaunchMode: r.defaultLaunchMode ?? defaultSettings.defaultLaunchMode,
     showTabBranch: r.showTabBranch ?? defaultSettings.showTabBranch,
@@ -63,6 +66,13 @@ export function coerceSettings(raw: unknown): Settings {
     defaultShell:
       typeof r.defaultShell === 'string' && r.defaultShell.trim() !== ''
         ? r.defaultShell
+        : null,
+    // Quickupdate 2026-09-12: same shape coercion as defaultShell — only a
+    // positive number is a width; junk (or a legacy file without the key)
+    // falls back to null = the CSS default.
+    sidebarWidth:
+      typeof r.sidebarWidth === 'number' && Number.isFinite(r.sidebarWidth) && r.sidebarWidth > 0
+        ? r.sidebarWidth
         : null,
   }
 }

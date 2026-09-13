@@ -6,11 +6,10 @@
 // testable surface: it renders one switch per toggle (AC1) and reports
 // changes upward, where they take effect immediately (AC2/AC3).
 //
-// NOTE: there is deliberately NO analytics switch — the product decision
-// (HITL follow-up) is always-on anonymous analytics with no user control, so
-// the toggle Adam's issue described never shipped. The `analyticsEnabled`
-// field lives on in settings.json for Phase 6's initialization, defaulting
-// to true.
+// NOTE: there is deliberately NO analytics switch — analytics is ALWAYS ON
+// with no flag anywhere (quickupdate 2026-09-12, Adam): the old
+// `analyticsEnabled` kill switch is gone from the schema on both sides, and
+// a stale key in an old settings.json is ignored.
 //
 // Import row (#59, HITL rework 2026-08-30): the "from cmux" item now OPENS
 // the import wizard (CmuxImportWizard — scan → choose with a live preview →

@@ -310,9 +310,10 @@ fn settings_get(settings: &Settings, key: &str) -> Option<String> {
         "notifications-enabled" => settings.notifications_enabled.to_string(),
         "agent-status-enabled" => settings.agent_status_enabled.to_string(),
         "session-restore-enabled" => settings.session_restore_enabled.to_string(),
-        "analytics-enabled" => settings.analytics_enabled.to_string(),
         "ports-tooltip-enabled" => settings.ports_tooltip_enabled.to_string(),
         "default-launch-mode" => settings.default_launch_mode.clone(),
+        // Analytics has no key on purpose (quickupdate 2026-09-12): it is
+        // always on and cannot be read or written into a kill switch.
         _ => return None,
     })
 }
@@ -337,7 +338,6 @@ fn settings_set(settings: &mut Settings, key: &str, value: &str) -> Result<(), S
         "notifications-enabled" => settings.notifications_enabled = parse_bool(value)?,
         "agent-status-enabled" => settings.agent_status_enabled = parse_bool(value)?,
         "session-restore-enabled" => settings.session_restore_enabled = parse_bool(value)?,
-        "analytics-enabled" => settings.analytics_enabled = parse_bool(value)?,
         "ports-tooltip-enabled" => settings.ports_tooltip_enabled = parse_bool(value)?,
         "default-launch-mode" => match value {
             "gui" | "tui" => settings.default_launch_mode = value.into(),

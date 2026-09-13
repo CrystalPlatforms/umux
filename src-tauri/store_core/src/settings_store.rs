@@ -9,10 +9,12 @@
 //
 // The serialized shape is shared with the TS frontend
 // ({ notificationsEnabled, agentStatusEnabled, sessionRestoreEnabled,
-// analyticsEnabled, portsTooltipEnabled }), so Rust and JS agree
-// byte-for-byte. Defaults: notifications on, agent status on, session restore
-// on, analytics on (always — the Settings screen exposes no switch for it;
-// nothing is collected until Phase 6 wires Aptabase), ports tooltip on.
+// portsTooltipEnabled }), so Rust and JS agree byte-for-byte. Defaults:
+// notifications on, agent status on, session restore on, ports tooltip on.
+// Analytics is ALWAYS ON with no flag anywhere (quickupdate 2026-09-12,
+// Adam): the old analyticsEnabled kill switch is gone from the schema — a
+// stale key in an old settings.json parses as an unknown field and is
+// ignored.
 
 use std::path::PathBuf;
 
@@ -45,13 +47,6 @@ pub struct Settings {
     /// behavior.
     #[serde(default = "default_true")]
     pub session_restore_enabled: bool,
-    /// Placeholder for the anonymous analytics flag (Phase 6 / #30). Always
-    /// ON by default and deliberately NOT user-controllable (product decision,
-    /// HITL follow-up: the Settings screen ships no analytics switch). umux
-    /// still collects nothing today — Phase 6's Aptabase init is what will
-    /// make this flag mean anything.
-    #[serde(default = "default_true")]
-    pub analytics_enabled: bool,
     /// Master gate for the hover-pulled listening-ports tooltip (#43): tab
     /// rows and sidebar workspace rows. Frontend-only (the tab_ports backend
     /// is only ever called from the tooltip's hover handlers), so off = no
@@ -80,6 +75,14 @@ pub struct Settings {
     /// tabs never read it; no schema migration (new field with a default).
     #[serde(default)]
     pub default_shell: Option<String>,
+    /// Quickupdate 2026-09-12: the sidebar's dragged width in px, persisted
+    /// so a resize survives restart. `None` = the CSS default; the shell
+    /// clamps the applied value to its own min/max at render time (a width
+    /// dragged in a larger window must not eat a smaller one). Backend-only
+    /// round-trip — nothing in Rust reads the value; no schema migration
+    /// (new field with a default).
+    #[serde(default)]
+    pub sidebar_width: Option<u32>,
 }
 
 /// Serde default for `default_launch_mode`: the GUI is what umux launches
@@ -94,12 +97,12 @@ impl Default for Settings {
             notifications_enabled: true,
             agent_status_enabled: true,
             session_restore_enabled: true,
-            analytics_enabled: true,
             ports_tooltip_enabled: true,
             default_launch_mode: default_launch_mode(),
             show_tab_branch: true,
             show_tab_folders: false,
             default_shell: None,
+            sidebar_width: None,
         }
     }
 }
@@ -189,12 +192,18 @@ mod tests {
         assert!(d.notifications_enabled, "notifications default ON");
         assert!(d.agent_status_enabled, "agent status default ON");
         assert!(d.session_restore_enabled, "session restore default ON");
-        assert!(d.analytics_enabled, "analytics default ON (always, no switch)");
         assert!(d.ports_tooltip_enabled, "ports tooltip default ON (#43)");
         // #80/#81 (v1.6.0): the sidebar-display switches default OFF — a
         // fresh install looks exactly like pre-v1.6.0.
         assert!(d.show_tab_branch, "tab branches visible by default (#80)");
         assert!(!d.show_tab_folders, "show-tab-folders default OFF (#81)");
+        // Quickupdate 2026-09-12: analytics is ALWAYS on — the old
+        // analyticsEnabled kill switch is gone from the schema. A stale key
+        // in an old settings.json parses as an unknown field: tolerated, no
+        // fallback, and nothing reads it anymore.
+        let (stale, status) = parse_settings_with_status(r#"{"analyticsEnabled":false}"#);
+        assert_eq!(stale, Settings::default());
+        assert_eq!(status, ConfigStatus::Ok, "stale key must not trip the fallback");
     }
 
     // T-S2 (#27 AC4 — settings round-trip through the pure layer):
@@ -206,12 +215,12 @@ mod tests {
             notifications_enabled: false,
             agent_status_enabled: false,
             session_restore_enabled: false,
-            analytics_enabled: false,
             ports_tooltip_enabled: false,
             default_launch_mode: "tui".into(),
             show_tab_branch: true,
             show_tab_folders: true,
             default_shell: None,
+            sidebar_width: Some(320),
         };
 
         let text = serialize_settings(&s);
@@ -266,12 +275,12 @@ mod tests {
             notifications_enabled: false,
             agent_status_enabled: true,
             session_restore_enabled: true,
-            analytics_enabled: false,
             ports_tooltip_enabled: true,
             default_launch_mode: "gui".into(),
             show_tab_branch: false,
             show_tab_folders: false,
             default_shell: Some("/bin/bash".into()),
+            sidebar_width: Some(480),
         };
 
         SettingsStore::new(path.clone()).save(&s).unwrap();
@@ -298,10 +307,6 @@ mod tests {
         assert!(
             text.contains("\"sessionRestoreEnabled\""),
             "expected camelCase sessionRestoreEnabled, got: {text}"
-        );
-        assert!(
-            text.contains("\"analyticsEnabled\""),
-            "expected camelCase analyticsEnabled, got: {text}"
         );
         assert!(
             text.contains("\"portsTooltipEnabled\""),
