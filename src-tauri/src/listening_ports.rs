@@ -3,8 +3,8 @@
 // Deep module: a tiny pure surface answering "which TCP ports does THIS
 // panel's process tree listen on?" hiding three OS-specific enumeration
 // mechanisms (Linux /proc tables + fd scan, macOS lsof, Windows netstat +
-// CIM parent map). Queried ONLY on sidebar-tab hover by the frontend —
-// never on a timer, zero background cost while unused.
+// a Toolhelp32 parent map). Queried ONLY on sidebar-tab hover by the
+// frontend — never on a timer, zero background cost while unused.
 //
 // Assumptions encoded by these tests:
 //  - Input shapes: listeners is (port, pid) pairs from any per-OS source;
@@ -30,9 +30,14 @@
 use std::collections::{HashMap, HashSet};
 
 /// Ports owned by `root`'s process tree among `listeners`, ascending,
-/// deduplicated. One call answers one tab.
+/// deduplicated. One call answers one tab. The root itself COUNTS (the
+/// module contract: the tab's shell holding a socket is that tab's port) —
+/// quickupdate 2026-09-13 fix: descendants_of deliberately excludes the
+/// root, and the old code leaked that exclusion here, so a listener owned
+/// by the shell process itself never showed.
 pub fn ports_for_root(root: u32, listeners: &[(u16, u32)], parents: &[(u32, u32)]) -> Vec<u16> {
-    let tree_pids = descendants_of(root, parents);
+    let mut tree_pids = descendants_of(root, parents);
+    tree_pids.insert(root);
     let mut ports: Vec<u16> = listeners
         .iter()
         .filter(|(_, pid)| tree_pids.contains(pid))
@@ -167,25 +172,45 @@ pub fn parse_netstat_listen(output: &str) -> Vec<(u16, u32)> {
         .collect()
 }
 
-/// Windows process-tree source: two-column CSV as produced by PowerShell's
-/// `Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId |
-/// ConvertTo-Csv -NoTypeInformation`. Returns plain (pid, ppid) edges; rows
-/// that do not hold two integers (header, blank) are skipped.
-pub fn parse_win_parents(csv: &str) -> Vec<(u32, u32)> {
-    csv.lines()
-        .skip_while(|l| !l.contains("ParentProcessId")) // drop the header row
-        .filter_map(|line| {
-            let nums: Option<Vec<u32>> = line
-                .split(',')
-                .map(|c| c.trim_matches('"').parse::<u32>())
-                .collect::<Result<_, _>>()
-                .ok();
-            match nums? {
-                pair if pair.len() == 2 => Some((pair[0], pair[1])),
-                _ => None,
+/// Windows process-tree source (quickupdate 2026-09-13): a Toolhelp32
+/// process snapshot — the documented pid/ppid enumeration, ~10 ms, no child
+/// process at all. It replaces a `powershell -Command Get-CimInstance …`
+/// spawn per hover: ~0.6 s + startup, so the tooltip answer routinely landed
+/// AFTER the cursor left the row (its seq was already superseded) and the
+/// tooltip looked dead on Windows. A failed or empty snapshot yields an
+/// empty edge list — the aggregate answer stays EMPTY, never an error.
+#[cfg(windows)]
+pub fn parent_edges() -> Vec<(u32, u32)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    unsafe {
+        // SAFETY: the snapshot handle is used only for the documented
+        // Process32First/Next walk; entry is sized via dwSize before each
+        // call, and the handle is closed on every path out of here.
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Vec::new();
+        }
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..std::mem::zeroed()
+        };
+        let mut out = Vec::new();
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                out.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
             }
-        })
-        .collect()
+        }
+        CloseHandle(snapshot);
+        out
+    }
 }
 
 /// Unix process-tree source: `ps -axo pid=,ppid=` output (the `=` form
@@ -274,22 +299,14 @@ pub fn parent_edges() -> Vec<(u32, u32)> {
         .unwrap_or_default()
 }
 
-#[cfg(windows)]
-pub fn parent_edges() -> Vec<(u32, u32)> {
-    const PS: &str = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation";
-    run_tool("powershell", &["-NoProfile", "-Command", PS])
-        .map(|out| parse_win_parents(&out))
-        .unwrap_or_default()
-}
-
 /// One bounded, output-captured tool run; any failure (missing binary,
 /// non-zero exit, weird bytes) is just None — the caller answers empty.
 fn run_tool(program: &str, args: &[&str]) -> Option<String> {
-    // CREATE_NO_WINDOW (Windows, perf/UX audit 2026-09-05): netstat and the
-    // CIM process query are console programs. Spawned from a GUI app without
-    // this flag, EVERY run flashed a console window on the desktop — the tab
-    // hover tooltip made it rain console windows. The flag hides only the
-    // console host; captured output is unaffected.
+    // CREATE_NO_WINDOW (Windows, perf/UX audit 2026-09-05): netstat is a
+    // console program. Spawned from a GUI app without this flag, EVERY run
+    // flashed a console window on the desktop — the tab hover tooltip made
+    // it rain console windows. The flag hides only the console host;
+    // captured output is unaffected.
     #[cfg(windows)]
     let mut cmd = {
         use std::os::windows::process::CommandExt;
@@ -463,19 +480,15 @@ node      12345      adam   25u  IPv4  0x9f31a2b3c4d5e6fa      0t0  TCP 192.168.
         assert_eq!(got, vec![(3000u16, 7777u32), (5173, 9999)]);
     }
 
-    // T-W2 (AC5 — Windows PROCESS TREE source): PowerShell's
-    //   `Get-CimInstance Win32_Process | Select ProcessId,ParentProcessId |
-    //   ConvertTo-Csv -NoTypeInformation` CSV — quoted numbers with a
-    //   header row become plain pid→ppid edges.
+    // T-W2 (AC5 — the ROOT contract, quickupdate 2026-09-13): a listener
+    //   owned by the SHELL PROCESS ITSELF belongs to the tab. descendants_of
+    //   deliberately excludes the root; ports_for_root must not leak that
+    //   exclusion (the old code did — the module doc always said the root
+    //   counts, and the code disagreed).
     #[test]
-    fn windows_cim_csv_parses_parent_edges() {
-        let csv = "\"ProcessId\",\"ParentProcessId\"\r\n\"4\",\"0\"\r\n\"12345\",\"500\"\r\n";
-        assert_eq!(
-            parse_win_parents(csv),
-            vec![(4u32, 0u32), (12345, 500)]
-        );
-        // Headerless / malformed input is tolerated (row skipped, not panic).
-        assert_eq!(parse_win_parents("\"x\",\"y\"\r\n\r\n"), Vec::new());
+    fn root_owned_listener_counts_for_its_tab() {
+        let listeners = [(9000u16, 100u32)];
+        assert_eq!(ports_for_root(100, &listeners, &[]), vec![9000]);
     }
 
     // --- Unix (Linux + macOS): `ps -axo pid=,ppid=` -------------------------

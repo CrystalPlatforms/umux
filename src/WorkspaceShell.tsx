@@ -1324,6 +1324,7 @@ export function WorkspaceShell() {
   // restored panel receives its saved cwd at PTY-open time (the surface
   // consumes cwd once, at mount), so it must be known before the first mount.
   useEffect(() => {
+    let splashTimer: number | null = null
     void Promise.all([
       invoke<{
         workspaces: Workspace[]
@@ -1351,7 +1352,21 @@ export function WorkspaceShell() {
           data.order ?? [],
         ),
       )
+      // Splashscreen handoff (quickupdate 2026-09-13): boot is done — settings
+      // and workspaces are in state, so the panels mount on this very commit.
+      // The splash stays up a fixed 2 s BEAT after boot (Adam: let it actually
+      // be seen) before close_splashscreen reveals the main window; the app is
+      // fully usable behind it the whole time. Cleared on unmount so a dev-HMR
+      // teardown never fires a stale close.
+      splashTimer = window.setTimeout(() => {
+        void invoke('close_splashscreen').catch((e) =>
+          console.error('close_splashscreen failed:', e),
+        )
+      }, 2_000)
     })
+    return () => {
+      if (splashTimer != null) window.clearTimeout(splashTimer)
+    }
   }, [])
 
   /// Apply a settings patch (v0.2 Phase 3 / #27): update local state, persist
@@ -1566,6 +1581,33 @@ export function WorkspaceShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Shell-announced cwd (quickupdate 2026-09-13, the Windows live-folder fix):
+  // the injected PowerShell/cmd prompt hooks emit `OSC 9;9;<cwd>` per prompt
+  // render; the backend parser surfaces it and relays it here as `pty_cwd`.
+  // Folding it into state makes the sidebar's folder lines / branch labels
+  // follow `cd` INSTANTLY, ahead of the 20 s periodic snapshot (whose PEB
+  // reads stay the safety net for shells without a hook). SSH panels are
+  // skipped — a remote path is not a local workingDirectory — and with
+  // session restore off there is no cwd tracking at all (the same #27 rule
+  // snapshotAndPersist follows). Refs only, so the first render's closure
+  // stays valid for the app's lifetime.
+  useEffect(() => {
+    const unlistenP = listen<{ id: number; cwd: string }>('pty_cwd', (event) => {
+      if (!settingsRef.current.sessionRestoreEnabled) return
+      const { id, cwd } = event.payload
+      for (const [panelId, entry] of ptyIdsRef.current) {
+        if (entry.kind === 'local' && entry.id === id) {
+          setState((prev) => upsertPanelCwd(prev, panelId, cwd))
+          return
+        }
+      }
+    })
+    return () => {
+      void unlistenP.then((fn) => fn())
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // The bell button and the Settings notifications toggle are the same switch
   // (one persisted source of truth) — flipping either routes through
   // applySettings so settings.json and the backend flag never disagree.
@@ -1652,7 +1694,11 @@ export function WorkspaceShell() {
   // the persisted tab — every panel the tab spawns (now and after a
   // restart) opens through it.
   const addTabInShell = (wsId: string, shell: string) => {
-    persist(addTab(stateRef.current, wsId, undefined, shell))
+    persist(addTab(stateRef.current, wsId, undefined, shell, {
+      // New tab starts in the tab-I-was-on's folder (quickupdate 2026-09-13);
+      // gated on session restore like every cwd path (#27).
+      inheritCwd: settingsRef.current.sessionRestoreEnabled,
+    }))
   }
 
   // --- Session snapshot (v0.2 Phase 5 / #29) ---------------------------------
@@ -1765,8 +1811,14 @@ export function WorkspaceShell() {
         break
       case 'new-tab':
         // Ctrl+Shift+T (#37 rework): a fresh terminal tab in the active
-        // workspace — the browser instinct.
-        if (activeId != null) persist(addTab(stateRef.current, activeId))
+        // workspace — the browser instinct. Starts in the tab-I-was-on's
+        // folder (quickupdate 2026-09-13), like the tab-bar "+".
+        if (activeId != null)
+          persist(
+            addTab(stateRef.current, activeId, undefined, undefined, {
+              inheritCwd: settingsRef.current.sessionRestoreEnabled,
+            }),
+          )
         break
       case 'next-workspace':
         setState(cycleWorkspace(1))
@@ -3537,7 +3589,15 @@ export function WorkspaceShell() {
                     className="tab-add icon-btn"
                     aria-label="New terminal tab"
                     title="New terminal tab"
-                    onClick={() => persist(addTab(stateRef.current, ws.id))}
+                    onClick={() =>
+                      persist(
+                        addTab(stateRef.current, ws.id, undefined, undefined, {
+                          // Starts in the tab-I-was-on's folder (quickupdate
+                          // 2026-09-13); #27 gates every cwd path.
+                          inheritCwd: settingsRef.current.sessionRestoreEnabled,
+                        }),
+                      )
+                    }
                   >
                     <PlusIcon />
                   </button>

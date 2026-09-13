@@ -75,6 +75,20 @@ struct PanelSignalPayload {
     id: u32,
 }
 
+/// One ConEmu-style cwd report (`OSC 9;9;<path>`) surfaced by the OSC parser
+/// from a panel's output stream (quickupdate 2026-09-13, the Windows
+/// live-folder fix): the shell's prompt hook announces the shell's current
+/// directory on every prompt render, and the frontend folds it into the
+/// panel's workingDirectory — instant sidebar folder lines / branch labels
+/// without waiting for the next periodic snapshot. Emitted for local AND SSH
+/// panels; the frontend ignores reports from SSH panels (a remote path is not
+/// a local workingDirectory).
+#[derive(Serialize, Clone)]
+struct PtyCwdPayload {
+    id: u32,
+    cwd: String,
+}
+
 #[tauri::command]
 fn pty_open(
     app: AppHandle,
@@ -141,26 +155,31 @@ fn pty_open(
         );
         let mut debug_total: u64 = 0;
         while let Ok(bytes) = rx.recv() {
-            let (passthrough, events) = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            let result = process_pty_chunk(&mut parser, &service, &origin, &bytes);
             let debug_dir = config_dir();
             if pty_debug::enabled(&debug_dir) {
-                debug_total += passthrough.len() as u64;
+                debug_total += result.passthrough.len() as u64;
                 pty_debug::append(
                     &debug_dir,
-                    &pty_debug::chunk_line(id, debug_total, passthrough.len(), &passthrough),
+                    &pty_debug::chunk_line(id, debug_total, result.passthrough.len(), &result.passthrough),
                     pty_debug::max_log_bytes(),
                 );
             }
-            if !events.is_empty() {
+            if let Some(cwd) = &result.cwd_report {
+                // Shell-announced cwd (quickupdate 2026-09-13): instant sidebar
+                // folder updates, ahead of the periodic snapshot.
+                let _ = emit_app.emit("pty_cwd", PtyCwdPayload { id, cwd: cwd.clone() });
+            }
+            if !result.events.is_empty() {
                 // Completion signal first, then the surviving output bytes: the
                 // frontend status machine's grace window expects a TUI's
                 // trailing redraw to land right AFTER its completion signal.
                 let _ = emit_app.emit("pty_completion", PanelSignalPayload { id });
             }
-            if !passthrough.is_empty() {
+            if !result.passthrough.is_empty() {
                 let _ = emit_app.emit(
                     "pty_output",
-                    PtyOutputPayload { id, data: encode_payload(&passthrough) },
+                    PtyOutputPayload { id, data: encode_payload(&result.passthrough) },
                 );
             }
         }
@@ -323,6 +342,28 @@ async fn panel_processes(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// --- Splashscreen handoff (quickupdate 2026-09-13) ---------------------------
+//
+// The splash window is visible from process start (it is a static page, so it
+// paints immediately); the MAIN window starts hidden so the app never shows a
+// half-booted UI. The frontend invokes this once its boot work is done (workspaces
+// + settings loaded, session restore applied), which closes the splash and
+// reveals the main window. Idempotent: a missing window label is fine, and a
+// second call just re-shows the (already visible) main window.
+
+#[tauri::command]
+fn close_splashscreen(app: AppHandle) {
+    // The splash is the gate: a call with the splash already gone (a dev-HMR
+    // reload re-runs the frontend boot effect) must not steal focus back.
+    if let Some(splash) = app.get_webview_window("splashscreen") {
+        let _ = splash.close();
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+    }
 }
 
 // --- Sidebar tab metadata: git branch (v1.0 Phase 14 / #41) -------------------
@@ -498,16 +539,23 @@ fn ssh_open(
             mute_flag,
         );
         while let Ok(bytes) = rx.recv() {
-            let (passthrough, events) = process_pty_chunk(&mut parser, &service, &origin, &bytes);
-            if !events.is_empty() {
+            let result = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            if let Some(cwd) = &result.cwd_report {
+                // A remote shell announcing ITS cwd. The frontend ignores cwd
+                // reports for SSH panels (a remote path is not a local
+                // workingDirectory) — this emission is future-proofing for the
+                // SSH View's remote control, not live data today.
+                let _ = emit_app.emit("ssh_cwd", PtyCwdPayload { id, cwd: cwd.clone() });
+            }
+            if !result.events.is_empty() {
                 // Same per-panel completion signal as local panels (see the
                 // pty_open thread) — remote status parity (#26).
                 let _ = emit_app.emit("ssh_completion", PanelSignalPayload { id });
             }
-            if !passthrough.is_empty() {
+            if !result.passthrough.is_empty() {
                 let _ = emit_app.emit(
                     "ssh_output",
-                    PtyOutputPayload { id, data: encode_payload(&passthrough) },
+                    PtyOutputPayload { id, data: encode_payload(&result.passthrough) },
                 );
             }
         }
@@ -959,10 +1007,11 @@ fn poll_ssh_exit(app: &AppHandle, handle: &ssh_manager::SshHandle, host: &str) -
 }
 
 /// Run one chunk of PTY output through the OSC parser and dispatch any
-/// completion events it surfaces. Returns the bytes the terminal should still
-/// see (everything that wasn't a recognized notification sequence) — those are
-/// byte-identical to the input for non-OSC bytes, satisfying "normal terminal
-/// output is unaffected by the parser being active".
+/// completion events it surfaces. Returns the parser's full view of the chunk:
+/// the bytes the terminal should still see (everything that wasn't a
+/// recognized notification sequence — byte-identical to the input for non-OSC
+/// bytes, satisfying "normal terminal output is unaffected by the parser being
+/// active"), the notification events, and any cwd report.
 ///
 /// The parser is held by the caller (one per PTY) so sequences split across
 /// chunk boundaries are recognized across calls. This is the testable core of
@@ -972,15 +1021,16 @@ fn process_pty_chunk(
     service: &NotificationService,
     origin: &PanelOrigin,
     bytes: &[u8],
-) -> (Vec<u8>, Vec<osc_parser::NotificationEvent>) {
-    let osc_parser::PushResult { passthrough, events } = parser.push(bytes);
-    for event in &events {
+) -> osc_parser::PushResult {
+    let result = parser.push(bytes);
+    for event in &result.events {
         service.notify(event, origin);
     }
-    // The events travel back to the caller so the reader thread can ALSO emit
-    // the per-panel completion signal (`pty_completion` / `ssh_completion`).
-    // The notify above (desktop notification) is unchanged — v0.1 behavior.
-    (passthrough, events)
+    // The whole PushResult travels back so the reader thread can ALSO emit the
+    // per-panel completion signal (`pty_completion` / `ssh_completion`) and any
+    // cwd report (`pty_cwd`). The notify above (desktop notification) is
+    // unchanged — v0.1 behavior.
+    result
 }
 
 /// The user's real login shell from the OS user database (getpwuid), or None.
@@ -1152,6 +1202,7 @@ pub fn run() {
             list_shells,
             open_settings_file,
             updater_status,
+            close_splashscreen,
             cmux_import::read_cmux_import_sources,
         ]);
 
@@ -1388,14 +1439,17 @@ mod tests {
         let mut parser = OscParser::new();
         let bytes = b"ls -la\r\nhello world";
 
-        let (out, events) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), bytes);
+        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), bytes);
 
-        assert_eq!(out, bytes.to_vec(), "plain bytes pass through unchanged");
+        assert_eq!(result.passthrough, bytes.to_vec(), "plain bytes pass through unchanged");
         assert!(
             rec.calls.lock().unwrap().is_empty(),
             "no notification for ordinary output"
         );
-        assert!(events.is_empty(), "no completion signal for ordinary output");
+        assert!(
+            result.events.is_empty(),
+            "no completion signal for ordinary output"
+        );
     }
 
     // T4 (AC1 + AC2 — a completion sequence triggers a notification, no AI-tool
@@ -1413,7 +1467,7 @@ mod tests {
         ]
         .to_vec();
 
-        let (out, events) = process_pty_chunk(
+        let result = process_pty_chunk(
             &mut parser,
             &svc,
             &PanelOrigin {
@@ -1424,7 +1478,11 @@ mod tests {
         );
 
         // The terminal still sees the surrounding text, but NOT the OSC bytes.
-        assert_eq!(out, b"befaft".to_vec(), "OSC bytes stripped from passthrough");
+        assert_eq!(
+            result.passthrough,
+            b"befaft".to_vec(),
+            "OSC bytes stripped from passthrough"
+        );
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "exactly one notification");
@@ -1433,9 +1491,9 @@ mod tests {
         // v0.2 Phase 2 / #26: the same chunk also surfaces the parsed event so
         // the reader thread can emit the per-panel completion signal. Both
         // channels (desktop notification + status signal) fire from one chunk.
-        assert_eq!(events.len(), 1, "exactly one completion event surfaced");
-        assert_eq!(events[0].protocol, osc_parser::OscProtocol::Nine);
-        assert!(events[0].body.contains("build done"));
+        assert_eq!(result.events.len(), 1, "exactly one completion event surfaced");
+        assert_eq!(result.events[0].protocol, osc_parser::OscProtocol::Nine);
+        assert!(result.events[0].body.contains("build done"));
     }
 
     // T5 (regression guard — parser state must persist across chunks in the
@@ -1449,19 +1507,41 @@ mod tests {
         let first: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i'].to_vec();
         let second: Vec<u8> = [0x07, b'x'].to_vec(); // BEL terminator + trailing byte
 
-        let (out1, events1) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &first);
-        let (out2, events2) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &second);
+        let first = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &first);
+        let second = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &second);
 
         // Nothing is complete until the terminator arrives.
-        assert!(out1.is_empty(), "no passthrough from the unfinished sequence");
-        assert!(events1.is_empty(), "no completion event before the terminator");
+        assert!(first.passthrough.is_empty(), "no passthrough from the unfinished sequence");
+        assert!(first.events.is_empty(), "no completion event before the terminator");
         // The trailing non-OSC byte after the terminator still reaches the term.
-        assert_eq!(out2, b"x".to_vec());
+        assert_eq!(second.passthrough, b"x".to_vec());
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "split sequence fires exactly one notification");
         assert!(calls[0].1.contains("hi"), "body carries the message: {}", calls[0].1);
-        assert_eq!(events2.len(), 1, "split sequence surfaces exactly one completion event");
+        assert_eq!(
+            second.events.len(),
+            1,
+            "split sequence surfaces exactly one completion event"
+        );
+    }
+
+    // T6 (quickupdate 2026-09-13 — a cwd report rides the same wiring): the
+    // shell's `9;9;<cwd>` surfaces as cwd_report for the reader thread's
+    // `pty_cwd` emission, is NOT a notification, and the sequence still passes
+    // through untouched (the terminal never loses bytes).
+    #[test]
+    fn process_chunk_with_cwd_report_surfaces_path() {
+        let (svc, rec) = wiring_service();
+        let mut parser = OscParser::new();
+        let bytes = b"\x1b]9;9;C:\\proj\x07ok".to_vec();
+
+        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
+
+        assert_eq!(result.cwd_report.as_deref(), Some("C:\\proj"));
+        assert_eq!(result.passthrough, bytes, "cwd report passes through byte-identical");
+        assert!(result.events.is_empty(), "a cwd report is not a completion");
+        assert!(rec.calls.lock().unwrap().is_empty(), "no desktop notification either");
     }
 
     // --- macOS notifier script (v0.2 Phase 2 / #26) -------------------------
@@ -1537,10 +1617,10 @@ mod tests {
         flag.store(true, Ordering::SeqCst);
 
         let bytes: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i', 0x07].to_vec();
-        let (out, events) = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
+        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
 
         assert!(
-            out.is_empty(),
+            result.passthrough.is_empty(),
             "OSC bytes still stripped from passthrough even when muted"
         );
         assert!(
@@ -1550,7 +1630,11 @@ mod tests {
         // v0.2 Phase 2 / #26: muting notifications must NOT mute the status
         // dot — the completion event still travels to the renderer, so the
         // panel flips to needs-attention even with notifications silenced.
-        assert_eq!(events.len(), 1, "completion signal still routed while muted");
+        assert_eq!(
+            result.events.len(),
+            1,
+            "completion signal still routed while muted"
+        );
     }
 
     // The per-OS config-directory + migration tests moved with their code to

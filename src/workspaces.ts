@@ -752,6 +752,16 @@ export function activeTabOf(state: WorkspaceState, id: string): Tab | null {
 /// Add a new terminal tab to workspace `id` and activate it (#37 rework).
 /// Definitions change (persisted); the new tab is a single fresh shell.
 /// No-op for an unknown workspace id.
+///
+/// `opts.inheritCwd` (quickupdate 2026-09-13, Adam): the new tab STARTS in
+/// the folder the tab I was on sits in — the workspace's active panel's
+/// `workingDirectory` (the same speaking-panel value the folder lines
+/// render), seeded as the new panel's start directory. Opt-in, and the UI
+/// callers only pass it while session restore is on (#27: with restore off
+/// cwd is not tracked or persisted at all). Skipped silently when the
+/// active tab has nothing local to inherit: an SSH tab carries a remote
+/// path, a never-snapshotted panel carries no folder — both fall back to
+/// the default directory, exactly as before.
 export function addTab(
   state: WorkspaceState,
   id: string,
@@ -759,6 +769,7 @@ export function addTab(
   // The shell this tab spawns through (HITL 2026-09-10): rides pty_open
   // verbatim for every panel the tab spawns, and persists with the tab.
   shell?: string,
+  opts: { inheritCwd?: boolean } = {},
 ): WorkspaceState {
   const ws = state.workspaces.find((w) => w.id === id)
   if (ws == null) return state
@@ -771,15 +782,36 @@ export function addTab(
     // key on the persisted payload.
     ...(shell != null ? { shell } : {}),
   }
+  const newPanelId = leafIds(tab.layout)[0]
+  // The folder to inherit: the ACTIVE panel's recorded directory (read from
+  // the state BEFORE this call — the new tab becomes active below). Only a
+  // local panel with a known directory speaks; null inherits nothing.
+  let inheritedCwd: string | null = null
+  if (opts.inheritCwd === true) {
+    const fromMeta = ws.panels?.find((p) => p.id === activePanelOf(state, id))
+    if (fromMeta != null && fromMeta.sshTarget == null) {
+      inheritedCwd = fromMeta.workingDirectory ?? null
+    }
+  }
   return {
     ...state,
     workspaces: state.workspaces.map((w) =>
-      w.id === id ? { ...w, tabs: [...(w.tabs ?? []), tab] } : w,
+      w.id === id
+        ? {
+            ...w,
+            tabs: [...(w.tabs ?? []), tab],
+            // Key hygiene again: no folder to inherit must not create a
+            // cwd-less panels entry.
+            ...(inheritedCwd != null
+              ? { panels: [...(w.panels ?? []), { id: newPanelId, workingDirectory: inheritedCwd }] }
+              : {}),
+          }
+        : w,
     ),
     activeTabId: { ...state.activeTabId, [id]: tab.id },
     activePanelId: {
       ...state.activePanelId,
-      [id]: leafIds(tab.layout)[0],
+      [id]: newPanelId,
     },
   }
 }

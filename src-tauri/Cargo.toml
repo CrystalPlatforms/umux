@@ -52,6 +52,9 @@ base64 = "0.22"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
+  # Ports tooltip (quickupdate 2026-09-13): the process snapshot behind the
+  # hover tooltip's parent map — replaces a ~0.6 s powershell/CIM spawn.
+  "Win32_System_Diagnostics_ToolHelp",
 ] }
 # HITL 2026-09-10: WebView2's browser accelerator keys (Ctrl+Shift+C opened
 # DevTools before the terminal could copy) are disabled through

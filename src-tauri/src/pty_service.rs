@@ -95,11 +95,17 @@ fn pt_err(e: impl std::fmt::Display) -> io::Error {
 //   - macOS: no /proc; shell out to `lsof -a -p <pid> -d cwd -Fn` and parse
 //     the `n<path>` line. Runs only at snapshot time (a handful of calls per
 //     save), never on the output hot path.
-//   - Windows: not available yet (v1.0 Phase 9 scope) — there `cwd()` falls
-//     back to the recorded spawn directory (#81 fix), so panels snapshot
-//     their STARTING directory and the sidebar's folder lines / branch
-//     labels have something to show (PO decision 2026-09-08); a shell that
-//     has `cd`ed still reports where it started.
+//   - Windows (quickupdate 2026-09-13, live-folder fix): read the cwd out of
+//     the target's PEB (NtQueryInformationProcess + ReadProcessMemory) —
+//     the same technique Process Hacker uses. One caveat measured on this
+//     machine that day: cmd.exe keeps its PEB cwd in sync with `cd`, but
+//     PowerShell does NOT (Set-Location never calls SetCurrentDirectory), so
+//     umux ALSO injects a tiny prompt hook for PowerShell spawns
+//     (`cwd_integration_argv`) that syncs the process cwd and emits an
+//     `OSC 9;9;<cwd>` report — the PEB read then follows `cd` for cmd, and
+//     PowerShell panels get instant reports through the parser. A shell that
+//     has neither (WSL, custom entries) still reports its spawn directory
+//     (`cwd()` fallback, the #81 fix / PO decision 2026-09-08).
 // Failure is always `None`: a cwd that cannot be read is simply not snapshotted.
 
 /// The current working directory of process `pid`, if it can be determined.
@@ -117,9 +123,172 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     parse_lsof_cwd(&String::from_utf8_lossy(&output.stdout))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+    win_cwd::process_cwd_via_peb(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
+}
+
+/// Windows live-cwd read (quickupdate 2026-09-13): the target's current
+/// directory lives in its PEB (`ProcessParameters->CurrentDirectory.DosPath`).
+/// Self-contained raw bindings on purpose — the needed functions sit behind
+/// extra `windows-sys` feature flags (NtQueryInformationProcess is Wdk-namespace)
+/// and three `extern`s beat a dependency-tree change. Declared layout offsets
+/// are the documented x64/x86 PEB shapes (the ones Process Hacker/System
+/// Informer encode). Any failure — no handle (exited child), a protected
+/// process, a short read — is `None`, and the caller falls back to the
+/// recorded spawn directory.
+#[cfg(target_os = "windows")]
+mod win_cwd {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
+
+    type Handle = *mut c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn ReadProcessMemory(
+            process: Handle,
+            base_address: *const c_void,
+            buffer: *mut c_void,
+            size: usize,
+            number_of_bytes_read: *mut usize,
+        ) -> i32;
+        fn CloseHandle(object: Handle) -> i32;
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(
+            process_handle: Handle,
+            process_information_class: u32,
+            process_information: *mut c_void,
+            process_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    const PROCESS_BASIC_INFORMATION: u32 = 0;
+    const STATUS_SUCCESS: i32 = 0;
+
+    // NtQueryInformationProcess(ProcessBasicInformation) answer.
+    #[repr(C)]
+    struct ProcessBasicInformation {
+        exit_status: i32,
+        peb_base_address: *mut c_void,
+        affinity_mask: usize,
+        base_priority: isize,
+        unique_process_id: usize,
+        inherited_from_unique_process_id: usize,
+    }
+
+    pub(super) fn process_cwd_via_peb(pid: u32) -> Option<PathBuf> {
+        unsafe {
+            // SAFETY: every call operates on raw handles/buffers the OS
+            // documents; each buffer is sized to the exact struct/string being
+            // requested, and failures (null handle, non-zero NTSTATUS, short
+            // read) return None instead of dereferencing anything.
+            let process = OpenProcess(
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                0,
+                pid,
+            );
+            if process.is_null() {
+                return None;
+            }
+            let cwd = read_cwd(process);
+            CloseHandle(process);
+            cwd
+        }
+    }
+
+    unsafe fn read_cwd(process: Handle) -> Option<PathBuf> {
+        let mut info = ProcessBasicInformation {
+            exit_status: 0,
+            peb_base_address: std::ptr::null_mut(),
+            affinity_mask: 0,
+            base_priority: 0,
+            unique_process_id: 0,
+            inherited_from_unique_process_id: 0,
+        };
+        let status = NtQueryInformationProcess(
+            process,
+            PROCESS_BASIC_INFORMATION,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            std::ptr::null_mut(),
+        );
+        if status != STATUS_SUCCESS || info.peb_base_address.is_null() {
+            return None;
+        }
+
+        // PEB->ProcessParameters pointer. 64-bit PEB: offset 0x20; 32-bit: 0x10.
+        #[cfg(target_pointer_width = "64")]
+        const PARAMS_OFFSET: usize = 0x20;
+        #[cfg(target_pointer_width = "32")]
+        const PARAMS_OFFSET: usize = 0x10;
+
+        let params = read_pointer(process, (info.peb_base_address as usize + PARAMS_OFFSET) as *const c_void)?;
+
+        // RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath (UNICODE_STRING):
+        // a u16 byte length then, one pointer later, the wide-char buffer.
+        // x64: Length @0x38, Buffer @0x40. x86: Length @0x24, Buffer @0x28.
+        #[cfg(target_pointer_width = "64")]
+        const DOS_PATH_LENGTH_OFFSET: usize = 0x38;
+        #[cfg(target_pointer_width = "64")]
+        const DOS_PATH_BUFFER_OFFSET: usize = 0x40;
+        #[cfg(target_pointer_width = "32")]
+        const DOS_PATH_LENGTH_OFFSET: usize = 0x24;
+        #[cfg(target_pointer_width = "32")]
+        const DOS_PATH_BUFFER_OFFSET: usize = 0x28;
+
+        let len_bytes = read_u16(process, (params as usize + DOS_PATH_LENGTH_OFFSET) as *const c_void)?;
+        let buffer = read_pointer(process, (params as usize + DOS_PATH_BUFFER_OFFSET) as *const c_void)?;
+        if len_bytes == 0 || len_bytes % 2 != 0 || len_bytes > 32 * 1024 {
+            return None; // empty, malformed, or absurd — trust nothing
+        }
+        let mut wide = vec![0u16; len_bytes as usize / 2];
+        if !read_memory(process, buffer as *const c_void, wide.as_mut_ptr() as *mut c_void, wide.len() * 2) {
+            return None;
+        }
+        // The PEB usually stores a trailing separator ("C:\dir\"); Path
+        // comparison ignores it, so keep the raw value.
+        let path = std::ffi::OsString::from_wide(&wide);
+        if path.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(path))
+        }
+    }
+
+    unsafe fn read_memory(process: Handle, base: *const c_void, out: *mut c_void, size: usize) -> bool {
+        let mut read = 0usize;
+        ReadProcessMemory(process, base, out, size, &mut read) != 0 && read == size
+    }
+
+    unsafe fn read_pointer(process: Handle, at: *const c_void) -> Option<*mut c_void> {
+        let mut buf = [0u8; std::mem::size_of::<usize>()];
+        if !read_memory(process, at, buf.as_mut_ptr() as *mut c_void, buf.len()) {
+            return None;
+        }
+        Some(usize::from_le_bytes(buf) as *mut c_void)
+    }
+
+    unsafe fn read_u16(process: Handle, at: *const c_void) -> Option<u16> {
+        let mut buf = [0u8; 2];
+        if !read_memory(process, at, buf.as_mut_ptr() as *mut c_void, 2) {
+            return None;
+        }
+        Some(u16::from_le_bytes(buf))
+    }
 }
 
 /// Parse the `n<path>` line out of `lsof -Fn` output (macOS cwd lookup).
@@ -293,6 +462,56 @@ pub fn split_shell_command(s: &str) -> Vec<String> {
     out
 }
 
+/// quickupdate 2026-09-13 — Windows shell-integration injection (pure,
+/// unit-testable). Given the spawn argv of a LOCAL shell, wrap the plain
+/// launchers umux itself builds so their cwd becomes visible:
+///   - PowerShell (pwsh / powershell): chain the user's prompt with one that
+///     syncs `[Environment]::CurrentDirectory` (the PEB read follows it) and
+///     emits `OSC 9;9;<cwd>`. `-NoExit` keeps the session interactive;
+///     the guard on `$global:__umuxOrigPrompt` is process-local, so a shell
+///     spawned INSIDE a hooked shell (nested panels) hooks itself cleanly
+///     and the chain never grows.
+///   - cmd: a PROMPT override — cmd expands `$P` at every render, so the
+///     same prompt shows the OSC report and the ordinary `PATH>` text.
+/// Anything else (WSL launchers, custom command lines, non-PowerShell
+/// flags) passes through untouched: umux must never reshape a launch it
+/// didn't build, and foreign shells keep the spawn-directory fallback.
+#[cfg(windows)]
+fn cwd_integration_argv(argv: Vec<String>) -> Vec<String> {
+    const POWERSHELL_CWD_HOOK: &str = r#"if (-not $global:__umuxOrigPrompt) { $global:__umuxOrigPrompt = $function:prompt; function global:prompt { try { [Environment]::CurrentDirectory = $PWD.ProviderPath } catch {}; [string]::Concat([char]27, ']9;9;', $PWD.ProviderPath, [char]7, (& $global:__umuxOrigPrompt)) } }"#;
+    const CMD_CWD_PROMPT: &str = r"PROMPT $E]9;9;$P$E\$P$G";
+
+    let program = match argv.first() {
+        Some(p) => p.clone(),
+        None => return argv,
+    };
+    let base = program.rsplit(['\\', '/']).next().unwrap_or(&program);
+    let lower = base.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    match stem {
+        "powershell" | "pwsh" => {
+            // The plain launchers umux builds are exactly: [exe] or
+            // [exe, -NoLogo] (shell_argv). Anything carrying user arguments
+            // (-Command, -File, WSL-style) must stay verbatim.
+            let plain = argv.len() == 1
+                || (argv.len() == 2 && argv[1].eq_ignore_ascii_case("-NoLogo"));
+            if plain {
+                vec![
+                    program,
+                    "-NoLogo".to_string(),
+                    "-NoExit".to_string(),
+                    "-Command".to_string(),
+                    POWERSHELL_CWD_HOOK.to_string(),
+                ]
+            } else {
+                argv
+            }
+        }
+        "cmd" if argv.len() == 1 => vec![program, "/k".to_string(), CMD_CWD_PROMPT.to_string()],
+        _ => argv,
+    }
+}
+
 /// Decide the PTY argv for a `shell` string (pure — unit-testable):
 /// - a single token is a plain program path (quotes stripped) and keeps the
 ///   login flag — today's behavior;
@@ -379,6 +598,15 @@ impl PtyService {
         let login_flag = "-l";
 
         let argv = shell_argv(shell, login_flag);
+        // quickupdate 2026-09-13 (Windows live folders): PowerShell never
+        // updates its process cwd on `cd`, and the OS offers no other read,
+        // so umux injects a tiny prompt hook into ITS OWN plain launches —
+        // sync the process cwd (keeps the PEB read honest) and emit an
+        // `OSC 9;9;<cwd>` report per prompt (instant updates through the
+        // parser). cmd gets the same via a PROMPT override. User-written
+        // command lines pass through untouched (see cwd_integration_argv).
+        #[cfg(windows)]
+        let argv = cwd_integration_argv(argv);
         self.spawn_argv(argv, cwd, cols, rows)
     }
 
@@ -1078,23 +1306,22 @@ mod tests {
         }
     }
 
-    // T-D4 (#81 fix 2026-09-10 — the Windows starting directory): where the
-    // OS has no way to read a live process's cwd (Windows today), `cwd()`
-    // must report the directory the shell was SPAWNED in instead of None —
-    // the session snapshot then stores the tab's starting directory, which
-    // is what the sidebar's folder lines and branch labels show there (PO
-    // decision 2026-09-08; live cwd on Windows stays a separate future
-    // task). On Unix the live read wins and equals the spawn directory on a
-    // fresh panel, so the same assertion holds trivially there and the
-    // fallback never masks the live answer (`cwd_follows_cd` keeps
-    // covering `cd`).
+    // T-D4 (#81 fix 2026-09-10 — the starting directory; reworked by the
+    // quickupdate 2026-09-13 live-folder fix): a FRESH panel must report its
+    // spawn directory — the session snapshot stores it and the sidebar's
+    // folder lines / branch labels show it (PO decision 2026-09-08). On Unix
+    // the live read wins and trivially equals the spawn directory; on
+    // Windows the PEB read now answers live too (quickupdate 2026-09-13) —
+    // which is why the spawn directory here STAYS ALIVE: cmd spawned in a
+    // deleted directory silently rehomes to %USERPROFILE%, and the old
+    // dropped-TempDir shape only ever passed through the None-fallback that
+    // the live read removed.
     #[test]
     fn cwd_reports_spawn_directory_when_os_cannot_read_live_cwd() {
         #[cfg(windows)]
-        let dir = {
-            let tmp = tempfile::tempdir().unwrap();
-            tmp.path().to_path_buf()
-        };
+        let _keep = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let dir = _keep.path().to_path_buf();
         // Canonicalized on Unix (as in cwd_follows_cd) so the kernel's
         // answer matches through /tmp and /var symlinks on macOS.
         #[cfg(not(windows))]
@@ -1123,6 +1350,148 @@ mod tests {
             Some(dir),
             "expected cwd() to report the spawn directory when the OS cannot read a live cwd"
         );
+    }
+
+    // quickupdate 2026-09-13 — the Windows live-folder fix, the same shape as
+    // T-D1 but against the PEB read: cmd keeps its process cwd in sync with
+    // `cd`, so `cwd()` must follow into a real subdirectory. (PowerShell
+    // panels are covered end-to-end by the OSC 9;9 report path, which needs
+    // a live prompt render — that is HITL territory, not a CI assertion.)
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cwd_follows_cd_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("subdir");
+        std::fs::create_dir(&sub).expect("create subdirectory");
+        let mut svc = PtyService::new();
+        let (handle, _rx) = svc
+            .open("cmd.exe", tmp.path().to_path_buf(), 80, 24)
+            .expect("open pty");
+
+        let cd = format!("cd {}\r\n", sub.display());
+        svc.write(&handle, cd.as_bytes()).expect("write cd");
+
+        // cmd applies the cd asynchronously; poll for the PEB answer.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw = None;
+        while Instant::now() < deadline {
+            if let Some(cwd) = svc.cwd(&handle) {
+                saw = Some(cwd);
+                if saw.as_ref().unwrap() == &sub {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        svc.close(&handle);
+
+        assert_eq!(saw, Some(sub), "expected the PEB read to follow cmd's `cd`");
+    }
+
+    // quickupdate 2026-09-13 (HITL follow-up — the Windows ports tooltip):
+    // the full backend path against a REAL ConPTY panel. The panel spawns the
+    // shell the app spawns (cwd hook included); a listener starts as that
+    // shell's CHILD — the `npm run dev` shape — and `aggregate_ports` must
+    // surface its port for the tab's root pid. This pins the root-pid and
+    // tree-walk contract the tooltip lives on (the root itself holding a
+    // socket is deliberately NOT covered: ports_for_root counts descendants,
+    // per its own doc test T-B*).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ports_tooltip_finds_descendant_listener_windows() {
+        use crate::listening_ports;
+
+        let mut svc = PtyService::new();
+        let (handle, _rx) = svc
+            .open("powershell.exe", std::env::temp_dir(), 80, 24)
+            .expect("open pty");
+        std::thread::sleep(Duration::from_millis(800));
+        let _ = svc.write(
+            &handle,
+            b"Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,8123).Start(); Start-Sleep 25'\r\n",
+        )
+        .expect("write listener spawn");
+
+        let root = svc.child_pid(&handle).expect("child pid");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut found = false;
+        while Instant::now() < deadline {
+            let listeners = listening_ports::listening_sockets();
+            let edges = listening_ports::parent_edges();
+            if listening_ports::aggregate_ports(&listeners, &edges, &[root]).contains(&8123) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        svc.close(&handle);
+        assert!(
+            found,
+            "expected the descendant listener on :8123 in the tab's ports"
+        );
+    }
+
+    // --- cwd_integration_argv (pure — which launches get the hook) ----------
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn integration_wraps_plain_powershell_launcher() {
+        let wrapped = cwd_integration_argv(vec![
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_string(),
+            "-NoLogo".to_string(),
+        ]);
+        assert_eq!(wrapped.len(), 5, "exe + -NoLogo -NoExit -Command <hook>");
+        assert_eq!(wrapped[1], "-NoLogo");
+        assert_eq!(wrapped[2], "-NoExit");
+        assert_eq!(wrapped[3], "-Command");
+        assert!(wrapped[4].contains("__umuxOrigPrompt"), "the prompt-chaining hook");
+        assert!(wrapped[4].contains("]9;9;"), "the OSC 9;9 emission");
+
+        // Bare (no flag yet) gets the same treatment.
+        let bare = cwd_integration_argv(vec!["pwsh".to_string()]);
+        assert_eq!(bare[2], "-NoExit", "pwsh bare path is wrapped too");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn integration_leaves_user_command_lines_alone() {
+        // A user's own -File / -Command launch is never reshaped.
+        let with_file = cwd_integration_argv(vec![
+            "powershell.exe".to_string(),
+            "-NoExit".to_string(),
+            "-File".to_string(),
+            "profile.ps1".to_string(),
+        ]);
+        assert_eq!(with_file.len(), 4, "user command line passes verbatim");
+
+        // cmd with extra arguments stays untouched too.
+        let cmd_with_args = cwd_integration_argv(vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "build.bat".to_string(),
+        ]);
+        assert_eq!(cmd_with_args.len(), 3);
+
+        // Foreign shells (WSL launchers, nushell, ...) never get hooks.
+        let wsl = cwd_integration_argv(vec![
+            r"C:\Windows\system32\wsl.exe".to_string(),
+            "-d".to_string(),
+            "Ubuntu".to_string(),
+        ]);
+        assert_eq!(wsl.len(), 3);
+
+        let nu = cwd_integration_argv(vec![r"C:\tools\nu.exe".to_string()]);
+        assert_eq!(nu.len(), 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn integration_wraps_plain_cmd_launcher() {
+        let wrapped = cwd_integration_argv(vec!["cmd.exe".to_string()]);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[1], "/k");
+        assert_eq!(wrapped[2], r"PROMPT $E]9;9;$P$E\$P$G");
     }
 
     // T-D3 (macOS — the pure lsof parser):

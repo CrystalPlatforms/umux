@@ -51,9 +51,14 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 
 // Boundary: Tauri events. We capture the `config_fallback` handler so a test
 // can fire it and assert the UI surfaces a non-silent warning (Phase 18 / #19,
-// AC3). Other events are not used by WorkspaceShell today.
+// AC3), and the `pty_cwd` handler for the shell-announced cwd reports
+// (quickupdate 2026-09-13, the Windows live-folder fix). Other events are not
+// used by WorkspaceShell today.
 let configFallbackHandler:
   | ((e: { payload: { message: string } }) => void)
+  | null = null
+let ptyCwdHandler:
+  | ((e: { payload: { id: number; cwd: string } }) => void)
   | null = null
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (
@@ -61,6 +66,8 @@ vi.mock('@tauri-apps/api/event', () => ({
     handler: (e: { payload: { message: string } }) => void,
   ) => {
     if (name === 'config_fallback') configFallbackHandler = handler
+    if (name === 'pty_cwd')
+      ptyCwdHandler = handler as unknown as typeof ptyCwdHandler
     return Promise.resolve(() => {})
   },
 }))
@@ -4451,6 +4458,89 @@ describe('#80 git branch on tab rows', () => {
     expect(
       await screen.findByText('main', { selector: '.tab-branch' }),
     ).toBeInTheDocument()
+  })
+})
+
+// quickupdate 2026-09-13 — the Windows live-folder fix, frontend half. The
+// injected shell prompt hooks emit `OSC 9;9;<cwd>` per prompt render; the
+// backend parser surfaces it and relays it as `pty_cwd`. Assumptions encoded:
+//  - a LOCAL panel's folder line follows the reported directory INSTANTLY
+//    (ahead of the 20 s periodic snapshot that carries the poll-based fix);
+//  - an SSH panel's report is IGNORED — a remote path is not a local
+//    workingDirectory, and the folder line stays chip-only;
+//  - NOT tested here: the parser recognition and shell-injection argv
+//    (pty_service/osc_parser cargo tests) and the real hook behavior
+//    (HITL on Windows).
+describe('pty_cwd: shell-announced cwd reports', () => {
+  const seedFolders = () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', workingDirectory: '/Users/panad/work' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  it("a local panel's folder line follows the reported cwd instantly", async () => {
+    surfacesReportHandles = true
+    seedFolders()
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    const folder = () =>
+      screen
+        .getByTestId('workspace-row-ws-1')
+        .querySelector('.workspace-folder-line__folder')?.textContent
+    expect(folder()).toBe('panad/work')
+
+    // The shell's prompt hook announces the new directory (handle 42 = p-1
+    // via the surface mock's onOpened).
+    await act(async () => {
+      ptyCwdHandler?.({ payload: { id: 42, cwd: '/Users/panad/umux' } })
+    })
+    expect(folder()).toBe('panad/umux')
+  })
+
+  it("an SSH panel's report is ignored (a remote path is not a local cwd)", async () => {
+    surfacesReportHandles = true
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1', sshTarget: 'adam@host' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await screen.findByTestId('panel-ws-1')
+
+    // The chip-only line is there (SSH = no folder), and the report for its
+    // handle 42 must not invent one — the folder span stays EMPTY (a null
+    // folder renders an empty span, not the remote tail).
+    await act(async () => {
+      ptyCwdHandler?.({ payload: { id: 42, cwd: '/home/adam/remote' } })
+    })
+    const row = screen.getByTestId('workspace-row-ws-1')
+    expect(row.querySelector('.workspace-folder-line')).not.toBeNull()
+    expect(
+      row.querySelector('.workspace-folder-line__folder')?.textContent,
+    ).toBe('')
   })
 })
 

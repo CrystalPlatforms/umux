@@ -56,6 +56,11 @@ pub struct PushResult {
     pub passthrough: Vec<u8>,
     /// Notifications recognized in this chunk.
     pub events: Vec<NotificationEvent>,
+    /// A ConEmu-style cwd report (`OSC 9;9;<path>`) seen in this chunk — the
+    /// path the shell's prompt hook announced. The sequence still passes
+    /// through byte-identical (it is a cwd report, not a notification we
+    /// consume), so this field is pure bonus metadata for the cwd tracker.
+    pub cwd_report: Option<String>,
 }
 
 /// Stateful OSC parser. Feed it PTY bytes; collect passthrough + events.
@@ -175,6 +180,15 @@ impl OscParser {
             &[]
         };
 
+        // A ConEmu-style cwd report (`9;9;<path>`) is never a notification,
+        // but it IS meaningful: surface the path as a cwd report while still
+        // passing the whole sequence through byte-identical — the terminal
+        // output rule outweighs the tracker (quickupdate 2026-09-13, the
+        // Windows live-folder fix).
+        if let Some(path) = match_cwd_report(params) {
+            result.cwd_report = Some(path);
+        }
+
         if let Some(event) = match_notification(params) {
             result.events.push(event);
         } else {
@@ -188,6 +202,24 @@ impl OscParser {
         self.in_osc = false;
         self.osc_esc = false;
         self.buf.clear();
+    }
+}
+
+/// If `params` is a ConEmu-style cwd report — `9;9;<path>` — return the path
+/// (surrounding double quotes stripped; ConEmu quotes the path, umux's own
+/// shell hooks don't, both must read the same). Anything else is None. Pure.
+fn match_cwd_report(params: &[u8]) -> Option<String> {
+    let rest = params.strip_prefix(b"9;9;")?;
+    let path = String::from_utf8_lossy(rest).into_owned();
+    let path = path
+        .strip_prefix('"')
+        .and_then(|p| p.strip_suffix('"'))
+        .unwrap_or(&path);
+    // An empty payload is noise, not a directory.
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
     }
 }
 
@@ -360,7 +392,63 @@ mod tests {
         assert!(result.events.is_empty());
     }
 
-    // T6 (AC2 — a non-notification OSC passes through byte-identical, terminator
+    // T-Q1 (quickupdate 2026-09-13 — `9;9;<cwd>` is a cwd report, NOT a
+    // notification: it surfaces as cwd_report AND passes through byte-identical;
+    // the phantom-notification regression from v0.2 Phase 2 / #26 must not
+    // return):
+    //   Input:  ESC ] 9 ; 9 ; C:\proj BEL
+    //   Output: cwd_report "C:\proj", passthrough == input exactly, no events.
+    #[test]
+    fn cwd_report_surfaces_and_passes_through() {
+        let mut p = OscParser::new();
+        let input = b"\x1b]9;9;C:\\proj\x07";
+
+        let result = p.push(input);
+
+        assert_eq!(result.cwd_report.as_deref(), Some("C:\\proj"));
+        assert_eq!(result.passthrough, input.as_slice());
+        assert!(result.events.is_empty());
+    }
+
+    // T-Q2 (ConEmu quotes the path; umux's own hooks don't — both read the
+    // same):   Input:  ESC ] 9 ; 9 ; "C:\my proj" BEL  ->  cwd_report C:\my proj.
+    #[test]
+    fn cwd_report_quoted_payload_is_unquoted() {
+        let mut p = OscParser::new();
+
+        let result = p.push(b"\x1b]9;9;\"C:\\my proj\"\x07");
+
+        assert_eq!(result.cwd_report.as_deref(), Some("C:\\my proj"));
+    }
+
+    // T-Q3 (ST terminator and a split across chunk boundaries work the same as
+    // for notifications — one state machine):
+    //   Input:  push("ESC ] 9 ; 9 ; /ho")  then  push("me BEL")
+    //   Output: cwd_report "/home" on the second push.
+    #[test]
+    fn cwd_report_split_across_chunks_is_reassembled() {
+        let mut p = OscParser::new();
+
+        let r1 = p.push(b"\x1b]9;9;/ho");
+        assert!(r1.cwd_report.is_none());
+
+        let r2 = p.push(b"me\x07");
+        assert_eq!(r2.cwd_report.as_deref(), Some("/home"));
+    }
+
+    // T-Q4 (an empty payload is noise, not a directory):
+    //   Input:  ESC ] 9 ; 9 ; BEL  ->  cwd_report None (still passes through).
+    #[test]
+    fn cwd_report_empty_payload_is_none() {
+        let mut p = OscParser::new();
+        let input = b"\x1b]9;9;\x07";
+
+        let result = p.push(input);
+
+        assert!(result.cwd_report.is_none());
+        assert_eq!(result.passthrough, input.as_slice());
+    }
+
     // included; the OSC parser must never alter terminal output):
     //   Input:  ESC ] 0 ; my title BEL   (set-window-title, not a notification)
     //   Output: passthrough == input exactly, no events.

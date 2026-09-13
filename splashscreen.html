@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>umux</title>
+    <!--
+      Splashscreen (quickupdate 2026-09-13): a static, dependency-free page —
+      it must paint before the React bundle exists, so it is plain HTML/CSS.
+      The loader is the crs-assets Loader component (loader.tsx) ported 1:1 to
+      static CSS — same class names, same keyframes — with the dot color set
+      to umux's accent (--accent, #6aa0ff) instead of the component's green.
+      The main window starts hidden (tauri.conf.json); the frontend invokes
+      close_splashscreen once boot (workspaces + settings + session restore)
+      is done, which closes this window and reveals the app.
+    -->
+    <style>
+      :root {
+        --bg-app: #111317;
+        --accent: #6aa0ff;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg-app);
+        overflow: hidden;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: default;
+      }
+      .splash-icon {
+        width: 88px;
+        height: 88px;
+        /* The source PNG paints on black; blend the square into the app bg. */
+        mix-blend-mode: screen;
+      }
+
+      .uib-dot-loader {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        height: 40px;
+        width: 40px;
+        animation: uib-smoothRotate 1.80s linear infinite;
+      }
+
+      .uib-dot-loader .uib-dot {
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        height: 100%;
+        width: 100%;
+        animation: uib-rotate 1s ease-in-out infinite;
+      }
+
+      .uib-dot-loader .uib-dot::before {
+        content: "";
+        height: 6.80px;
+        width: 6.80px;
+        border-radius: 50%;
+        background-color: var(--accent);
+        transition: background-color 0.3s ease;
+      }
+
+      .uib-dot-loader .uib-dot:nth-child(2) {
+        animation-delay: -0.417s;
+      }
+      .uib-dot-loader .uib-dot:nth-child(3) {
+        animation-delay: -0.334s;
+      }
+      .uib-dot-loader .uib-dot:nth-child(4) {
+        animation-delay: -0.251s;
+      }
+      .uib-dot-loader .uib-dot:nth-child(5) {
+        animation-delay: -0.167s;
+      }
+      .uib-dot-loader .uib-dot:nth-child(6) {
+        animation-delay: -0.084s;
+      }
+
+      @keyframes uib-rotate {
+        0% {
+          transform: rotate(0deg);
+        }
+        65%,
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes uib-smoothRotate {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <img class="splash-icon" src="/umux-icon.png" alt="" draggable="false" />
+    <div class="uib-dot-loader" role="status" aria-label="Loading">
+      <div class="uib-dot"></div>
+      <div class="uib-dot"></div>
+      <div class="uib-dot"></div>
+      <div class="uib-dot"></div>
+      <div class="uib-dot"></div>
+      <div class="uib-dot"></div>
+      <span class="sr-only">Loading...</span>
+    </div>
+  </body>
+</html>

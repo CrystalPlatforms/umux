@@ -1299,6 +1299,65 @@ describe('workspace state', () => {
       expect('shell' in tab).toBe(false)
     })
 
+    // quickupdate 2026-09-13 (Adam): a new tab starts in the folder the tab
+    // I was on sits in — inheritCwd seeds the new panel's workingDirectory
+    // from the workspace's ACTIVE panel (the same speaking-panel value the
+    // folder lines render). Opt-in; callers gate it on session restore (#27).
+    it('addTab with inheritCwd seeds the new panel from the active panel folder', () => {
+      let state = one()
+      state = upsertPanelCwd(state, 'p-1', '/home/adam/proj')
+
+      const next = addTab(state, 'ws-1', seq('tab-2', 'p-2'), undefined, {
+        inheritCwd: true,
+      })
+
+      expect(next.workspaces[0].panels).toEqual([
+        { id: 'p-1', workingDirectory: '/home/adam/proj' },
+        { id: 'p-2', workingDirectory: '/home/adam/proj' },
+      ])
+      // The new tab is active and its fresh panel carries the folder.
+      expect(next.activeTabId['ws-1']).toBe('tab-2')
+      expect(activePanelOf(next, 'ws-1')).toBe('p-2')
+    })
+
+    it('addTab without inheritCwd stays seed-free (default unchanged)', () => {
+      let state = one()
+      state = upsertPanelCwd(state, 'p-1', '/home/adam/proj')
+
+      const next = addTab(state, 'ws-1', seq('tab-2', 'p-2'))
+
+      expect(next.workspaces[0].panels).toEqual([
+        { id: 'p-1', workingDirectory: '/home/adam/proj' },
+      ])
+    })
+
+    it('addTab inheritCwd skips an SSH active tab and a folder-less panel', () => {
+      // An SSH active tab carries a REMOTE path — never seed a local tab
+      // with it. Build the ssh panel entry directly (upsertPanelCwd cannot
+      // express sshTarget).
+      const base = one()
+      const sshPanels = [
+        { id: 'p-1', workingDirectory: '/home/adam/proj', sshTarget: 'adam@host' },
+      ]
+      const sshState = {
+        ...base,
+        workspaces: base.workspaces.map((w) =>
+          w.id === 'ws-1' ? { ...w, panels: sshPanels } : w,
+        ),
+      }
+      const fromSsh = addTab(sshState, 'ws-1', seq('tab-2', 'p-2'), undefined, {
+        inheritCwd: true,
+      })
+      expect(fromSsh.workspaces[0].panels).toEqual(sshPanels)
+
+      // A panel with no recorded folder (fresh, restore off) inherits
+      // nothing — and must not create a cwd-less panels entry either.
+      const next = addTab(one(), 'ws-1', seq('tab-2', 'p-2'), undefined, {
+        inheritCwd: true,
+      })
+      expect(next.workspaces[0].panels).toEqual([])
+    })
+
     it('closeTab removes the tab, its panels entries, and activates the neighbor', () => {
       let state = one()
       state = addTab(state, 'ws-1', seq('tab-2', 'p-2'))
