@@ -24,7 +24,7 @@
 //  - NOT tested here: React wiring, Tauri event emission, rendering.
 
 import { describe, it, expect } from 'vitest'
-import { AgentStatusMachine } from './agentStatus'
+import { AgentStatusMachine, WaitingPingGate } from './agentStatus'
 
 describe('AgentStatusMachine', () => {
   // T1 (tracer — AC1: byte activity means the agent is working):
@@ -461,3 +461,172 @@ describe('AgentStatusMachine CLI presence (model v2)', () => {
   })
 })
 
+
+// WaitingPingGate (issue #76 follow-up, HITL 2026-09-14) — whether a panel's
+// fresh entry into presence-based needs-attention MAY fire a desktop ping.
+//
+// Assumptions encoded:
+//  - The caller (the tick loop) fires only on a STATE TRANSITION, but a
+//    quietly idle AI CLI's own TUI repaints flip working↔needs-attention
+//    every few seconds — transitions alone still spam. The gate makes the
+//    ping ONE per waiting session: after it fires, re-entries stay silent.
+//  - Re-armed ONLY by real engagement: the user SUBMITS a prompt (the wait
+//    that follows the agent's work is a new event) or PRESENCE flips (the
+//    CLI exited/restarted — a new session). Draft typing and focus do not.
+//  - NOT tested here: the invoke itself and where the glue calls the gate
+//    (WorkspaceShell tick loop — HITL-verified, per the block's convention).
+describe('WaitingPingGate', () => {
+  it('allows the first waiting transition of a panel', () => {
+    const gate = new WaitingPingGate()
+
+    expect(gate.canFire('p-1')).toBe(true)
+  })
+
+  it('fires once per waiting session: repaint re-entries stay silent', () => {
+    const gate = new WaitingPingGate()
+    gate.markFired('p-1')
+
+    expect(gate.canFire('p-1')).toBe(false)
+  })
+
+  it('a submitted prompt re-arms the ping for the wait after the work', () => {
+    const gate = new WaitingPingGate()
+    gate.markFired('p-1')
+
+    gate.onPromptSubmitted('p-1')
+
+    expect(gate.canFire('p-1')).toBe(true)
+  })
+
+  it('a presence flip (CLI exited or restarted) starts a new session', () => {
+    const gate = new WaitingPingGate()
+    gate.markFired('p-1')
+
+    gate.onPresenceChanged('p-1')
+
+    expect(gate.canFire('p-1')).toBe(true)
+  })
+
+  it('a draft (unsubmitted) keystroke does not re-arm', () => {
+    const gate = new WaitingPingGate()
+    gate.markFired('p-1')
+
+    expect(gate.canFire('p-1')).toBe(false)
+  })
+
+  it('a closed panel returns to the fresh state after forget', () => {
+    const gate = new WaitingPingGate()
+    gate.markFired('p-1')
+    gate.forget('p-1')
+
+    expect(gate.canFire('p-1')).toBe(true)
+  })
+})
+
+describe('AgentStatusMachine.onPresence (return value, #76 follow-up)', () => {
+  // The tick-loop glue re-arms the waiting-ping gate ONLY on a real presence
+  // flip — poll answers repeating "still present" (every ~2s) must read as
+  // false, or every repaint cycle would re-arm the gate and the ~10s ping
+  // spam would return.
+  it('reports true only when presence actually flipped', () => {
+    const m = new AgentStatusMachine()
+
+    expect(m.onPresence(0, true)).toBe(true) // absent -> present is a flip
+    expect(m.onPresence(500, true)).toBe(false) // repeat "present" answers are not
+    expect(m.onPresence(1000, true)).toBe(false)
+    expect(m.onPresence(1500, false)).toBe(true) // present -> absent is a flip
+    expect(m.onPresence(2000, false)).toBe(false)
+  })
+})
+
+// HITL 2026-09-14 — non-OSC CLIs (Claude Code on macOS never sends a
+// completion sequence since the 9;9 cwd disambiguation; its real idle-OSC
+// lands only after ~60 s). A submitted prompt must not pin the panel to
+// working forever: once the response has PRODUCED OUTPUT, a long silence
+// after it is the turn's END — not silent thinking. The two are kept apart:
+//   silence BEFORE any output  -> thinking, stays working (T-P4 contract)
+//   silence AFTER output        -> the turn ended, waiting again
+describe('AgentStatusMachine: post-response decay (no completion signal)', () => {
+  it('a prompt whose response streamed decays to needs-attention once silence outlasts the response window', () => {
+    const m = new AgentStatusMachine({ quietMs: 2000 })
+    m.onPresence(0, true)
+    m.onUserInput(100, true) // prompt sent -> working (thinking)
+    // The response streamed (past the submit's 1s redraw window — the end is
+    // announced by bytes, not by any OSC completion).
+    m.onActivity(1500, 8000)
+    expect(m.status).toBe('working')
+
+    m.onTick(1500 + 2000) // a 2s gap is nothing — TUIs breathe
+    expect(m.status).toBe('working')
+
+    m.onTick(1500 + 10_000) // the response window outlapsed: the turn is over
+    expect(m.status).toBe('needs-attention')
+  })
+
+  it('pure silent thinking never decays, however long (T-P4 stays true)', () => {
+    const m = new AgentStatusMachine({ quietMs: 2000 })
+    m.onPresence(0, true)
+    m.onUserInput(100, true) // prompt sent, NOTHING output yet
+
+    m.onTick(100 + 60_000)
+
+    expect(m.status).toBe('working')
+  })
+
+  it('a new prompt resets the response window: silence without output stays working', () => {
+    const m = new AgentStatusMachine({ quietMs: 2000 })
+    m.onPresence(0, true)
+    m.onUserInput(100, true)
+    m.onActivity(1000, 4000) // first response streamed
+    m.onUserInput(5000, true) // follow-up prompt — thinking again
+    expect(m.status).toBe('working')
+
+    m.onTick(5000 + 10_000)
+
+    expect(m.status).toBe('working')
+  })
+
+  it('a real completion signal still wins instantly (no 10s wait for OSC CLIs)', () => {
+    const m = new AgentStatusMachine({ quietMs: 2000 })
+    m.onPresence(0, true)
+    m.onUserInput(100, true)
+    m.onActivity(1000, 4000)
+
+    m.onCompletion(1100) // the turn ended via OSC — no decay window applies
+
+    expect(m.status).toBe('needs-attention')
+  })
+})
+
+describe('AgentStatusMachine: the real probe timeline (HITL 2026-09-14)', () => {
+  // Byte-for-byte the flow the pty probe recorded: claude boots quiet (waiting
+  // ping #1), Adam types drafts + Enter, claude thinks and streams the
+  // response, then goes SILENT — the only "end of turn" signal a non-OSC CLI
+  // gives. The panel must reach needs-attention ~10 s after the last byte,
+  // NOT when claude's own ~60 s idle escape (OSC 9 "waiting for your input")
+  // finally lands.
+  it('drafts, Enter, a streamed response, then silence -> waiting ~10s after the last byte', () => {
+    const m = new AgentStatusMachine({ quietMs: 2000 })
+    m.onPresence(0, true)
+    m.onTick(2500) // boot quiet -> waiting
+    expect(m.status).toBe('needs-attention')
+
+    m.onUserInput(5000, false) // drafts...
+    m.onUserInput(5400, false)
+    m.onUserInput(5800, true) // Enter -> working (thinking)
+    expect(m.status).toBe('working')
+
+    // Spinner + answer chunks (past the submit's 1s redraw window).
+    m.onActivity(7000, 300)
+    m.onActivity(9000, 5000)
+    m.onActivity(12000, 2000) // response done at t=12s
+
+    m.onTick(14000) // 2s of silence — the TUI breathes, hold
+    expect(m.status).toBe('working')
+    m.onTick(21000) // 9s — still inside the response window
+    expect(m.status).toBe('working')
+
+    m.onTick(22000) // 10s after the last byte: the turn is over
+    expect(m.status).toBe('needs-attention')
+  })
+})

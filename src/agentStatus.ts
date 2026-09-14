@@ -38,6 +38,47 @@
 /// The three panel states from the PRD (v0.2 Phase 2).
 export type AgentStatus = 'idle' | 'working' | 'needs-attention'
 
+/// Whether a panel's fresh entry into presence-based needs-attention may fire
+/// a desktop waiting ping (#76). Firing only on state TRANSITIONS is not
+/// enough: a quietly idle AI CLI's own TUI repaints flip working↔needs
+/// -attention every few seconds (HITL 2026-09-14: "a notification every
+/// ~10s"), so each cycle re-entered the notify branch. The gate makes the
+/// ping ONE per waiting session: after it fires, re-entries stay silent until
+/// real engagement — the user SUBMITS a prompt (the wait that follows the
+/// agent's work is a new event, like a completion ping) or PRESENCE flips
+/// (the CLI exited / restarted — a new session). Draft typing and focusing
+/// never re-arm. Pure: no clock, no I/O — the glue owns when to ask.
+export class WaitingPingGate {
+  private armed = new Map<string, boolean>()
+
+  /** May this panel's fresh entry into needs-attention fire a ping? A panel
+   *  never seen before is armed — its first wait deserves the ping. */
+  canFire(panelId: string): boolean {
+    return this.armed.get(panelId) ?? true
+  }
+
+  /** A ping just fired for this panel — silence until re-armed. */
+  markFired(panelId: string): void {
+    this.armed.set(panelId, false)
+  }
+
+  /** The user submitted a prompt here — the next wait is a new event. */
+  onPromptSubmitted(panelId: string): void {
+    this.armed.set(panelId, true)
+  }
+
+  /** Presence flipped (CLI appeared or exited) — either way the next wait
+   *  belongs to a fresh session. */
+  onPresenceChanged(panelId: string): void {
+    this.armed.set(panelId, true)
+  }
+
+  /** The panel closed — drop its state (a recreated panel starts armed). */
+  forget(panelId: string): void {
+    this.armed.delete(panelId)
+  }
+}
+
 export type AgentStatusMachineOptions = {
   /** Ms of output silence before working falls back to idle. */
   quietMs?: number
@@ -51,6 +92,12 @@ export type AgentStatusMachineOptions = {
    *  own trailing render (the finished response's TUI repaint), not new
    *  work — it can be tens of KB and must not resume 'working'. */
   completionSettleMs?: number
+  /** Ms of silence AFTER a prompt's response has streamed that ends the turn
+   *  for non-OSC CLIs (HITL 2026-09-14): they never announce the end, so the
+   *  machine falls back to "output stopped, the agent waits". Longer than
+   *  quietMs so a TUI's breathing repaints or a short tool-think never trip
+   *  it; a real completion signal still wins instantly. */
+  respondedQuietMs?: number
 }
 
 export class AgentStatusMachine {
@@ -79,11 +126,16 @@ export class AgentStatusMachine {
   // The user SUBMITTED a prompt to a present CLI and no completion has
   // arrived: the agent is processing (possibly silently) — that is work.
   private pendingPrompt = false
+  // HITL 2026-09-14: OUTPUT arrived while the prompt was pending — the
+  // response has started (or a tool ran), so a following LONG silence is the
+  // turn's END for a non-OSC CLI, not silent thinking. Reset per prompt.
+  private respondedSincePrompt = false
   private readonly quietMs: number
   private readonly redrawMs: number
   private readonly resumeBytes: number
   private readonly resumeWindowMs: number
   private readonly completionSettleMs: number
+  private readonly respondedQuietMs: number
 
   constructor(options: AgentStatusMachineOptions = {}) {
     this.quietMs = options.quietMs ?? 2000
@@ -91,6 +143,7 @@ export class AgentStatusMachine {
     this.resumeBytes = options.resumeBytes ?? 2048
     this.resumeWindowMs = options.resumeWindowMs ?? 1000
     this.completionSettleMs = options.completionSettleMs ?? 3000
+    this.respondedQuietMs = options.respondedQuietMs ?? 10_000
   }
 
   get status(): AgentStatus {
@@ -150,6 +203,10 @@ export class AgentStatusMachine {
     // handled above — repaint right after a resize/focus is not work,
     // HITL #1, and never flickered harder than in NA: see above).
     this.currentStatus = 'working'
+    // Output while a prompt is pending: the response has STARTED (HITL
+    // 2026-09-14) — the silence that eventually follows it is the turn's
+    // end, not silent thinking.
+    if (this.pendingPrompt) this.respondedSincePrompt = true
   }
 
   /** A parsed OSC completion event arrived for this panel at `now`. */
@@ -158,6 +215,7 @@ export class AgentStatusMachine {
     this.naFrom = 'completion'
     this.lastCompletionAt = now
     this.pendingPrompt = false
+    this.respondedSincePrompt = false
     this.resumeWindowStart = null
     this.resumeWindowBytes = 0
   }
@@ -169,21 +227,26 @@ export class AgentStatusMachine {
    *     appeared), so a CLI still booting toward its first output never
    *     flashes NA ahead of Running; one already streaming stays working.
    *   disappearing -> idle: the user exited it, the panel is a plain shell
-   *     again (rule 4), and every CLI-driven state resets. */
-  onPresence(now: number, present: boolean): void {
-    if (present === this.cliPresent) return
+   *     again (rule 4), and every CLI-driven state resets.
+   * Returns TRUE only when presence actually flipped. The poll repeats the
+   * same answer every ~2s; those repeats read false so the waiting-ping
+   * gate (WaitingPingGate) re-arms on real sessions, not on every poll. */
+  onPresence(now: number, present: boolean): boolean {
+    if (present === this.cliPresent) return false
     this.cliPresent = present
     if (!present) {
       this.lastPresenceAt = null
       this.currentStatus = 'idle'
       this.naFrom = 'none'
       this.pendingPrompt = false
+      this.respondedSincePrompt = false
       this.resumeWindowStart = null
       this.resumeWindowBytes = 0
       this.lastCompletionAt = null
-      return
+      return true
     }
     this.lastPresenceAt = now
+    return true
   }
 
   /** The user typed in this panel at `now`. `submitted` is true when the
@@ -195,6 +258,7 @@ export class AgentStatusMachine {
     this.lastRedrawAt = now
     if (submitted && this.cliPresent) {
       this.pendingPrompt = true
+      this.respondedSincePrompt = false // a fresh prompt: thinking anew
       this.currentStatus = 'working'
       this.naFrom = 'none'
       this.resumeWindowStart = null
@@ -227,14 +291,21 @@ export class AgentStatusMachine {
   /** Periodic quiet-check from the host timer at `now`. Silence alone never
    * acknowledges a waiting CLI; without one it just lets working rest into
    * idle. A quiet panel with an AI CLI in the foreground is WAITING for its
-   * human — needs-attention (model v2). */
+   * human — needs-attention (model v2).
+   *
+   * A pending prompt pins working through SILENT thinking — but once the
+   * response has streamed (respondedSincePrompt), a silence outlasting
+   * respondedQuietMs is the turn's END: a non-OSC CLI never announces it, and
+   * the panel must not sit pinned on Running for the CLI's own ~60s idle
+   * escape to arrive (HITL 2026-09-14). */
   onTick(now: number): void {
     if (this.lastActivityAt == null && !this.cliPresent) return
     if (
       this.currentStatus === 'working' &&
-      !this.pendingPrompt &&
+      (!this.pendingPrompt || this.respondedSincePrompt) &&
       this.lastActivityAt != null &&
-      now - this.lastActivityAt >= this.quietMs
+      now - this.lastActivityAt >=
+        (this.respondedSincePrompt ? this.respondedQuietMs : this.quietMs)
     ) {
       this.currentStatus = 'idle'
     }

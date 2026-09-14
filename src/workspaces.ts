@@ -1392,6 +1392,43 @@ export function panelIdsOf(state: WorkspaceState, id: string): string[] {
   return ws.layout == null ? [] : leafIds(ws.layout)
 }
 
+/// Resolve the labels a panel's notification shows (issue #76): the owning
+/// workspace's name plus the tab's DISPLAY name — the tab's own name when
+/// set, else the positional "Tab N", exactly the label the tab bar renders.
+/// The workspace is located by the LAYOUT TREE (leaf ids are panel ids, same
+/// rule upsertPanelCwd uses). Null for an unknown panel id: the caller sends
+/// no notification rather than one labeled with made-up names.
+export function panelOriginOf(
+  state: WorkspaceState,
+  panelId: string,
+): { workspace: string; panel: string } | null {
+  for (const ws of state.workspaces) {
+    const tabs = ws.tabs ?? []
+    for (let i = 0; i < tabs.length; i++) {
+      if (!leafIds(tabs[i].layout).includes(panelId)) continue
+      return { workspace: ws.name, panel: tabs[i].name ?? `Tab ${i + 1}` }
+    }
+  }
+  return null
+}
+
+/// The same lookup as panelOriginOf, but in IDS (#76 follow-up): which
+/// workspace and tab own this panel — what notification-click navigation
+/// needs to dispatch switchWorkspace/switchTab/focusPanel. Null for an
+/// unknown panel id (same rule as panelOriginOf: nothing to navigate to).
+export function panelLocationOf(
+  state: WorkspaceState,
+  panelId: string,
+): { workspaceId: string; tabId: string } | null {
+  for (const ws of state.workspaces) {
+    for (const tab of ws.tabs ?? []) {
+      if (!leafIds(tab.layout).includes(panelId)) continue
+      return { workspaceId: ws.id, tabId: tab.id }
+    }
+  }
+  return null
+}
+
 /// Record a snapshot cwd for leaf `panelId` (v0.2 Phase 5 / #29): upserts the
 /// panel's `workingDirectory` in its workspace's `panels` array, creating the
 /// entry when absent. The workspace is located by the LAYOUT TREE (the entry

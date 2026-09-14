@@ -69,6 +69,8 @@ import {
   setGroupColor,
   COLOR_PALETTE,
   defaultGenId,
+  panelOriginOf,
+  panelLocationOf,
 } from './workspaces'
 import { leafIds, type LayoutNode } from './PaneLayout'
 
@@ -2367,5 +2369,96 @@ describe('tab + group colors (#70)', () => {
 
     const seeded = seedWs()
     expect(setGroupColor(seeded, 'ghost', '#a855f7')).toBe(seeded)
+  })
+})
+
+// Issue #76 — presence-based needs-attention notifications:
+//  - panelOriginOf resolves a panel id to the labels a waiting ping shows
+//    (workspace name + tab display name) — pure, no I/O.
+//  - The tab display name mirrors the tab bar's rule: the tab's own name when
+//    set, else the positional "Tab N" (N = 1-based index).
+//  - A panel living DEEP in a split tree is found (leaf ids are panel ids).
+//  - An unknown panel id yields null — the caller sends no notification
+//    rather than one labeled with made-up names.
+//  - NOT tested here: the notify command itself (lib.rs glue) or WHEN the
+//    frontend calls this (the tick loop — HITL-verified, per the agent-status
+//    block's convention).
+describe('panelOriginOf', () => {
+  const state: WorkspaceState = {
+    ...emptyState,
+    workspaces: [
+      {
+        id: 'ws-1',
+        name: 'api',
+        tabs: [
+          { id: 'tab-1', layout: { kind: 'leaf', id: 'p-1' }, name: 'Tab 1' },
+          {
+            id: 'tab-2',
+            layout: {
+              kind: 'split',
+              id: 's-1',
+              orientation: 'horizontal',
+              ratio: 0.5,
+              first: { kind: 'leaf', id: 'p-2' },
+              second: { kind: 'leaf', id: 'p-3' },
+            },
+          },
+        ],
+      },
+      { id: 'ws-2', name: 'docs', tabs: [{ id: 'tab-3', layout: { kind: 'leaf', id: 'p-4' } }] },
+    ],
+  }
+
+  it('labels a panel with its workspace name and the tab display name', () => {
+    expect(panelOriginOf(state, 'p-1')).toEqual({ workspace: 'api', panel: 'Tab 1' })
+    // docs' only tab is at index 0 of ITS OWN tab list — the positional
+    // counter is per workspace, matching what the tab bar renders.
+    expect(panelOriginOf(state, 'p-4')).toEqual({ workspace: 'docs', panel: 'Tab 1' })
+  })
+
+  it('finds a panel nested in a split tree and names unnamed tabs positionally', () => {
+    expect(panelOriginOf(state, 'p-3')).toEqual({ workspace: 'api', panel: 'Tab 2' })
+  })
+
+  it('returns null for an unknown panel id', () => {
+    expect(panelOriginOf(state, 'ghost')).toBeNull()
+  })
+})
+
+describe('panelLocationOf', () => {
+  const state: WorkspaceState = {
+    ...emptyState,
+    workspaces: [
+      {
+        id: 'ws-1',
+        name: 'api',
+        tabs: [
+          { id: 'tab-1', layout: { kind: 'leaf', id: 'p-1' }, name: 'Tab 1' },
+          {
+            id: 'tab-2',
+            layout: {
+              kind: 'split',
+              id: 's-1',
+              orientation: 'horizontal',
+              ratio: 0.5,
+              first: { kind: 'leaf', id: 'p-2' },
+              second: { kind: 'leaf', id: 'p-3' },
+            },
+          },
+        ],
+      },
+    ],
+  }
+
+  // #76 follow-up: notification clicks navigate back to the source panel —
+  // the same lookup panelOriginOf does, but in IDS (what the glue needs to
+  // dispatch switchWorkspace/switchTab/focusPanel), not display labels.
+  it('resolves a panel id to its workspace and tab IDS', () => {
+    expect(panelLocationOf(state, 'p-1')).toEqual({ workspaceId: 'ws-1', tabId: 'tab-1' })
+    expect(panelLocationOf(state, 'p-3')).toEqual({ workspaceId: 'ws-1', tabId: 'tab-2' })
+  })
+
+  it('returns null for an unknown panel id', () => {
+    expect(panelLocationOf(state, 'ghost')).toBeNull()
   })
 })

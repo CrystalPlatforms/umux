@@ -8,8 +8,9 @@
       Splashscreen (quickupdate 2026-09-13): a static, dependency-free page —
       it must paint before the React bundle exists, so it is plain HTML/CSS.
       The loader is the crs-assets Loader component (loader.tsx) ported 1:1 to
-      static CSS — same class names, same keyframes — with the dot color set
-      to umux's accent (--accent, #6aa0ff) instead of the component's green.
+      static CSS — same class names, same keyframes — with the dot in umux's
+      loader green (#167c51, HITL 2026-09-14: the accent blue here read as a
+      different app; the dot matches the green everywhere else).
       The main window starts hidden (tauri.conf.json); the frontend invokes
       close_splashscreen once boot (workspaces + settings + session restore)
       is done, which closes this window and reveals the app.
@@ -17,7 +18,7 @@
     <style>
       :root {
         --bg-app: #111317;
-        --accent: #6aa0ff;
+        --loader-dot: #167c51;
       }
       html,
       body {
@@ -71,7 +72,7 @@
         height: 6.80px;
         width: 6.80px;
         border-radius: 50%;
-        background-color: var(--accent);
+        background-color: var(--loader-dot);
         transition: background-color 0.3s ease;
       }
 

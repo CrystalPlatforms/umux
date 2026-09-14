@@ -66,6 +66,8 @@ import {
   bootState,
   defaultGenId,
   panelIdsOf,
+  panelOriginOf,
+  panelLocationOf,
   upsertPanelCwd,
   toggleZoom,
   zoomedPanelOf,
@@ -96,7 +98,12 @@ import {
 } from './selection'
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
-import { AgentStatusMachine, type AgentStatus } from './agentStatus'
+import { AgentStatusMachine, WaitingPingGate, type AgentStatus } from './agentStatus'
+import {
+  PendingNotificationTarget,
+  activatesAppOnNotificationClick,
+  type NotificationTarget,
+} from './notificationRouting'
 import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
@@ -2644,6 +2651,18 @@ export function WorkspaceShell() {
   // injected (performance.now); the machine itself is unit-tested in
   // agentStatus.test.ts. This block is glue, verified in the HITL pass.
   const machinesRef = useRef<Map<string, AgentStatusMachine>>(new Map())
+  // Waiting-ping gate (#76): one desktop ping per waiting session — a quietly
+  // idle CLI's TUI repaints flip working↔needs-attention every few seconds,
+  // and firing on transitions alone would ping on every cycle. Re-armed by
+  // prompt submits and presence flips only; pure logic lives (and is tested)
+  // in agentStatus.ts.
+  const waitingPingGate = useRef(new WaitingPingGate())
+  // Click-to-navigate (#76 follow-up): the most recent posted notification's
+  // raw payload. On macOS/Windows a banner click ACTIVATES the app but the OS
+  // never tells us WHICH banner — so window focus shortly after a post reads
+  // as that click (pure bookkeeping + tests in notificationRouting.ts). Linux
+  // banners carry a real "Open" action: the backend reports it directly.
+  const pendingNotifTarget = useRef(new PendingNotificationTarget())
   // Counts 500ms ticks so the presence poll fires every 4th one (~2s).
   const presenceTickCount = useRef(0)
   const [statuses, setStatuses] = useState<Record<string, AgentStatus>>({})
@@ -2665,7 +2684,14 @@ export function WorkspaceShell() {
       else if (signal === 'completion') machine.onCompletion(now)
       else if (signal === 'resize') machine.onRedraw(now)
       else if (signal === 'input') machine.onUserInput(now, value === true)
-      else if (signal === 'presence') machine.onPresence(now, value === true)
+      else if (signal === 'presence') {
+        // Re-arm the waiting-ping gate only on a REAL presence flip (a CLI
+        // exited or a fresh one appeared): the poll repeats "still present"
+        // every ~2s and those answers must not re-arm (the ~10s ping spam).
+        if (machine.onPresence(now, value === true)) {
+          waitingPingGate.current.onPresenceChanged(panelId)
+        }
+      }
       else machine.onFocus(now)
       const after = machine.status
       if (after !== before) {
@@ -2698,6 +2724,9 @@ export function WorkspaceShell() {
     (panelId: string, submitted: boolean) => {
       applySignal(panelId, 'input', submitted)
       if (!submitted) return
+      // A SUBMITTED prompt is real engagement (#76): the wait that follows
+      // the agent's work is a new event and may ping again.
+      waitingPingGate.current.onPromptSubmitted(panelId)
       if (commandSnapshotTimer.current != null) {
         window.clearTimeout(commandSnapshotTimer.current)
       }
@@ -2747,12 +2776,42 @@ export function WorkspaceShell() {
       for (const [panelId, machine] of machines) {
         if (!live.has(panelId)) {
           machines.delete(panelId)
+          waitingPingGate.current.forget(panelId)
           changed = true
           continue
         }
         const before = machine.status
         machine.onTick(now)
         if (machine.status !== before) changed = true
+        // #76: a TICK-only entry into needs-attention IS the presence rule —
+        // a known AI CLI quiet in the panel, waiting for its (first) prompt.
+        // onCompletion enters NA only through applySignal, and that path
+        // already pings via the backend's OSC notification, so no double-fire.
+        // The gate keeps it ONE ping per waiting session (repaint cycles stay
+        // silent); whether notifications are on at all is the backend's
+        // app-wide mute flag — the single "Desktop notifications" toggle.
+        // agentStatusEnabled only hides the dot, never the pings.
+        if (machine.status === 'needs-attention' && before !== 'needs-attention') {
+          if (waitingPingGate.current.canFire(panelId)) {
+            waitingPingGate.current.markFired(panelId)
+            const ws = stateRef.current
+            const origin = panelOriginOf(ws, panelId)
+            const loc = panelLocationOf(ws, panelId)
+            if (origin != null && loc != null) {
+              // The banner carries WHERE it came from: labels for the body,
+              // ids for click-to-navigate (#76 follow-up).
+              void invoke('notify_panel_needs_input', {
+                target: {
+                  workspace: origin.workspace,
+                  panel: origin.panel,
+                  workspaceId: loc.workspaceId,
+                  tabId: loc.tabId,
+                  panelId,
+                },
+              }).catch((e) => console.error('notify_panel_needs_input failed:', e))
+            }
+          }
+        }
       }
       if (changed) {
         const snapshot: Record<string, AgentStatus> = {}
@@ -2786,6 +2845,85 @@ export function WorkspaceShell() {
     }, 500)
     return () => window.clearInterval(timer)
   }, [applySignal])
+
+  // Click-to-navigate (#76 follow-up): a notification payload resolves to the
+  // panel it came from and the shell dispatches there — activate the
+  // workspace, its tab, then focus the exact pane. Stable: refs + setState
+  // only, so the listeners/focus effects below never re-subscribe.
+  const navigateToNotification = useCallback((raw: string) => {
+    let parsed: {
+      kind?: string
+      ptyId?: number
+      workspaceId?: string
+      tabId?: string
+      panelId?: string
+    }
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return // our own payload; junk never crashes the shell
+    }
+    let target: NotificationTarget | null = null
+    if (
+      parsed.kind === 'waiting' &&
+      parsed.workspaceId != null &&
+      parsed.tabId != null &&
+      parsed.panelId != null
+    ) {
+      target = {
+        workspaceId: parsed.workspaceId,
+        tabId: parsed.tabId,
+        panelId: parsed.panelId,
+      }
+    } else if (parsed.kind === 'completion' && typeof parsed.ptyId === 'number') {
+      // The completion path knows only the backend pty id — map it back to a
+      // panel (the shell owns the panelId↔ptyId record), then locate it.
+      for (const [panelId, entry] of ptyIdsRef.current) {
+        if (entry.id !== parsed.ptyId) continue
+        const loc = panelLocationOf(stateRef.current, panelId)
+        if (loc != null) target = { ...loc, panelId }
+        break
+      }
+    }
+    if (target == null) return
+    const t = target
+    setState((prev) => {
+      // openWorkspace (not a bare switch): it both activates and ensures the
+      // workspace is open, the same path a sidebar row click takes.
+      const ws = openWorkspace(prev, t.workspaceId)
+      const tab = switchTab(ws, t.workspaceId, t.tabId)
+      return focusPanel(tab, t.workspaceId, t.panelId)
+    })
+    // Linux's "Open" action button doesn't focus the window by itself — do it
+    // explicitly. On macOS/Windows the banner click already activated us.
+    void getCurrentWindow().setFocus()
+  }, [])
+
+  // The backend announces every REAL banner post; on click-activating
+  // platforms the next window focus inside the short window reads as the
+  // click (one shot — the pending entry is consumed).
+  useEffect(() => {
+    if (!activatesAppOnNotificationClick(navigator.userAgent)) return
+    const onFocus = () => {
+      const raw = pendingNotifTarget.current.take(performance.now())
+      if (raw != null) navigateToNotification(raw)
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [navigateToNotification])
+
+  useEffect(() => {
+    const unlistenPosted = listen<string>('notification_posted', (event) => {
+      pendingNotifTarget.current.set(event.payload, performance.now())
+    })
+    const unlistenActivated = listen<string>('notification_activated', (event) => {
+      navigateToNotification(event.payload)
+    })
+    return () => {
+      void unlistenPosted.then((f) => f())
+      void unlistenActivated.then((f) => f())
+    }
+  }, [navigateToNotification])
   const resizeWorkspacePanel = (
     id: string,
     splitId: string,

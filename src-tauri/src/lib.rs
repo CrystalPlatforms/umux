@@ -155,7 +155,7 @@ fn pty_open(
         );
         let mut debug_total: u64 = 0;
         while let Ok(bytes) = rx.recv() {
-            let result = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            let result = process_pty_chunk(&mut parser, &service, &origin, id, &bytes);
             let debug_dir = config_dir();
             if pty_debug::enabled(&debug_dir) {
                 debug_total += result.passthrough.len() as u64;
@@ -175,6 +175,15 @@ fn pty_open(
                 // frontend status machine's grace window expects a TUI's
                 // trailing redraw to land right AFTER its completion signal.
                 let _ = emit_app.emit("pty_completion", PanelSignalPayload { id });
+                // Announce the post for click-to-navigate (#76 follow-up): the
+                // frontend's focus heuristic may only ever consume REAL
+                // banners — a muted ping must not look posted.
+                if !service.is_muted() {
+                    let _ = emit_app.emit(
+                        "notification_posted",
+                        serde_json::json!({ "kind": "completion", "ptyId": id }).to_string(),
+                    );
+                }
             }
             if !result.passthrough.is_empty() {
                 let _ = emit_app.emit(
@@ -539,7 +548,7 @@ fn ssh_open(
             mute_flag,
         );
         while let Ok(bytes) = rx.recv() {
-            let result = process_pty_chunk(&mut parser, &service, &origin, &bytes);
+            let result = process_pty_chunk(&mut parser, &service, &origin, id, &bytes);
             if let Some(cwd) = &result.cwd_report {
                 // A remote shell announcing ITS cwd. The frontend ignores cwd
                 // reports for SSH panels (a remote path is not a local
@@ -551,6 +560,13 @@ fn ssh_open(
                 // Same per-panel completion signal as local panels (see the
                 // pty_open thread) — remote status parity (#26).
                 let _ = emit_app.emit("ssh_completion", PanelSignalPayload { id });
+                // Same post announcement as local panels (click-to-navigate).
+                if !service.is_muted() {
+                    let _ = emit_app.emit(
+                        "notification_posted",
+                        serde_json::json!({ "kind": "completion", "ptyId": id }).to_string(),
+                    );
+                }
             }
             if !result.passthrough.is_empty() {
                 let _ = emit_app.emit(
@@ -609,7 +625,11 @@ fn ssh_close(state: State<'_, Mutex<SshManager>>, id: u32) -> Result<(), String>
 ///    unbundled dev process, and osascript needs no permission dance), which
 ///    keeps the zero-cost policy intact.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-struct NativeNotifier;
+struct NativeNotifier {
+    /// Needed to emit `notification_activated` when the user clicks the
+    /// banner's action (click-to-navigate, #76 follow-up).
+    app: AppHandle,
+}
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl Notifier for NativeNotifier {
@@ -630,6 +650,37 @@ impl Notifier for NativeNotifier {
             ),
             Err(e) => log::error!("[notify] failed to spawn notify-send: {e}"),
         }
+    }
+
+    /// The real click path (#76 follow-up): the banner carries an "Open"
+    /// action button; `--wait` keeps the notify-send process alive until the
+    /// banner closes and prints the ACTIVATED action's id on stdout — "open"
+    /// means the user clicked it, anything else (timeout, dismissed) means
+    /// they didn't. The wait runs on a DETACHED thread: a banner can sit for
+    /// many seconds and the caller (a PTY reader thread or an invoke) must
+    /// never block on its lifetime.
+    fn show_actionable(&self, summary: &str, body: &str, payload: &str) {
+        let app = self.app.clone();
+        let summary = summary.to_string();
+        let body = body.to_string();
+        let payload = payload.to_string();
+        std::thread::spawn(move || {
+            let result = std::process::Command::new("notify-send")
+                .arg("--app-name=umux")
+                .arg("--wait")
+                .arg("--action=open=Open")
+                .arg(&summary)
+                .arg(&body)
+                .output();
+            let activated = match &result {
+                Ok(out) => out.status.success() && out.stdout.trim() == "open",
+                Err(_) => false,
+            };
+            if activated {
+                log::info!("[notify] action activated: payload={payload:?}");
+                let _ = app.emit("notification_activated", payload);
+            }
+        });
     }
 }
 
@@ -811,10 +862,14 @@ fn platform_notifier(app: &AppHandle) -> Box<dyn Notifier + Send> {
         }
         Box::new(OsascriptNotifier)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         let _ = app;
         Box::new(NativeNotifier)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Box::new(NativeNotifier { app: app.clone() })
     }
 }
 
@@ -888,6 +943,67 @@ fn set_notifications_muted(muted: bool, state: State<'_, MuteFlag>) -> bool {
 #[tauri::command]
 fn notifications_muted(state: State<'_, MuteFlag>) -> bool {
     state.load(Ordering::SeqCst)
+}
+
+/// Where a waiting ping's panel lives — display labels for the banner body
+/// plus the ids a click needs to navigate back (#76 follow-up). One struct so
+/// the invoke boundary is one key, not five.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WaitingPingTarget {
+    workspace: Option<String>,
+    panel: Option<String>,
+    workspace_id: Option<String>,
+    tab_id: Option<String>,
+    panel_id: Option<String>,
+}
+
+/// Fire the presence-based waiting ping for one panel (issue #76). The
+/// frontend's agent-status machine detected the transition INTO
+/// needs-attention via CLI PRESENCE (panel_processes polling — never terminal
+/// content) and reports WHERE via `target`. The service here applies the same
+/// app-wide mute flag the bell button and the OSC completion path use — one
+/// mute is one mute — and composes the fixed waiting message with the origin
+/// suffix, exactly like a completion ping. The banner carries the navigation
+/// payload, and the post is announced (`notification_posted`) so the
+/// frontend's click/focus routing only ever consumes REAL banners. Emission
+/// ONCE per transition is the caller's contract: the frontend fires on the
+/// state change only, never per poll tick.
+// PERF (audit 2026-09-05): async — a desktop notification is an external
+// roundtrip (D-Bus / osascript / UNUserNotificationCenter); the UI thread
+// must never wait on it (same reasoning as load_workspaces).
+#[tauri::command]
+async fn notify_panel_needs_input(
+    app: AppHandle,
+    target: WaitingPingTarget,
+    mute: State<'_, MuteFlag>,
+) -> Result<(), String> {
+    let mute = Arc::clone(&*mute);
+    let origin = PanelOrigin {
+        workspace: target.workspace,
+        panel: target.panel,
+    };
+    let payload = serde_json::json!({
+        "kind": "waiting",
+        "workspaceId": target.workspace_id,
+        "tabId": target.tab_id,
+        "panelId": target.panel_id,
+    })
+    .to_string();
+    let emit_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let service = NotificationService::with_mute(
+            platform_notifier(&app),
+            Some("umux".to_string()),
+            mute,
+        );
+        let delivered = service.notify_waiting_with_payload(&origin, Some(&payload));
+        if delivered {
+            let _ = emit_app.emit("notification_posted", payload);
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Load the persisted feature toggles (v0.2 Phase 3 / #27). A corrupted file
@@ -1013,6 +1129,10 @@ fn poll_ssh_exit(app: &AppHandle, handle: &ssh_manager::SshHandle, host: &str) -
 /// bytes, satisfying "normal terminal output is unaffected by the parser being
 /// active"), the notification events, and any cwd report.
 ///
+/// Each notification goes out with a navigation payload (#76 follow-up: which
+/// pty fired — a click on the banner returns to this panel), so the caller
+/// should echo `notification_posted` for the frontend's click/focus routing.
+///
 /// The parser is held by the caller (one per PTY) so sequences split across
 /// chunk boundaries are recognized across calls. This is the testable core of
 /// the PTY-output wiring; `pty_open` plugs a real `Notifier` into it.
@@ -1020,11 +1140,13 @@ fn process_pty_chunk(
     parser: &mut OscParser,
     service: &NotificationService,
     origin: &PanelOrigin,
+    pty_id: u32,
     bytes: &[u8],
 ) -> osc_parser::PushResult {
     let result = parser.push(bytes);
+    let payload = serde_json::json!({ "kind": "completion", "ptyId": pty_id }).to_string();
     for event in &result.events {
-        service.notify(event, origin);
+        service.notify_with_payload(event, origin, Some(&payload));
     }
     // The whole PushResult travels back so the reader thread can ALSO emit the
     // per-panel completion signal (`pty_completion` / `ssh_completion`) and any
@@ -1196,6 +1318,7 @@ pub fn run() {
             save_workspaces,
             set_notifications_muted,
             notifications_muted,
+            notify_panel_needs_input,
             load_settings,
             save_settings,
             reset_all,
@@ -1439,7 +1562,7 @@ mod tests {
         let mut parser = OscParser::new();
         let bytes = b"ls -la\r\nhello world";
 
-        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), bytes);
+        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), 0, bytes);
 
         assert_eq!(result.passthrough, bytes.to_vec(), "plain bytes pass through unchanged");
         assert!(
@@ -1474,6 +1597,7 @@ mod tests {
                 workspace: Some("main".to_string()),
                 panel: None,
             },
+            0,
             &bytes,
         );
 
@@ -1507,8 +1631,8 @@ mod tests {
         let first: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i'].to_vec();
         let second: Vec<u8> = [0x07, b'x'].to_vec(); // BEL terminator + trailing byte
 
-        let first = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &first);
-        let second = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &second);
+        let first = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), 0, &first);
+        let second = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), 0, &second);
 
         // Nothing is complete until the terminator arrives.
         assert!(first.passthrough.is_empty(), "no passthrough from the unfinished sequence");
@@ -1536,7 +1660,7 @@ mod tests {
         let mut parser = OscParser::new();
         let bytes = b"\x1b]9;9;C:\\proj\x07ok".to_vec();
 
-        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
+        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), 0, &bytes);
 
         assert_eq!(result.cwd_report.as_deref(), Some("C:\\proj"));
         assert_eq!(result.passthrough, bytes, "cwd report passes through byte-identical");
@@ -1617,7 +1741,7 @@ mod tests {
         flag.store(true, Ordering::SeqCst);
 
         let bytes: Vec<u8> = [0x1b, b']', b'9', b';', b'h', b'i', 0x07].to_vec();
-        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), &bytes);
+        let result = process_pty_chunk(&mut parser, &svc, &PanelOrigin::default(), 0, &bytes);
 
         assert!(
             result.passthrough.is_empty(),
