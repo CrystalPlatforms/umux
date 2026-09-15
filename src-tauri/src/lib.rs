@@ -673,7 +673,10 @@ impl Notifier for NativeNotifier {
                 .arg(&body)
                 .output();
             let activated = match &result {
-                Ok(out) => out.status.success() && out.stdout.trim() == "open",
+                Ok(out) => {
+                    out.status.success()
+                        && String::from_utf8_lossy(&out.stdout).trim() == "open"
+                }
                 Err(_) => false,
             };
             if activated {
