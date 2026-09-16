@@ -123,4 +123,12 @@ describe('coerceSettings', () => {
       coerceSettings({ sidebarWidth: 'wide' as unknown as number }).sidebarWidth,
     ).toBe(null)
   })
+
+  it('rounds a fractional sidebarWidth to whole px (Rust u32 rejects floats)', () => {
+    // The backend stores sidebar_width as u32 — serde rejects 600.5 and one
+    // bad field fails the WHOLE save_settings write. A fractional value may
+    // only ever come from a drag, so load-side coercion rounds it away.
+    expect(coerceSettings({ sidebarWidth: 600.5 }).sidebarWidth).toBe(601)
+    expect(coerceSettings({ sidebarWidth: 337.2 }).sidebarWidth).toBe(337)
+  })
 })

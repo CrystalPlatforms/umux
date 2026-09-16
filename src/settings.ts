@@ -69,10 +69,12 @@ export function coerceSettings(raw: unknown): Settings {
         : null,
     // Quickupdate 2026-09-12: same shape coercion as defaultShell — only a
     // positive number is a width; junk (or a legacy file without the key)
-    // falls back to null = the CSS default.
+    // falls back to null = the CSS default. Rounded to whole px (2026-09-16):
+    // the backend's u32 field rejects floats, and a fractional payload would
+    // fail the entire save_settings write.
     sidebarWidth:
       typeof r.sidebarWidth === 'number' && Number.isFinite(r.sidebarWidth) && r.sidebarWidth > 0
-        ? r.sidebarWidth
+        ? Math.round(r.sidebarWidth)
         : null,
   }
 }

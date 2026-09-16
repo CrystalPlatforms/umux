@@ -5043,4 +5043,28 @@ describe('sidebar width persists across restarts (quickupdate 2026-09-12)', () =
       ),
     )
   })
+
+  it('a drag with fractional pointer coords saves a whole-px width (macOS Retina)', async () => {
+    // The real-machine failure behind "the sidebar comes back at its old
+    // size": trackpads on Retina report fractional clientX, so the drag
+    // computed e.g. 377.5 — and Rust's u32 settings field rejects floats,
+    // which fails the WHOLE save_settings write (silently, console-only).
+    // The save must carry the rounded width instead.
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByTestId('sidebar-resizer')).toBeInTheDocument())
+    invokeMock.mockClear()
+
+    const resizer = screen.getByTestId('sidebar-resizer')
+    fireEvent.pointerDown(resizer, { button: 0, clientX: 100 })
+    fireEvent.pointerMove(resizer, { clientX: 237.5 }) // 240 + 137.5 → 377.5
+    fireEvent.pointerUp(resizer, {})
+
+    const saves = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_settings')
+    expect(saves).toHaveLength(1)
+    expect(saves[0][1]).toMatchObject({ settings: { sidebarWidth: 378 } })
+  })
 })

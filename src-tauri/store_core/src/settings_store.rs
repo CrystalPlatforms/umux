@@ -394,4 +394,22 @@ mod tests {
         assert_eq!(back.default_shell, None);
         assert_eq!(status, ConfigStatus::Ok, "valid JSON shape — no fallback");
     }
+
+    // Sidebar-width contract (2026-09-16, "sidebar comes back at its old
+    //   size"): `sidebar_width` is a u32, so serde rejects a fractional
+    //   payload — and that fails the WHOLE struct parse, meaning the
+    //   frontend's save_settings write is dropped entirely. The frontend
+    //   therefore rounds dragged widths to whole px before saving; this
+    //   test pins the serde side of that contract.
+    #[test]
+    fn sidebar_width_whole_numbers_round_trip_fractions_rejected() {
+        // A whole-px width parses fine and round-trips.
+        let (s, status) = parse_settings_with_status("{\"sidebarWidth\":600}");
+        assert_eq!(status, ConfigStatus::Ok);
+        assert_eq!(s.sidebar_width, Some(600));
+
+        // A fractional width fails the WHOLE parse — defaults + Corrupted.
+        let (_, status) = parse_settings_with_status("{\"sidebarWidth\":600.5}");
+        assert_eq!(status, ConfigStatus::Corrupted, "u32 must reject 600.5");
+    }
 }

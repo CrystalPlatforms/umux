@@ -706,9 +706,15 @@ export function WorkspaceShell() {
   const onSidebarResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = sidebarDragRef.current
     if (drag == null) return
-    const next = Math.min(
-      Math.max(drag.startWidth + (e.clientX - drag.startX), SIDEBAR_MIN_WIDTH),
-      sidebarMaxWidth(),
+    // Math.round is load-bearing: a Retina trackpad reports fractional
+    // clientX, and a fractional width (e.g. 377.5) fails Rust's u32 settings
+    // field — one float fails the WHOLE save_settings write, so the width
+    // silently never survived a restart (2026-09-16 Mac bug report).
+    const next = Math.round(
+      Math.min(
+        Math.max(drag.startWidth + (e.clientX - drag.startX), SIDEBAR_MIN_WIDTH),
+        sidebarMaxWidth(),
+      ),
     )
     sidebarLiveWidthRef.current = next
     setSidebarWidth(next)
