@@ -3303,6 +3303,9 @@ export function WorkspaceShell() {
                     })
                     return
                   }
+                  // A plain click activates (quickupdate 2026-09-17, Adam:
+                  // the row keeps its single-click open — ONLY the folder
+                  // line under it moved to double-click).
                   setSelectedIds([])
                   setState(openWorkspace(state, entry.workspace.id))
                 }}
@@ -3433,8 +3436,11 @@ export function WorkspaceShell() {
                           always stays per tab. The folder shows its TAIL
                           (parent/target, formatFolderTail) so the row reads
                           "which folder" — the full path lives on the
-                          tooltip; clicking the folder opens it in the system
-                          file explorer (opener plugin, HITL round). */}
+                          tooltip; double-clicking the folder opens it in the
+                          system file explorer (opener plugin, HITL round;
+                          gesture moved from single click — quickupdate
+                          2026-09-17, Adam: only the folder line needs a
+                          double-click, the row itself stays single-click). */}
                       {settings.showTabFolders &&
                         state.openIds.includes(entry.workspace.id) &&
                         (() => {
@@ -3465,16 +3471,27 @@ export function WorkspaceShell() {
                                   type="button"
                                   className="workspace-folder-line__folder"
                                   title={line.folder}
-                                  onClick={() => {
-                                    // A click opens the folder AND falls
-                                    // through to the row's own onClick, which
-                                    // activates the workspace (HITL round 2).
-                                    // openPath shows the folder's CONTENTS; if
-                                    // the opener call fails (older binary
-                                    // without the open-path ACL), reveal the
-                                    // folder in its parent instead — same
-                                    // explorer, the folder just arrives
-                                    // selected.
+                                  // A single click is a full no-op (quickupdate
+                                  // 2026-09-17, Adam: the folder opens on a
+                                  // DOUBLE-click only). The bubble must be
+                                  // stopped — otherwise the click would land
+                                  // on the row's onClick and activate the
+                                  // workspace as a side effect.
+                                  onClick={(e) => e.stopPropagation()}
+                                  onDoubleClick={(e) => {
+                                    e.stopPropagation()
+                                    // The double-click opens the folder AND
+                                    // activates the workspace (HITL round 2's
+                                    // coupling, now carried by this handler —
+                                    // the row has no onDoubleClick of its
+                                    // own). openPath shows the folder's
+                                    // CONTENTS; if the opener call fails
+                                    // (older binary without the open-path
+                                    // ACL), reveal the folder in its parent
+                                    // instead — same explorer, the folder
+                                    // just arrives selected.
+                                    setSelectedIds([])
+                                    setState(openWorkspace(state, entry.workspace.id))
                                     const folder = line.folder as string
                                     openPath(folder).catch((err) => {
                                       console.error('open folder failed:', err)

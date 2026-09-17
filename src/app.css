@@ -768,6 +768,11 @@ body.is-dragging * {
   white-space: nowrap;
   cursor: pointer;
   flex-shrink: 0;
+  /* Children clip at the tab edge (quickupdate 2026-09-17): the name never
+     shrinks (see .tab-name), so a name longer than the whole tab must cut
+     off here instead of painting over the neighbouring tab or pushing the
+     close button out of the box. */
+  overflow: hidden;
   transition: background 0.1s ease, color 0.1s ease;
 }
 
@@ -808,17 +813,24 @@ body.is-dragging * {
 }
 
 .tab-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* The name is the PROTECTED element (quickupdate 2026-09-17, Adam: "nazwa
+     ma być cały czas"): flex-shrink 0 means it NEVER gives up width — every
+     branch on the row absorbs the whole squeeze first. A name longer than
+     the entire tab clips at the tab edge (.tab overflow), never earlier. */
+  flex-shrink: 0;
 }
 
 /* Git branch suffixes on a tab row (#41): one per panel of the tab, quieter
-   than the name, never truncated themselves — the name takes the ellipsis
-   hit first. The FOCUSED panel's branch is bold but NOT larger (#41 HITL,
-   Adam: "pogrubiony ale nie większy"). */
+   than the name. The branch takes the squeeze FIRST (quickupdate
+   2026-09-17, Adam): it truncates "branc…"-style down to nothing while the
+   name stays whole — replacing the 2026-08-27 rule where the name always
+   took the ellipsis hit. The FOCUSED panel's branch is bold but NOT larger
+   (#41 HITL, Adam: "pogrubiony ale nie większy"). */
 .tab-branch {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: var(--text-xs);
   color: var(--text-faint);
   letter-spacing: 0.01em;
