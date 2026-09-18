@@ -161,8 +161,17 @@ export function TerminalSurface({
         return false
       }
       if (action === 'paste') {
-        // A blocked clipboard read (WebView2 permission) logs and leaves
-        // plain Ctrl+V as the paste path — the key is swallowed either way.
+        // Chromium (WebView2) binds Ctrl+Shift+V to its own native
+        // paste-plain-text command and fires a DOM `paste` event on xterm's
+        // textarea — without preventDefault the text lands TWICE on Windows
+        // (once natively, once via term.paste below). WebKitGTK and macOS
+        // don't bind the chord, so this is a no-op there. Note xterm ignores
+        // this handler's return value for native behavior: `return false`
+        // only stops the key from reaching the PTY, it cannot stop the paste
+        // event. A blocked clipboard read (WebView2 permission) logs and
+        // leaves plain Ctrl+V as the paste path — the key is swallowed
+        // either way.
+        event.preventDefault()
         navigator.clipboard
           ?.readText()
           .then((text) => {
