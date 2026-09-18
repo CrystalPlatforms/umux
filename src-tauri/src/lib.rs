@@ -1046,8 +1046,15 @@ async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String>
 /// first-run clean. The frontend restarts the app afterwards (plugin-process
 /// relaunch), so the fresh state is what the user actually sees.
 #[tauri::command]
-fn reset_all() -> Result<(), String> {
-    reset_store_files(&config_dir()).map_err(|e| format!("reset failed: {e}"))
+fn reset_all(app: AppHandle) -> Result<(), String> {
+    reset_store_files(&config_dir()).map_err(|e| format!("reset failed: {e}"))?;
+    // quickupdate 2026-09-18: the geometry plugin keeps .window-state.json in
+    // the identifier config dir (a directory of ours with nothing else in it),
+    // so the reset clears it too — "Reset" forgets the window size as well.
+    if let Ok(dir) = app.path().app_config_dir() {
+        let _ = std::fs::remove_file(dir.join(tauri_plugin_window_state::DEFAULT_FILENAME));
+    }
+    Ok(())
 }
 
 /// Raw installed-shell probes for the Settings "Default shell" picker (#77):
@@ -1353,7 +1360,27 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         // Issue #72: clicking a listening port opens http://localhost:{port}
         // in the system browser (open-url); copy stays on the frontend.
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        // Window geometry persistence (quickupdate 2026-09-18): size, position,
+        // maximized and fullscreen are saved when the app exits and restored at
+        // window creation — while the splash is still up and the main window is
+        // hidden — so the close_splashscreen reveal already shows the restored
+        // geometry. VISIBLE is deliberately NOT tracked: visibility is the
+        // splash handoff's job (the main window must stay hidden until boot
+        // completes), and DECORATIONS is not user-adjustable in umux. The
+        // splash keeps its fixed centered look via the denylist, which also
+        // stops the plugin from saving its 320x220 box.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                        | tauri_plugin_window_state::StateFlags::FULLSCREEN,
+                )
+                .with_denylist(&["splashscreen"])
+                .build(),
+        );
 
     builder
         .setup(move |app| {

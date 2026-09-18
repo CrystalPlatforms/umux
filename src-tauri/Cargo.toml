@@ -38,6 +38,12 @@ tauri-plugin-notification = "2.3.3"
 # Issue #72: clicking a listening port opens http://localhost:{port} in the
 # system browser (the opener plugin's open-url path).
 tauri-plugin-opener = "2"
+
+# Window geometry persistence (quickupdate 2026-09-18): size/position/
+# maximized/fullscreen are saved on exit and restored at window creation —
+# while the splash is still up and the main window is hidden — so the app
+# reopens exactly as it was closed, macOS fullscreen included.
+tauri-plugin-window-state = "2"
 reqwest = "0.13.3"
 # PTY output bytes go over the IPC bridge as base64, not a JSON number array —
 # a 4 KB chunk is ~5.4 KB of base64 vs ~15 KB of "[12,34,...]" text, and the
