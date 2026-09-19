@@ -1,4 +1,4 @@
-# umux v1.6.0 — PRD (cross-platform shell picker & sidebar polish)
+# umux v1.6.0 — PRD (COMPLETED)
 
 **Status:** shipped as v1.6.0 on 2026-09-10 · created 2026-08-31 ("versions cleanup" discovery); renumbered v1.9.0 → v1.6.0 and extended to all platforms on 2026-09-07 (swap with the old v1.6.0 icons/press/pinned-tabs package, which moved to v1.9.0). The sidebar drag-resize item (story #91, issue #79) moved to **v1.6.1** on 2026-09-10.
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
