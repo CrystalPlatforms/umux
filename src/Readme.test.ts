@@ -7,7 +7,13 @@ import { fileURLToPath } from "node:url";
 // deterministic regardless of any test-runner transformation. Same disk-read
 // pattern as design-tokens.test.ts.
 const here = path.dirname(fileURLToPath(import.meta.url));
-const readme = fs.readFileSync(path.join(here, "..", "README.md"), "utf8");
+// Normalize CRLF (Windows checkouts via core.autocrlf) to LF before parsing:
+// the section parser splits on "\n" and its heading regex anchors "$" without
+// /m while "." never crosses a "\r", so a trailing "\r" makes EVERY heading
+// match fail on Windows working trees (the file is LF in git/CI, CRLF here).
+const readme = fs
+    .readFileSync(path.join(here, "..", "README.md"), "utf8")
+    .replace(/\r\n/g, "\n");
 
 // Phase 21 / Issue #22, AC1 — the README explains the project, build/run
 // steps, and core features. These tests encode the *shape* a real README must
