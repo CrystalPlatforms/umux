@@ -11,6 +11,11 @@
 //
 // Wiring/characterization test: locks main.tsx -> App -> WorkspaceShell so a
 // change that drops the workspace shell fails here.
+//
+// Browser-mode guard (tauri-env): App mounts the shell ONLY inside the Tauri
+// webview (where the runtime injects `__TAURI_INTERNALS__`); a plain browser
+// tab gets a notice instead. The two tests below stub/clear that global to
+// exercise both branches.
 
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
@@ -21,10 +26,22 @@ vi.mock('./WorkspaceShell', () => ({
 
 import App from './App'
 
+type TauriWindow = Window & Record<string, unknown>
+
 describe('App', () => {
-  it('mounts the workspace shell on launch', () => {
+  it('mounts the workspace shell on launch (inside Tauri)', () => {
+    ;(window as unknown as TauriWindow).__TAURI_INTERNALS__ = {}
     render(<App />)
 
     expect(screen.getByTestId('workspace-shell')).toBeInTheDocument()
+  })
+
+  it('shows the browser notice instead of the shell without the Tauri runtime', () => {
+    delete (window as unknown as TauriWindow).__TAURI_INTERNALS__
+    render(<App />)
+
+    expect(screen.queryByTestId('workspace-shell')).not.toBeInTheDocument()
+    expect(screen.getByText(/desktop app/i)).toBeInTheDocument()
+    expect(screen.getByText(/yarn tauri dev/i)).toBeInTheDocument()
   })
 })
