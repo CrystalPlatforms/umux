@@ -1,9 +1,9 @@
-//! umux Core — the headless daemon library (#83, v1.7.0 phase 1).
+//! umux Storestation — the headless daemon library (#83, v1.7.0 phase 1).
 //!
 //! One per-user local socket carrying protocol v1 (see
-//! `plans/umux-core-cli-protocol.md` — the wire contract is FIXED there):
+//! `plans/umux-storestation-cli-protocol.md` — the wire contract is FIXED there):
 //! length-prefixed frames, a versioned `hello` handshake, and dotted
-//! `resource.verb` ops. Phase 1 serves `core.status` and `core.shutdown`
+//! `resource.verb` ops. Phase 1 serves `storestation.status` and `storestation.shutdown`
 //! only; every other op answers the enumerated `unknownOp` error so later
 //! phases grow the catalog purely additively.
 //!

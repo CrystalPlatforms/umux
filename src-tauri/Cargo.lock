@@ -5192,11 +5192,11 @@ dependencies = [
  "serde_json",
  "store_core",
  "tempfile",
- "umux-core",
+ "umux-storestation",
 ]
 
 [[package]]
-name = "umux-core"
+name = "umux-storestation"
 version = "1.6.0"
 dependencies = [
  "clap",

@@ -1,15 +1,15 @@
-# umux Core — CLI Surface & Socket Protocol (design doc)
+# umux Storestation — CLI Surface & Socket Protocol (design doc)
 
 **Status:** design output of `/agent-cli` (design mode), 2026-09-19. Feeds [`umux-v1.7.0-plan.md`](./umux-v1.7.0-plan.md) (phases 1, 2, 4, 5) and becomes the protocol reference for the v1.8.0 live CLI (stories #53–#55, #87).
-**Scope:** the v1.7.0 CLI additions (`umux status`, `umux sessions list`, `umux attach`, `umux agent-context`, the daemon binary `umux-core`) and protocol **v1** of the umux Core local socket.
+**Scope:** the v1.7.0 CLI additions (`umux status`, `umux sessions list`, `umux attach`, `umux agent-context`, the daemon binary `umux-storestation`) and protocol **v1** of the umux Storestation local socket.
 
 ## Summary
 
-A small, strictly additive extension of the existing `umux` CLI plus a versioned local-socket protocol owned by umux Core. The new surface passes all Tier-1 agent-native principles from day one (canonical `--json`, enumerated errors, bounded responses, non-interactive defaults, safe retries). Known Friction in the *inherited* v1.6.x surface (no `--json`, non-standard verbs, no introspection) is deliberately deferred to v1.8.0 — no breaking changes in v1.7.0.
+A small, strictly additive extension of the existing `umux` CLI plus a versioned local-socket protocol owned by umux Storestation. The new surface passes all Tier-1 agent-native principles from day one (canonical `--json`, enumerated errors, bounded responses, non-interactive defaults, safe retries). Known Friction in the *inherited* v1.6.x surface (no `--json`, non-standard verbs, no introspection) is deliberately deferred to v1.8.0 — no breaking changes in v1.7.0.
 
 ## Constraints
 
-- Rust + clap derive; existing crate `cli` (package `umux`); new workspace member for the daemon binary `umux-core`; shared engine crate (`session_core`) per the plan.
+- Rust + clap derive; existing crate `cli` (package `umux`); new workspace member for the daemon binary `umux-storestation`; shared engine crate (`session_core`) per the plan.
 - Transport: one local per-user socket; its name/path derives from the config directory, so `UMUX_CONFIG_DIR` isolates store + socket + sessions together for test instances (e.g. `~/.umux-test`).
 - Consumers: humans, shell scripts, AI agents (Claude Code driving umux headlessly) — non-interactive and structured output are mandatory on data commands.
 - v1.8.0 grows the op catalog to full app parity; the v1.7.0 daemon must reject unknown ops cleanly so that growth is purely additive.
@@ -23,20 +23,20 @@ A small, strictly additive extension of the existing `umux` CLI plus a versioned
 | `umux sessions list` | read |
 | `umux attach` | bootstrap (launches GUI; idempotent via single-instance) |
 | `umux agent-context` | read |
-| `umux-core run` | bootstrap (foreground service) |
-| `umux-core stop` | mutate (idempotent) |
+| `umux-storestation run` | bootstrap (foreground service) |
+| `umux-storestation stop` | mutate (idempotent) |
 
 ## Surface sketch
 
 ```
 umux (existing CLI binary — additions only)
-  status            [--json]                    Core health; offline is a state (exit 0), not an error
-  sessions list     [--json] [--limit N]        live sessions owned by Core
-  attach            [--json] [--dry-run]        launch/focus the desktop app bound to Core
+  status            [--json]                    Storestation health; offline is a state (exit 0), not an error
+  sessions list     [--json] [--limit N]        live sessions owned by Storestation
+  attach            [--json] [--dry-run]        launch/focus the desktop app bound to Storestation
   agent-context                                 machine-readable self-description (schema 1)
   --config-dir <path>                           global; precedence: flag > UMUX_CONFIG_DIR > platform default
 
-umux-core (new daemon binary)
+umux-storestation (new daemon binary)
   run                [--config-dir]             serve foreground until stop; single instance enforced
   stop               [--json] [--config-dir]    graceful shutdown: kills owned shells, cleans socket
   --version
@@ -48,21 +48,21 @@ Existing v1.6.x commands unchanged (`list export notify import new rm rename spl
 
 | Code | Meaning |
 |---|---|
-| 0 | success — including "Core offline" answers from `status` / `sessions list` (offline is a state) |
+| 0 | success — including "Storestation offline" answers from `status` / `sessions list` (offline is a state) |
 | 2 | usage error (clap default) |
-| 3 | Core required but not reachable (`attach`; future live commands) |
-| 4 | conflict — Core already running (`umux-core run`) |
+| 3 | Storestation required but not reachable (`attach`; future live commands) |
+| 4 | conflict — Storestation already running (`umux-storestation run`) |
 | 5 | internal / unexpected error |
 
 ## Output contracts
 
-`umux status --json` (Core running):
+`umux status --json` (Storestation running):
 
 ```json
 {
   "cliVersion": "1.7.0",
   "protocol": 1,
-  "core": {
+  "storestation": {
     "running": true, "version": "1.7.0", "pid": 4212,
     "uptimeSeconds": 3600, "sessions": 2, "attachedClients": 1,
     "dataDir": "C:\\Users\\adam\\AppData\\Roaming\\umux"
@@ -70,13 +70,13 @@ Existing v1.6.x commands unchanged (`list export notify import new rm rename spl
 }
 ```
 
-`umux status --json` (Core off): `{ "cliVersion": "1.7.0", "protocol": 1, "core": { "running": false, "staleSocket": false } }` — **exit 0**.
+`umux status --json` (Storestation off): `{ "cliVersion": "1.7.0", "protocol": 1, "storestation": { "running": false, "staleSocket": false } }` — **exit 0**.
 
 `umux sessions list --json`:
 
 ```json
 {
-  "core": { "running": true },
+  "storestation": { "running": true },
   "sessions": [
     { "id": "<uuid>", "title": "pwsh — ~/proj", "workspaceId": "…", "tabId": "…", "panelId": "…",
       "cwd": "…", "shell": "…", "cols": 120, "rows": 40, "attachedClients": 1, "createdAt": "…" }
@@ -85,20 +85,20 @@ Existing v1.6.x commands unchanged (`list export notify import new rm rename spl
 }
 ```
 
-Core off → `"sessions": []` + `"core": {"running": false}` — exit 0 (the `core` block makes "no sessions" vs "daemon off" unambiguous).
+Storestation off → `"sessions": []` + `"storestation": {"running": false}` — exit 0 (the `storestation` block makes "no sessions" vs "daemon off" unambiguous).
 
-`umux attach --json`: `{ "launched": true, "appPid": 8123 }` or `{ "launched": false, "reason": "alreadyRunning", "focused": true }`. Core off → exit 3 with the error object below.
+`umux attach --json`: `{ "launched": true, "appPid": 8123 }` or `{ "launched": false, "reason": "alreadyRunning", "focused": true }`. Storestation off → exit 3 with the error object below.
 
 Error object (CLI `--json` **and** protocol, same shape):
 
 ```json
-{ "code": "coreNotRunning", "message": "umux Core is not running.",
-  "next": ["Enable it in Settings → Core", "or run: umux-core run"], "retryable": false }
+{ "code": "storestationNotRunning", "message": "umux Storestation is not running.",
+  "next": ["Enable it in Settings → Storestation", "or run: umux-storestation run"], "retryable": false }
 ```
 
 ## Error catalog (machine codes; v1.8.0 extends additively — clients treat unknown codes as generic)
 
-`coreNotRunning` · `coreAlreadyRunning` · `staleSocket` · `protoTooNew` · `protoTooOld` · `unknownOp` · `sessionNotFound` · `limitInvalid` · `ioError`
+`storestationNotRunning` · `storestationAlreadyRunning` · `staleSocket` · `protoTooNew` · `protoTooOld` · `unknownOp` · `sessionNotFound` · `limitInvalid` · `ioError`
 
 ## `agent-context` skeleton
 
@@ -106,13 +106,13 @@ Error object (CLI `--json` **and** protocol, same shape):
 {
   "schema": 1,
   "cli": "umux", "cliVersion": "1.7.0",
-  "protocol": 1, "daemon": "umux-core",
+  "protocol": 1, "daemon": "umux-storestation",
   "env": { "configDir": "UMUX_CONFIG_DIR", "precedence": "flag > env > default" },
-  "exitCodes": { "0": "ok / Core offline state", "2": "usage", "3": "core unreachable", "4": "already running", "5": "internal" },
-  "errors": ["coreNotRunning", "…"],
+  "exitCodes": { "0": "ok / Storestation offline state", "2": "usage", "3": "storestation unreachable", "4": "already running", "5": "internal" },
+  "errors": ["storestationNotRunning", "…"],
   "commands": [
     { "name": "status", "class": "read", "json": true,
-      "notes": ["exits 0 when Core is offline — offline is a state, not an error"] },
+      "notes": ["exits 0 when Storestation is offline — offline is a state, not an error"] },
     { "name": "sessions list", "class": "read", "json": true, "limitDefault": 100 },
     { "name": "attach", "class": "bootstrap", "json": true, "dryRun": true },
     { "name": "agent-context", "class": "read", "json": "always" }
@@ -123,8 +123,8 @@ Error object (CLI `--json` **and** protocol, same shape):
 ## Socket protocol v1
 
 **Transport**
-- Unix (macOS/Linux): UDS at `<config_dir>/core.sock`, perms `0600`; stale file unlinked on daemon start.
-- Windows: named pipe `\\.\pipe\umux-core-<hash>` where `<hash>` = short stable hash of the canonical config dir path (so `UMUX_CONFIG_DIR` gives test isolation for free).
+- Unix (macOS/Linux): UDS at `<config_dir>/storestation.sock`, perms `0600`; stale file unlinked on daemon start.
+- Windows: named pipe `\\.\pipe\umux-storestation-<hash>` where `<hash>` = short stable hash of the canonical config dir path (so `UMUX_CONFIG_DIR` gives test isolation for free).
 - One socket; multiple concurrent client connections (CLI one-shot, desktop app persistent).
 
 **Framing** — every frame: `u32 LE length` + payload; payload starts with a 1-byte type tag:
@@ -138,16 +138,16 @@ Error object (CLI `--json` **and** protocol, same shape):
 **Op catalog**
 
 Implemented in v1.7.0:
-- `core.status` — daemon health (used by `umux status`)
+- `storestation.status` — daemon health (used by `umux status`)
 - `sessions.list` — `limit` (default 100, max 1000) → sessions + `truncated`
 - `sessions.create` (client-generated UUIDv4 id, shell, cwd, cols/rows), `session.write`, `session.resize`, `session.kill`, `session.subscribe` (opens the push stream of `0x02` frames + lifecycle events `session.exit`, `session.title`) — **implemented now because the desktop daemon-client driver is their client**; CLI *commands* for them are v1.8.0
-- `core.shutdown` — idempotent graceful stop (used by `umux-core stop`)
+- `storestation.shutdown` — idempotent graceful stop (used by `umux-storestation stop`)
 
 Defined but unimplemented (daemon answers `unknownOp` + protocol level until then): future v1.8.0+ ops (e.g. workspace/tab management at app parity).
 
 Unknown op / bad params → enumerated error; connection stays open.
 
-**Idempotency & mutation boundaries** — `core.shutdown` safe twice; session ids client-generated (create-by-key is idempotent for v1.8.0 retries); `attach` has `--dry-run` and the app gets `tauri-plugin-single-instance` so re-attach focuses instead of duplicating.
+**Idempotency & mutation boundaries** — `storestation.shutdown` safe twice; session ids client-generated (create-by-key is idempotent for v1.8.0 retries); `attach` has `--dry-run` and the app gets `tauri-plugin-single-instance` so re-attach focuses instead of duplicating.
 
 **Bounds & timeouts** — lists: default limit 100 (max 1000, `truncated:true` beyond); data frames ≤ 64 KiB; client defaults: connect 3 s, request 10 s, attach app-launch wait 15 s.
 
@@ -172,7 +172,7 @@ Unknown op / bad params → enumerated error; connection stays open.
 **Fix:** global `--config-dir` flag on both binaries; precedence flag > env > default; documented in `agent-context`.
 
 ### Optimization — P6: two binaries, one vocabulary
-**Note:** keep flags, exit codes and error codes identical across `umux` and `umux-core` (`stop --json` mirrors the convention).
+**Note:** keep flags, exit codes and error codes identical across `umux` and `umux-storestation` (`stop --json` mirrors the convention).
 
 ## Recommendations
 

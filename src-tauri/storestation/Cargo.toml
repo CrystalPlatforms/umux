@@ -1,17 +1,17 @@
 [package]
-name = "umux-core"
+name = "umux-storestation"
 version = "1.6.0"
-description = "umux Core — headless daemon: per-user local socket, protocol v1 (core.status/core.shutdown)"
+description = "umux Storestation — headless daemon: per-user local socket, protocol v1 (storestation.status/storestation.shutdown)"
 edition = "2021"
 rust-version = "1.77.2"
 
 # The daemon crate is Tauri-free like store_core (#83, v1.7.0 phase 1): the
 # same library (protocol + client) is linked by the `umux` CLI, and the
-# `umux-core` binary serves the socket. Socket location reuses
+# `umux-storestation` binary serves the socket. Socket location reuses
 # store_core::paths (UMUX_CONFIG_DIR isolates store + socket + pid together).
 
 [lib]
-name = "umux_core"
+name = "umux_storestation"
 
 [dependencies]
 store_core = { path = "../store_core" }

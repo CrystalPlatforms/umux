@@ -26,7 +26,7 @@ mod notify;
     name = "umux",
     version,
     about = "umux — terminal workspace manager (CLI: manage saved workspaces, export them, send notifications)",
-    after_help = umux_core::protocol::EXIT_CODE_HELP,
+    after_help = umux_storestation::protocol::EXIT_CODE_HELP,
 )]
 struct Cli {
     /// Operate on the desktop app's store (the saved GUI state)
@@ -37,7 +37,7 @@ struct Cli {
     #[arg(long, alias = "terminal", global = true)]
     term: bool,
 
-    /// Use this config directory — the umux Core socket and pid file live
+    /// Use this config directory — the umux Storestation socket and pid file live
     /// there too (#83). Precedence: flag > UMUX_CONFIG_DIR > platform default.
     #[arg(long, global = true, value_name = "DIR")]
     config_dir: Option<std::path::PathBuf>,
@@ -88,7 +88,7 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Show umux Core (daemon) health — offline is a state, not an error (#83)
+    /// Show umux Storestation (daemon) health — offline is a state, not an error (#83)
     Status {
         /// Print the machine-readable status document
         #[arg(long)]
@@ -156,7 +156,7 @@ impl Cli {
 /// Whether a subcommand reads or writes a store — only those require
 /// --desk/--term, so a forgotten flag is refused instead of silently writing
 /// the desktop store. `notify` touches no store (it only talks to the OS
-/// notification system), so it runs without a target; the Core commands
+/// notification system), so it runs without a target; the Storestation commands
 /// (`status`, `agent-context`) talk to the daemon socket, not a store (#83).
 fn needs_store(command: &Command) -> bool {
     !matches!(
@@ -458,7 +458,7 @@ fn main() {
     let cli = Cli::parse();
 
     // --config-dir > UMUX_CONFIG_DIR > default: writing the flag's value
-    // into the env var keeps every path (store, Core socket, pid) on
+    // into the env var keeps every path (store, Storestation socket, pid) on
     // store_core's single resolver (#83). An env var is process-global, but
     // this CLI is one-shot, so nothing else can observe the write.
     if let Some(dir) = &cli.config_dir {
@@ -678,17 +678,17 @@ fn main() {
     }
 }
 
-// --- umux Core (#83) ---------------------------------------------------------
+// --- umux Storestation (#83) ---------------------------------------------------------
 
 /// `umux status`: one round trip to the daemon socket. Offline is a state —
-/// exit 0 with `{"core":{"running":false,…}}`; a LIVE daemon that then fails
+/// exit 0 with `{"storestation":{"running":false,…}}`; a LIVE daemon that then fails
 /// the request is the 5 (internal) path.
 fn run_status(as_json: bool) {
     let dir = store_core::paths::config_dir();
-    match umux_core::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
-        Ok(mut client) => match client.call("core.status", serde_json::json!({})) {
+    match umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
+        Ok(mut client) => match client.call("storestation.status", serde_json::json!({})) {
             Ok(result) => {
-                let core = serde_json::json!({
+                let svc = serde_json::json!({
                     "running": true,
                     "version": result.get("daemonVersion"),
                     "pid": result.get("daemonPid"),
@@ -700,8 +700,8 @@ fn run_status(as_json: bool) {
                 if as_json {
                     let doc = serde_json::json!({
                         "cliVersion": env!("CARGO_PKG_VERSION"),
-                        "protocol": umux_core::protocol::PROTOCOL_VERSION,
-                        "core": core,
+                        "protocol": umux_storestation::protocol::PROTOCOL_VERSION,
+                        "storestation": svc,
                     });
                     println!(
                         "{}",
@@ -710,15 +710,15 @@ fn run_status(as_json: bool) {
                     );
                 } else {
                     println!(
-                        "umux Core is running — version {}, pid {}, up {}s, {} sessions",
-                        core["version"].as_str().unwrap_or("?"),
-                        core["pid"],
-                        core["uptimeSeconds"],
-                        core["sessions"]
+                        "umux Storestation is running — version {}, pid {}, up {}s, {} sessions",
+                        svc["version"].as_str().unwrap_or("?"),
+                        svc["pid"],
+                        svc["uptimeSeconds"],
+                        svc["sessions"]
                     );
                     println!(
                         "socket: {}",
-                        umux_core::transport::endpoint_display(&dir)
+                        umux_storestation::transport::endpoint_display(&dir)
                     );
                 }
             }
@@ -727,12 +727,12 @@ fn run_status(as_json: bool) {
                 std::process::exit(5);
             }
         },
-        Err(umux_core::client::ConnectError::NotRunning { stale }) => {
+        Err(umux_storestation::client::ConnectError::NotRunning { stale }) => {
             if as_json {
                 let doc = serde_json::json!({
                     "cliVersion": env!("CARGO_PKG_VERSION"),
-                    "protocol": umux_core::protocol::PROTOCOL_VERSION,
-                    "core": { "running": false, "staleSocket": stale },
+                    "protocol": umux_storestation::protocol::PROTOCOL_VERSION,
+                    "storestation": { "running": false, "staleSocket": stale },
                 });
                 println!(
                     "{}",
@@ -740,7 +740,7 @@ fn run_status(as_json: bool) {
                         .expect("status documents are always serializable")
                 );
             } else {
-                println!("umux Core is not running.");
+                println!("umux Storestation is not running.");
                 if stale {
                     println!("A stale socket from a crashed daemon was found; the next start cleans it.");
                 }
@@ -765,29 +765,29 @@ fn agent_context() -> serde_json::Value {
         "schema": 1,
         "cli": "umux",
         "cliVersion": env!("CARGO_PKG_VERSION"),
-        "protocol": umux_core::protocol::PROTOCOL_VERSION,
-        "daemon": umux_core::protocol::DAEMON_NAME,
+        "protocol": umux_storestation::protocol::PROTOCOL_VERSION,
+        "daemon": umux_storestation::protocol::DAEMON_NAME,
         "env": {
             "configDir": "UMUX_CONFIG_DIR",
             "precedence": "flag > env > default",
         },
         "exitCodes": {
-            "0": "ok / Core offline state",
+            "0": "ok / Storestation offline state",
             "2": "usage",
-            "3": "core unreachable",
+            "3": "storestation unreachable",
             "4": "already running",
             "5": "internal",
         },
         "errors": [
-            umux_core::protocol::codes::CORE_NOT_RUNNING,
-            umux_core::protocol::codes::CORE_ALREADY_RUNNING,
-            umux_core::protocol::codes::STALE_SOCKET,
-            umux_core::protocol::codes::PROTO_TOO_NEW,
-            umux_core::protocol::codes::PROTO_TOO_OLD,
-            umux_core::protocol::codes::UNKNOWN_OP,
-            umux_core::protocol::codes::SESSION_NOT_FOUND,
-            umux_core::protocol::codes::LIMIT_INVALID,
-            umux_core::protocol::codes::IO_ERROR,
+            umux_storestation::protocol::codes::STORESTATION_NOT_RUNNING,
+            umux_storestation::protocol::codes::STORESTATION_ALREADY_RUNNING,
+            umux_storestation::protocol::codes::STALE_SOCKET,
+            umux_storestation::protocol::codes::PROTO_TOO_NEW,
+            umux_storestation::protocol::codes::PROTO_TOO_OLD,
+            umux_storestation::protocol::codes::UNKNOWN_OP,
+            umux_storestation::protocol::codes::SESSION_NOT_FOUND,
+            umux_storestation::protocol::codes::LIMIT_INVALID,
+            umux_storestation::protocol::codes::IO_ERROR,
         ],
         // Phase-1 surface. `sessions list` joins at phase 2, `attach` at
         // phase 5 — each phase extends this table WITH its parity test.
@@ -796,7 +796,7 @@ fn agent_context() -> serde_json::Value {
                 "name": "status",
                 "class": "read",
                 "json": true,
-                "notes": ["exits 0 when Core is offline — offline is a state, not an error"],
+                "notes": ["exits 0 when Storestation is offline — offline is a state, not an error"],
             },
             {
                 "name": "agent-context",

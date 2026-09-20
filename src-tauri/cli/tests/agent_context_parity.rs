@@ -11,7 +11,7 @@
 //! - Phase 1's command table is exactly `status` + `agent-context`;
 //!   `sessions list` joins at phase 2 and `attach` at phase 5 — when a
 //!   phase adds a command, it extends this table WITH this test.
-//! - The `daemon` field names the sibling `umux-core` binary — checked to
+//! - The `daemon` field names the sibling `umux-storestation` binary — checked to
 //!   exist so the documented daemon is never a fiction.
 
 use std::path::{Path, PathBuf};
@@ -33,23 +33,23 @@ fn run(args: &[&str]) -> (String, Option<i32>) {
     )
 }
 
-/// The umux-core binary next to umux in the cargo target dir.
-fn core_bin() -> PathBuf {
+/// The umux-storestation binary next to umux in the cargo target dir.
+fn storestation_bin() -> PathBuf {
     let exe = Path::new(env!("CARGO_BIN_EXE_umux"));
-    let candidate = exe.with_file_name(format!("umux-core{}", std::env::consts::EXE_SUFFIX));
+    let candidate = exe.with_file_name(format!("umux-storestation{}", std::env::consts::EXE_SUFFIX));
     assert!(
         candidate.is_file(),
-        "umux-core binary not found next to umux at {}",
+        "umux-storestation binary not found next to umux at {}",
         candidate.display()
     );
     candidate
 }
 
-/// The full v1 error catalog from plans/umux-core-cli-protocol.md — phase 1
+/// The full v1 error catalog from plans/umux-storestation-cli-protocol.md — phase 1
 /// documents ALL of it (clients treat future additions as generic).
 const ERROR_CATALOG: [&str; 9] = [
-    "coreNotRunning",
-    "coreAlreadyRunning",
+    "storestationNotRunning",
+    "storestationAlreadyRunning",
     "staleSocket",
     "protoTooNew",
     "protoTooOld",
@@ -70,7 +70,7 @@ fn agent_context_matches_the_help_surface() {
     assert_eq!(doc["cli"], "umux");
     assert_eq!(doc["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(doc["protocol"], 1);
-    assert_eq!(doc["daemon"], "umux-core");
+    assert_eq!(doc["daemon"], "umux-storestation");
     assert_eq!(doc["env"]["configDir"], "UMUX_CONFIG_DIR");
     assert_eq!(doc["env"]["precedence"], "flag > env > default");
 
@@ -142,14 +142,14 @@ fn agent_context_matches_the_help_surface() {
         help.contains("Exit codes:"),
         "`umux --help` must document the exit-code catalog:\n{help}"
     );
-    let output = Command::new(core_bin())
+    let output = Command::new(storestation_bin())
         .arg("--help")
         .output()
-        .expect("spawn umux-core --help");
+        .expect("spawn umux-storestation --help");
     let core_help = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
         core_help.contains("Exit codes:"),
-        "`umux-core --help` must document the exit-code catalog:\n{core_help}"
+        "`umux-storestation --help` must document the exit-code catalog:\n{core_help}"
     );
 }
 
@@ -157,10 +157,10 @@ fn agent_context_matches_the_help_surface() {
 fn the_documented_daemon_binary_exists() {
     let (stdout, _) = run(&["agent-context"]);
     let doc: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(doc["daemon"], "umux-core");
-    let bin = core_bin();
+    assert_eq!(doc["daemon"], "umux-storestation");
+    let bin = storestation_bin();
     assert!(
         bin.is_file(),
-        "agent-context names daemon \"umux-core\" but no such binary ships next to umux"
+        "agent-context names daemon \"umux-storestation\" but no such binary ships next to umux"
     );
 }

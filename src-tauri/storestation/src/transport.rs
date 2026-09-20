@@ -1,9 +1,9 @@
 //! The per-user local socket transport — one API over two backends:
 //!
-//! - Unix (macOS/Linux): a UDS at `<config_dir>/core.sock`, permissions
+//! - Unix (macOS/Linux): a UDS at `<config_dir>/storestation.sock`, permissions
 //!   0600, created/removed through the filesystem (stale files are the
 //!   daemon's to clean).
-//! - Windows: a named pipe `\\.\pipe\umux-core-<hash>` named after the
+//! - Windows: a named pipe `\\.\pipe\umux-storestation-<hash>` named after the
 //!   config dir, so `UMUX_CONFIG_DIR` isolates test instances without any
 //!   filesystem artifacts to clean (the kernel object dies with the process).
 //!
@@ -73,7 +73,7 @@ mod imp {
                 return Ok(None);
             }
             match self.0.accept() {
-                Ok((mut stream, _)) => {
+                Ok((stream, _)) => {
                     // BSD/macOS accepted sockets INHERIT the listener's
                     // O_NONBLOCK (Linux clears it) — the protocol loop needs
                     // blocking reads, so clear it explicitly.
@@ -247,7 +247,7 @@ mod imp {
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "timed out connecting to the umux-core pipe",
+                    "timed out connecting to the umux-storestation pipe",
                 ));
             }
             std::thread::sleep(Duration::from_millis(50));

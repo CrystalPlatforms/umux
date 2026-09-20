@@ -1,4 +1,4 @@
-//! The client side of the socket — what `umux status` / `umux-core stop`
+//! The client side of the socket — what `umux status` / `umux-storestation stop`
 //! use today and the desktop app's daemon-client driver will use in phase
 //! 4. One-shot request/response over protocol v1: connect, `hello`, then
 //! `op` calls. Offline is a typed result, never a hang (connect answers
@@ -30,18 +30,18 @@ impl ConnectError {
     pub fn to_error_obj(&self) -> ErrorObj {
         match self {
             ConnectError::NotRunning { .. } => ErrorObj::new(
-                codes::CORE_NOT_RUNNING,
-                "umux Core is not running.",
+                codes::STORESTATION_NOT_RUNNING,
+                "umux Storestation is not running.",
                 vec![
-                    "enable it in Settings → Core (v1.7.0 app)".into(),
-                    "or run: umux-core run".into(),
+                    "enable it in Settings → Storestation (v1.7.0 app)".into(),
+                    "or run: umux-storestation run".into(),
                 ],
             ),
             ConnectError::Protocol(err) => err.clone(),
             ConnectError::Io(e) => ErrorObj::new(
                 codes::IO_ERROR,
-                format!("could not reach the umux-core socket: {e}"),
-                vec!["check whether umux-core is running: umux status".into()],
+                format!("could not reach the umux-storestation socket: {e}"),
+                vec!["check whether umux-storestation is running: umux status".into()],
             ),
         }
     }
@@ -84,7 +84,7 @@ impl Client {
         write_control(&mut self.stream, &request).map_err(|e| {
             ErrorObj::new(
                 codes::IO_ERROR,
-                format!("could not write to the umux-core socket: {e}"),
+                format!("could not write to the umux-storestation socket: {e}"),
                 vec![],
             )
         })?;
@@ -95,21 +95,21 @@ impl Client {
                 Err(FrameError::Closed) => {
                     return Err(ErrorObj::new(
                         codes::IO_ERROR,
-                        "the umux-core daemon closed the connection",
+                        "the umux-storestation daemon closed the connection",
                         vec!["check: umux status".into()],
                     ));
                 }
                 Err(FrameError::TooLarge) => {
                     return Err(ErrorObj::new(
                         codes::IO_ERROR,
-                        "bad frame from the umux-core daemon: frame over the size cap",
+                        "bad frame from the umux-storestation daemon: frame over the size cap",
                         vec![],
                     ));
                 }
                 Err(FrameError::Malformed(message)) => {
                     return Err(ErrorObj::new(
                         codes::IO_ERROR,
-                        format!("bad frame from the umux-core daemon: {message}"),
+                        format!("bad frame from the umux-storestation daemon: {message}"),
                         vec![],
                     ));
                 }
@@ -144,7 +144,7 @@ fn decode_response(response: Value) -> Result<Value, ErrorObj> {
         }),
         Err(_) => Err(ErrorObj::new(
             codes::IO_ERROR,
-            "the umux-core daemon sent an unparseable error object",
+            "the umux-storestation daemon sent an unparseable error object",
             vec![],
         )),
     }
@@ -164,7 +164,7 @@ struct WireError {
 /// connect with the socket file still on disk means a crash leftover is
 /// sitting there (`stale: true`) — refused, not-a-socket, permissions, all
 /// the same. Nothing on disk is simply "not running".
-fn offline_error(config_dir: &Path, e: std::io::Error) -> ConnectError {
+fn offline_error(config_dir: &Path, _e: std::io::Error) -> ConnectError {
     #[cfg(unix)]
     {
         let stale = crate::socketpath::socket_path(config_dir).exists();
@@ -172,7 +172,7 @@ fn offline_error(config_dir: &Path, e: std::io::Error) -> ConnectError {
     }
     #[cfg(not(unix))]
     {
-        let _ = (config_dir, e);
+        let _ = config_dir;
         ConnectError::NotRunning { stale: false }
     }
 }

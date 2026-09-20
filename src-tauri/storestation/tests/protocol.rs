@@ -1,4 +1,4 @@
-//! Wire-level protocol tests for umux Core (#83): a REAL server runs
+//! Wire-level protocol tests for umux Storestation (#83): a REAL server runs
 //! in-process on a tempdir and the test speaks RAW framed bytes over the
 //! UDS — no client library in between, exactly what a foreign client would
 //! send.
@@ -9,7 +9,7 @@
 //! - A hello with a newer protocol major gets `protoTooNew` and a CLEAN
 //!   close (EOF at a frame boundary afterwards — never a hang, never junk).
 //! - The hello result is `{proto, daemonVersion, daemonPid}`.
-//! - `core.status` after handshake reports `sessions: 0` and this
+//! - `storestation.status` after handshake reports `sessions: 0` and this
 //!   instance's `dataDir`; an unknown op gets `unknownOp` and the
 //!   connection stays usable.
 //!
@@ -24,12 +24,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use umux_core::protocol::{
+use umux_storestation::protocol::{
     classify_hello, hello_request, parse_request, read_frame, write_control, Frame,
     PROTOCOL_VERSION,
 };
-use umux_core::server;
-use umux_core::socketpath;
+use umux_storestation::server;
+use umux_storestation::socketpath;
 
 /// A running in-process daemon bound to a tempdir; stops and joins on drop.
 struct TestServer {
@@ -103,7 +103,7 @@ fn newer_major_gets_proto_too_new_and_a_clean_close() {
     // Clean close: EOF at the next frame boundary, promptly.
     let started = std::time::Instant::now();
     match read_frame(&mut stream) {
-        Err(umux_core::protocol::FrameError::Closed) => {}
+        Err(umux_storestation::protocol::FrameError::Closed) => {}
         other => panic!("expected a clean close, got {other:?}"),
     }
     assert!(
@@ -112,7 +112,7 @@ fn newer_major_gets_proto_too_new_and_a_clean_close() {
     );
 }
 
-// The happy handshake: shape of the hello result, then core.status, then an
+// The happy handshake: shape of the hello result, then storestation.status, then an
 // unknown op — which must NOT close the connection (additive-growth rule).
 #[test]
 fn handshake_status_and_unknown_op_leaves_the_connection_open() {
@@ -128,7 +128,7 @@ fn handshake_status_and_unknown_op_leaves_the_connection_open() {
     );
     assert!(response["result"]["daemonPid"].as_u64().unwrap_or(0) > 0);
 
-    let response = exchange(&mut stream, json!({ "id": 2, "op": "core.status" }));
+    let response = exchange(&mut stream, json!({ "id": 2, "op": "storestation.status" }));
     assert_eq!(response["ok"], true);
     assert_eq!(response["result"]["sessions"], 0, "phase 1 has no sessions");
     assert_eq!(
@@ -142,7 +142,7 @@ fn handshake_status_and_unknown_op_leaves_the_connection_open() {
     assert_eq!(response["error"]["code"], "unknownOp");
 
     // Still open: a well-formed op answers normally on the SAME connection.
-    let response = exchange(&mut stream, json!({ "id": 4, "op": "core.status" }));
+    let response = exchange(&mut stream, json!({ "id": 4, "op": "storestation.status" }));
     assert_eq!(response["ok"], true);
 }
 
@@ -153,7 +153,7 @@ fn an_op_before_hello_is_refused_but_the_connection_survives() {
     let test = TestServer::start();
     let mut stream = test.connect();
 
-    let response = exchange(&mut stream, json!({ "id": 1, "op": "core.status" }));
+    let response = exchange(&mut stream, json!({ "id": 1, "op": "storestation.status" }));
     assert_eq!(response["ok"], false);
     assert_eq!(response["error"]["code"], "unknownOp");
     let message = response["error"]["message"].as_str().unwrap_or_default();
@@ -165,7 +165,7 @@ fn an_op_before_hello_is_refused_but_the_connection_survives() {
     // Complete the handshake on the same connection — all good.
     let response = exchange(&mut stream, hello_request("cli", "1.6.0"));
     assert_eq!(response["ok"], true);
-    let response = exchange(&mut stream, json!({ "id": 3, "op": "core.status" }));
+    let response = exchange(&mut stream, json!({ "id": 3, "op": "storestation.status" }));
     assert_eq!(response["ok"], true);
 }
 

@@ -1,5 +1,5 @@
 //! Protocol v1 wire layer (pure) — framing, control envelopes, the error
-//! object. Fixed by `plans/umux-core-cli-protocol.md`:
+//! object. Fixed by `plans/umux-storestation-cli-protocol.md`:
 //!
 //! - every frame: `u32 LE length` + payload; payload starts with a 1-byte
 //!   type tag: `0x01` control (JSON envelope, UTF-8), `0x02` data (binary:
@@ -30,25 +30,25 @@ pub const TAG_DATA: u8 = 0x02;
 
 /// The daemon binary's name — part of the agent-context contract and the
 /// Windows pipe prefix.
-pub const DAEMON_NAME: &str = "umux-core";
+pub const DAEMON_NAME: &str = "umux-storestation";
 
 /// The exit-code catalog, shared verbatim by both binaries' `--help`
 /// (one source so the two surfaces cannot drift — the design doc requires
 /// the catalog "documented in --help and agent-context").
 pub const EXIT_CODE_HELP: &str = "\
 Exit codes:
-  0  success — including \"Core offline\" answers from status commands
+  0  success — including \"Storestation offline\" answers from status commands
   2  usage error
-  3  Core required but not reachable
-  4  conflict — Core already running
+  3  Storestation required but not reachable
+  4  conflict — Storestation already running
   5  internal / unexpected error
 Machine-readable contract: umux agent-context";
 
 /// Machine error codes (the catalog; v1.8.0 extends additively — clients
 /// treat unknown codes as generic).
 pub mod codes {
-    pub const CORE_NOT_RUNNING: &str = "coreNotRunning";
-    pub const CORE_ALREADY_RUNNING: &str = "coreAlreadyRunning";
+    pub const STORESTATION_NOT_RUNNING: &str = "storestationNotRunning";
+    pub const STORESTATION_ALREADY_RUNNING: &str = "storestationAlreadyRunning";
     pub const STALE_SOCKET: &str = "staleSocket";
     pub const PROTO_TOO_NEW: &str = "protoTooNew";
     pub const PROTO_TOO_OLD: &str = "protoTooOld";
@@ -255,7 +255,7 @@ mod tests {
     // A control envelope survives encode→decode byte-for-byte in meaning.
     #[test]
     fn control_frame_round_trips() {
-        let value = json!({ "id": 7, "op": "core.status", "params": {} });
+        let value = json!({ "id": 7, "op": "storestation.status", "params": {} });
         match round_trip(Frame::Control(value.clone())) {
             Frame::Control(back) => assert_eq!(back, value),
             other => panic!("wrong frame back: {other:?}"),
@@ -353,8 +353,8 @@ mod tests {
     // The error object serializes with ALL four contract fields present.
     #[test]
     fn error_object_carries_the_full_contract_shape() {
-        let err = ErrorObj::new(codes::CORE_NOT_RUNNING, "umux Core is not running.", vec![
-            "run: umux-core run".into(),
+        let err = ErrorObj::new(codes::STORESTATION_NOT_RUNNING, "umux Storestation is not running.", vec![
+            "run: umux-storestation run".into(),
         ]);
         let value = serde_json::to_value(&err).unwrap();
         for key in ["code", "message", "next", "retryable"] {

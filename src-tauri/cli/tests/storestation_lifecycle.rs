@@ -1,22 +1,22 @@
-//! End-to-end lifecycle tests for umux Core (#83, v1.7.0 phase 1). These
-//! spawn the REAL binaries — `umux-core run`/`stop` plus `umux status` — and
+//! End-to-end lifecycle tests for umux Storestation (#83, v1.7.0 phase 1). These
+//! spawn the REAL binaries — `umux-storestation run`/`stop` plus `umux status` — and
 //! assert on exit codes, stdout JSON and the files left in the config dir.
 //!
 //! Assumptions encoded here (state-before-RED, #83):
-//! - `umux-core run` serves FOREGROUND until stopped; `umux-core stop` is the
-//!   graceful shutdown path (op `core.shutdown` over the socket).
-//! - Socket/pid live INSIDE the config dir (`core.sock` / `core.pid`), so
+//! - `umux-storestation run` serves FOREGROUND until stopped; `umux-storestation stop` is the
+//!   graceful shutdown path (op `storestation.shutdown` over the socket).
+//! - Socket/pid live INSIDE the config dir (`storestation.sock` / `storestation.pid`), so
 //!   `UMUX_CONFIG_DIR` pointing at a tempdir isolates a whole daemon instance
 //!   — store, socket and pid together.
 //! - `umux status --json` prints ONE JSON document on stdout and ALWAYS
-//!   exits 0 when it can answer at all — Core offline is a state, not an
+//!   exits 0 when it can answer at all — Storestation offline is a state, not an
 //!   error (exit-code catalog, protocol design doc).
-//! - A second `umux-core run` against a live instance exits 4
-//!   (`coreAlreadyRunning`), naming the running daemon's pid.
-//! - The `umux-core` binary is looked up NEXT TO `umux` in the cargo target
+//! - A second `umux-storestation run` against a live instance exits 4
+//!   (`storestationAlreadyRunning`), naming the running daemon's pid.
+//! - The `umux-storestation` binary is looked up NEXT TO `umux` in the cargo target
 //!   dir (same workspace profile) — CARGO_BIN_EXE_* only covers a package's
 //!   own binaries, and these tests exercise both binaries together.
-//! - Not tested here: raw wire framing (src-tauri/core/tests/protocol.rs),
+//! - Not tested here: raw wire framing (src-tauri/storestation/tests/protocol.rs),
 //!   agent-context parity (agent_context_parity.rs), Windows named pipes in
 //!   runtime (compiled everywhere, HITL-verified later per the plan).
 
@@ -27,15 +27,15 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-/// Absolute path of the `umux-core` binary — the `umux` binary's sibling in
+/// Absolute path of the `umux-storestation` binary — the `umux` binary's sibling in
 /// the cargo target dir (one workspace, one profile, one directory).
-fn core_bin() -> PathBuf {
+fn storestation_bin() -> PathBuf {
     let exe = Path::new(env!("CARGO_BIN_EXE_umux"));
-    let name = format!("umux-core{}", std::env::consts::EXE_SUFFIX);
+    let name = format!("umux-storestation{}", std::env::consts::EXE_SUFFIX);
     let candidate = exe.with_file_name(&name);
     assert!(
         candidate.is_file(),
-        "umux-core binary not found next to umux at {} — build the workspace first",
+        "umux-storestation binary not found next to umux at {} — build the workspace first",
         candidate.display()
     );
     candidate
@@ -47,13 +47,13 @@ struct Daemon(Child);
 
 impl Daemon {
     fn start(store_dir: &Path) -> Self {
-        let child = Command::new(core_bin())
+        let child = Command::new(storestation_bin())
             .args(["run"])
             .env("UMUX_CONFIG_DIR", store_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn umux-core run");
+            .expect("spawn umux-storestation run");
         Daemon(child)
     }
 
@@ -62,7 +62,7 @@ impl Daemon {
     fn wait_exit(&mut self, timeout: Duration) -> Option<i32> {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.0.try_wait().expect("poll umux-core child") {
+            match self.0.try_wait().expect("poll umux-storestation child") {
                 Some(status) => return status.code(),
                 None if Instant::now() >= deadline => return None,
                 None => std::thread::sleep(Duration::from_millis(50)),
@@ -104,7 +104,7 @@ fn run_umux(store_dir: &Path, args: &[&str]) -> (String, String, Option<i32>) {
 }
 
 fn run_core(store_dir: &Path, args: &[&str]) -> (String, String, Option<i32>) {
-    run_bin(&core_bin(), store_dir, args)
+    run_bin(&storestation_bin(), store_dir, args)
 }
 
 /// Parse stdout as one JSON document (status --json contract: the whole
@@ -123,7 +123,7 @@ fn wait_until_running(store_dir: &Path) -> Value {
         let (stdout, stderr, code) = run_umux(store_dir, &["status", "--json"]);
         if code == Some(0) {
             let value = json(&stdout);
-            if value["core"]["running"] == Value::Bool(true) {
+            if value["storestation"]["running"] == Value::Bool(true) {
                 return value;
             }
         } else {
@@ -143,7 +143,7 @@ fn wait_until_offline(store_dir: &Path) -> Value {
         let (stdout, _stderr, code) = run_umux(store_dir, &["status", "--json"]);
         assert_eq!(code, Some(0), "offline status must still exit 0");
         let value = json(&stdout);
-        if value["core"]["running"] == Value::Bool(false) {
+        if value["storestation"]["running"] == Value::Bool(false) {
             return value;
         }
         assert!(
@@ -163,31 +163,31 @@ fn daemon_serves_a_temp_instance_and_status_reports_it() {
     let mut daemon = Daemon::start(store.path());
     let status = wait_until_running(store.path());
 
-    let core = &status["core"];
+    let svc = &status["storestation"];
     assert_eq!(status["protocol"], 1, "protocol version is 1");
     assert_eq!(status["cliVersion"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(core["running"], true);
-    assert_eq!(core["pid"], daemon.pid(), "status names the real daemon pid");
-    assert_eq!(core["sessions"], 0, "phase 1 has no sessions yet");
-    assert_eq!(core["attachedClients"], 0);
+    assert_eq!(svc["running"], true);
+    assert_eq!(svc["pid"], daemon.pid(), "status names the real daemon pid");
+    assert_eq!(svc["sessions"], 0, "phase 1 has no sessions yet");
+    assert_eq!(svc["attachedClients"], 0);
     assert!(
-        core["version"].as_str().is_some_and(|v| !v.is_empty()),
-        "daemon version is reported: {core}"
+        svc["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "daemon version is reported: {svc}"
     );
     assert_eq!(
-        core["dataDir"], store.path().to_string_lossy().as_ref(),
+        svc["dataDir"], store.path().to_string_lossy().as_ref(),
         "status reports the resolved config dir"
     );
 
     let (_, _, code) = run_core(store.path(), &["stop"]);
-    assert_eq!(code, Some(0), "`umux-core stop` exits 0");
+    assert_eq!(code, Some(0), "`umux-storestation stop` exits 0");
     assert!(
         daemon.wait_exit(Duration::from_secs(10)).is_some(),
         "daemon exits after stop"
     );
 }
 
-// AC2: a second `umux-core run` against the live instance refuses with the
+// AC2: a second `umux-storestation run` against the live instance refuses with the
 // conflict exit code and names the running pid.
 #[test]
 fn second_run_refuses_with_exit_4_naming_the_running_pid() {
@@ -200,7 +200,7 @@ fn second_run_refuses_with_exit_4_naming_the_running_pid() {
     assert_eq!(code, Some(4), "conflict exit code; stderr: {stderr}");
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("coreAlreadyRunning"),
+        combined.contains("storestationAlreadyRunning"),
         "error names the catalog code; output was:\n{combined}"
     );
     assert!(
@@ -211,10 +211,10 @@ fn second_run_refuses_with_exit_4_naming_the_running_pid() {
 
     // The refused run must not have disturbed the healthy instance.
     let status = wait_until_running(store.path());
-    assert_eq!(status["core"]["pid"], daemon.pid());
+    assert_eq!(status["storestation"]["pid"], daemon.pid());
 }
 
-// AC3: `umux-core stop` stops the daemon, removes socket+pid, and the next
+// AC3: `umux-storestation stop` stops the daemon, removes socket+pid, and the next
 // status answers offline with exit 0.
 #[test]
 fn stop_stops_the_daemon_and_removes_socket_and_pid_files() {
@@ -222,8 +222,8 @@ fn stop_stops_the_daemon_and_removes_socket_and_pid_files() {
 
     let mut daemon = Daemon::start(store.path());
     wait_until_running(store.path());
-    let socket = store.path().join("core.sock");
-    let pid = store.path().join("core.pid");
+    let socket = store.path().join("storestation.sock");
+    let pid = store.path().join("storestation.pid");
     assert!(socket.exists(), "socket file lives in the config dir");
     assert!(pid.exists(), "pid file lives in the config dir");
 
@@ -238,7 +238,7 @@ fn stop_stops_the_daemon_and_removes_socket_and_pid_files() {
     assert!(!pid.exists(), "pid file removed on clean stop");
 
     let offline = wait_until_offline(store.path());
-    assert_eq!(offline["core"]["running"], false);
+    assert_eq!(offline["storestation"]["running"], false);
 }
 
 // AC4: bogus leftover socket/pid files (a crash's leftovers) are REPORTED as
@@ -249,21 +249,21 @@ fn stale_leftovers_are_reported_by_status_and_cleaned_by_next_start() {
 
     // A regular file where the socket would bind + a pid file with junk:
     // exactly what a hard crash leaves behind on unix.
-    std::fs::write(store.path().join("core.sock"), b"junk").unwrap();
-    std::fs::write(store.path().join("core.pid"), b"999999\n").unwrap();
+    std::fs::write(store.path().join("storestation.sock"), b"junk").unwrap();
+    std::fs::write(store.path().join("storestation.pid"), b"999999\n").unwrap();
 
     let (stdout, _stderr, code) = run_umux(store.path(), &["status", "--json"]);
     assert_eq!(code, Some(0), "stale is still a state, exit 0");
     let value = json(&stdout);
-    assert_eq!(value["core"]["running"], false);
-    assert_eq!(value["core"]["staleSocket"], true, "stale detected:\n{stdout}");
+    assert_eq!(value["storestation"]["running"], false);
+    assert_eq!(value["storestation"]["staleSocket"], true, "stale detected:\n{stdout}");
 
     let mut daemon = Daemon::start(store.path());
     wait_until_running(store.path());
 
     assert!(
-        !store.path().join("core.pid").exists() || {
-            let text = std::fs::read_to_string(store.path().join("core.pid")).unwrap_or_default();
+        !store.path().join("storestation.pid").exists() || {
+            let text = std::fs::read_to_string(store.path().join("storestation.pid")).unwrap_or_default();
             text.trim() == daemon.pid().to_string()
         },
         "stale pid file was replaced by the live daemon's own pid file"
@@ -272,8 +272,8 @@ fn stale_leftovers_are_reported_by_status_and_cleaned_by_next_start() {
     let (_, _, stop_code) = run_core(store.path(), &["stop"]);
     assert_eq!(stop_code, Some(0));
     daemon.wait_exit(Duration::from_secs(10));
-    assert!(!store.path().join("core.sock").exists(), "socket cleaned");
-    assert!(!store.path().join("core.pid").exists(), "pid cleaned");
+    assert!(!store.path().join("storestation.sock").exists(), "socket cleaned");
+    assert!(!store.path().join("storestation.pid").exists(), "pid cleaned");
 }
 
 // AC5: `umux status` with stdin closed and NO daemon answers promptly, never
@@ -293,8 +293,8 @@ fn offline_status_with_closed_stdin_exits_promptly() {
         "offline status must not hang (took {elapsed:?})"
     );
     let value = json(&stdout);
-    assert_eq!(value["core"]["running"], false);
-    assert_eq!(value["core"]["staleSocket"], false, "nothing stale here:\n{stdout}");
+    assert_eq!(value["storestation"]["running"], false);
+    assert_eq!(value["storestation"]["staleSocket"], false, "nothing stale here:\n{stdout}");
     assert_eq!(value["protocol"], 1);
 }
 

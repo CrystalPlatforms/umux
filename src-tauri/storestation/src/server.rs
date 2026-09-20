@@ -33,7 +33,7 @@ pub struct ServeState {
     data_dir: String,
     daemon_pid: u32,
     daemon_version: &'static str,
-    /// Set by the `core.shutdown` op — the accept loop watches it.
+    /// Set by the `storestation.shutdown` op — the accept loop watches it.
     shutdown: AtomicBool,
 }
 
@@ -80,7 +80,7 @@ pub fn prepare(config_dir: &Path) -> Result<Prepared, PrepareError> {
     })
 }
 
-/// Serve until `stop()` turns true, the `core.shutdown` op arrives, or an
+/// Serve until `stop()` turns true, the `storestation.shutdown` op arrives, or an
 /// accept error keeps repeating. ALWAYS cleans the socket/pid leftovers on
 /// the way out — a daemon never leaves files behind on a clean path.
 pub fn serve<F: Fn() -> bool>(prepared: Prepared, stop: F) {
@@ -100,7 +100,7 @@ pub fn serve<F: Fn() -> bool>(prepared: Prepared, stop: F) {
             }
             Ok(None) => std::thread::sleep(transport::ACCEPT_TICK),
             Err(e) => {
-                eprintln!("umux-core: accept error: {e}");
+                eprintln!("umux-storestation: accept error: {e}");
                 std::thread::sleep(transport::ACCEPT_TICK);
             }
         }
@@ -109,7 +109,7 @@ pub fn serve<F: Fn() -> bool>(prepared: Prepared, stop: F) {
 }
 
 /// Remove every daemon-owned file for this instance. Idempotent; also what
-/// `umux-core stop` runs when it finds only stale leftovers.
+/// `umux-storestation stop` runs when it finds only stale leftovers.
 pub fn cleanup(config_dir: &Path) {
     transport::remove_socket_file(config_dir);
     let _ = std::fs::remove_file(socketpath::pid_path(config_dir));
@@ -184,7 +184,7 @@ fn handle_connection<S: Read + Write + StreamTimeouts>(mut stream: S, state: Arc
             continue;
         }
 
-        let shutting_down = request.op == "core.shutdown";
+        let shutting_down = request.op == "storestation.shutdown";
         match dispatch(&state, &request) {
             Ok(result) => {
                 let _ = write_control(&mut stream, &response_ok(request.id, result));
@@ -203,7 +203,7 @@ fn handle_connection<S: Read + Write + StreamTimeouts>(mut stream: S, state: Arc
 /// phase 2 adds — answers `unknownOp` so growth stays purely additive.
 pub fn dispatch(state: &ServeState, request: &Request) -> Result<Value, ErrorObj> {
     match request.op.as_str() {
-        "core.status" => Ok(json!({
+        "storestation.status" => Ok(json!({
             "proto": protocol::PROTOCOL_VERSION,
             "daemonVersion": state.daemon_version,
             "daemonPid": state.daemon_pid,
@@ -213,7 +213,7 @@ pub fn dispatch(state: &ServeState, request: &Request) -> Result<Value, ErrorObj
             "attachedClients": 0,
             "dataDir": state.data_dir,
         })),
-        "core.shutdown" => {
+        "storestation.shutdown" => {
             state.shutdown.store(true, Ordering::SeqCst);
             Ok(json!({ "stopping": true }))
         }

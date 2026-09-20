@@ -10,9 +10,9 @@ rust-version = "1.77.2"
 
 [dependencies]
 store_core = { path = "../store_core" }
-# Core additions (#83): `umux status` and (later) the live commands talk to
+# Storestation additions (#83): `umux status` and (later) the live commands talk to
 # the daemon through the same client library the desktop app will use.
-umux-core = { path = "../core" }
+umux-storestation = { path = "../storestation" }
 clap = { version = "4", features = ["derive"] }
 # The import command prints its plan as JSON (#63).
 serde_json = "1"
