@@ -33,6 +33,11 @@ export type Settings = {
   // applied value to its own min/max at render time (a width dragged in a
   // larger window must not eat a smaller one).
   sidebarWidth: number | null
+  // #86 (v1.7.0): the umux Storestation block. daemonEnabled = the daemon
+  // toggle, default OFF — Storestation is opt-in and OFF behaves exactly
+  // like the pre-Storestation app. Additive: a pre-#86 settings.json (or a
+  // hand-trimmed one) loads with the daemon off.
+  storestation: { daemonEnabled: boolean }
 }
 
 export const defaultSettings: Settings = {
@@ -45,6 +50,7 @@ export const defaultSettings: Settings = {
   showTabFolders: false,
   defaultShell: null,
   sidebarWidth: null,
+  storestation: { daemonEnabled: false },
 }
 
 /// Coerce an unknown invoke payload into a complete Settings object: missing
@@ -76,5 +82,10 @@ export function coerceSettings(raw: unknown): Settings {
       typeof r.sidebarWidth === 'number' && Number.isFinite(r.sidebarWidth) && r.sidebarWidth > 0
         ? Math.round(r.sidebarWidth)
         : null,
+    // #86: coerce by shape — the block itself OR just the flag may be
+    // missing (a pre-#86 file); anything else defaults to OFF.
+    storestation: {
+      daemonEnabled: r.storestation?.daemonEnabled === true,
+    },
   }
 }

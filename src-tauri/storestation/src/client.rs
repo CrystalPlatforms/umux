@@ -92,6 +92,13 @@ impl Client {
             match read_frame(&mut self.stream) {
                 Ok(Frame::Control(response)) => return decode_response(response),
                 Ok(Frame::Data { .. }) => continue,
+                Err(FrameError::Timeout) => {
+                    return Err(ErrorObj::new(
+                        codes::IO_ERROR,
+                        "the umux-storestation daemon did not answer within the request budget",
+                        vec!["check: umux status".into()],
+                    ));
+                }
                 Err(FrameError::Closed) => {
                     return Err(ErrorObj::new(
                         codes::IO_ERROR,
@@ -158,6 +165,259 @@ struct WireError {
     next: Vec<String>,
     #[serde(default)]
     retryable: bool,
+}
+
+// --- Persistent client (phase 4: the desktop daemon-client driver) ----------
+//
+// The one-shot `Client` above serves CLI commands. The desktop driver needs
+// a LONG-LIVED connection instead: requests from many threads, subscribed
+// sessions pushing data frames and events back for hours. One reader thread
+// routes every inbound frame; callers get channels out.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
+/// A handshaken connection that stays open: `call` from any thread,
+/// per-session output channels for subscribed sessions, events handled
+/// internally (a `session.exit` event closes that session's channel — the
+/// caller sees exactly what an in-process PTY channel closing looks like).
+pub struct PersistentClient {
+    inner: StdMutex<PersistentInner>,
+    pending: Arc<PendingMap>,
+    outputs: Arc<OutputsMap>,
+    dead: Arc<AtomicBool>,
+    /// Dropping the client must stop the reader thread: the reader keeps
+    /// its own Arcs, so this channel is the shutdown signal.
+    reader_shutdown: Option<std::sync::mpsc::Sender<()>>,
+}
+
+struct PersistentInner {
+    write: Box<dyn std::io::Write + Send>,
+    next_id: u64,
+}
+
+type PendingMap = StdMutex<HashMap<u64, std::sync::mpsc::Sender<Value>>>;
+type OutputsMap = StdMutex<HashMap<String, std::sync::mpsc::Sender<Vec<u8>>>>;
+
+impl PersistentClient {
+    /// Connect and perform the `hello` handshake, then start the reader
+    /// thread. Offline is the same typed result the one-shot client gives.
+    pub fn connect(
+        config_dir: &Path,
+        client_name: &str,
+        client_version: &str,
+    ) -> Result<PersistentClient, ConnectError> {
+        let stream = match transport::connect(config_dir) {
+            Ok(stream) => stream,
+            Err(e) => return Err(offline_error(config_dir, e)),
+        };
+        stream.apply_timeouts();
+        let halves = transport::split_client(stream)
+            .map_err(|e| ConnectError::Io(e))?;
+
+        // Handshake inline (the reader thread starts after it succeeded).
+        let (mut write, mut read) = (halves.write, halves.read);
+        let hello = hello_request(client_name, client_version);
+        write_control(&mut write, &hello)
+            .map_err(|e| ConnectError::Io(e))?;
+        let response = loop {
+            match read_frame(&mut read) {
+                Ok(Frame::Control(value)) => break value,
+                Ok(Frame::Data { .. }) => continue,
+                Err(FrameError::Timeout) => {
+                    return Err(ConnectError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the umux-storestation daemon did not answer the handshake",
+                    )));
+                }
+                Err(FrameError::Closed) => {
+                    return Err(ConnectError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the umux-storestation daemon closed the connection",
+                    )));
+                }
+                Err(other) => {
+                    return Err(ConnectError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("bad frame during the handshake: {other:?}"),
+                    )));
+                }
+            }
+        };
+        decode_response(response).map_err(ConnectError::Protocol)?;
+
+        let pending: Arc<PendingMap> = Arc::new(StdMutex::new(HashMap::new()));
+        let outputs: Arc<OutputsMap> = Arc::new(StdMutex::new(HashMap::new()));
+        let dead = Arc::new(AtomicBool::new(false));
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+
+        let reader_pending = Arc::clone(&pending);
+        let reader_outputs = Arc::clone(&outputs);
+        let reader_dead = Arc::clone(&dead);
+        std::thread::Builder::new()
+            .name("storestation-persistent-reader".into())
+            .spawn(move || {
+                reader_loop(read, reader_pending, reader_outputs, reader_dead, shutdown_rx);
+            })
+            .map_err(|e| ConnectError::Io(std::io::Error::other(e.to_string())))?;
+
+        Ok(PersistentClient {
+            inner: StdMutex::new(PersistentInner {
+                write,
+                next_id: 1,
+            }),
+            pending,
+            outputs,
+            dead,
+            reader_shutdown: Some(shutdown_tx),
+        })
+    }
+
+    /// Whether the connection is known-dead (the daemon went away). A dead
+    /// client fails fast; the caller reconnects by building a new one.
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
+
+    /// One request → its response `result`, like the one-shot client — but
+    /// safe from any thread, and subscribed sessions' frames keep flowing
+    /// meanwhile (the reader routes them independently).
+    pub fn call(&self, op: &str, params: Value) -> Result<Value, ErrorObj> {
+        if self.is_dead() {
+            return Err(ErrorObj::new(
+                codes::IO_ERROR,
+                "the connection to the umux-storestation daemon is closed",
+                vec!["reconnect: check umux status, then toggle Storestation again".into()],
+            ));
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        let id = {
+            let mut inner = self.inner.lock().expect("persistent inner lock");
+            let id = inner.next_id;
+            inner.next_id += 1;
+            let request = json!({ "id": id, "op": op, "params": params });
+            write_control(&mut inner.write, &request).map_err(|e| {
+                ErrorObj::new(
+                    codes::IO_ERROR,
+                    format!("could not write to the umux-storestation socket: {e}"),
+                    vec![],
+                )
+            })?;
+            id
+        };
+        self.pending
+            .lock()
+            .expect("pending map lock")
+            .insert(id, tx);
+        // The bounded request budget (protocol: 10 s) — but WITHOUT stream
+        // timeouts ending the connection: the reader keeps running either way.
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(envelope) => decode_response(envelope),
+            Err(_) => {
+                self.pending.lock().expect("pending map lock").remove(&id);
+                Err(ErrorObj::new(
+                    codes::IO_ERROR,
+                    "the umux-storestation daemon did not answer within the request budget",
+                    vec!["check: umux status".into()],
+                ))
+            }
+        }
+    }
+
+    /// Open this client's output channel for one session. Register BEFORE
+    /// `session.subscribe` so the very first data frame has somewhere to
+    /// go; the channel closes when the session exits (a `session.exit`
+    /// event) or the connection dies.
+    pub fn subscribe_output(&self, session: &str) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        self.outputs
+            .lock()
+            .expect("outputs map lock")
+            .insert(session.to_string(), tx);
+        rx
+    }
+
+    /// Detach from a session's output (panel closed while the session may
+    /// still be alive; does NOT touch the daemon — killing is a `call`).
+    pub fn unsubscribe_output(&self, session: &str) {
+        self.outputs
+            .lock()
+            .expect("outputs map lock")
+            .remove(session);
+    }
+}
+
+impl Drop for PersistentClient {
+    fn drop(&mut self) {
+        if let Some(tx) = self.reader_shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// The reader: route control responses to waiting callers, data frames to
+/// session channels, `session.exit` to channel closure. A dead connection
+/// fails every pending caller and closes every session channel (the same
+/// visible behavior as the sessions dying).
+fn reader_loop(
+    mut read: Box<dyn std::io::Read + Send>,
+    pending: Arc<PendingMap>,
+    outputs: Arc<OutputsMap>,
+    dead: Arc<AtomicBool>,
+    shutdown: std::sync::mpsc::Receiver<()>,
+) {
+    loop {
+        // The shutdown channel lets Drop stop this thread promptly even
+        // when no frames are arriving; a 100 ms poll is plenty.
+        match read_frame(&mut read) {
+            Ok(Frame::Control(value)) => {
+                if let Some(id) = value.get("id").and_then(Value::as_u64) {
+                    if value.get("ok").is_some() {
+                        if let Some(tx) =
+                            pending.lock().expect("pending map lock").remove(&id)
+                        {
+                            let _ = tx.send(value);
+                        }
+                        continue;
+                    }
+                }
+                // No id/ok → an event envelope. Only session.exit is
+                // handled internally; other events (session.title) have no
+                // app-side consumer yet and are dropped.
+                if value.get("event").and_then(Value::as_str) == Some("session.exit") {
+                    if let Some(session) = value.get("session").and_then(Value::as_str) {
+                        outputs
+                            .lock()
+                            .expect("outputs map lock")
+                            .remove(session); // dropping the Sender closes the rx
+                    }
+                }
+            }
+            Ok(Frame::Data { session, bytes }) => {
+                let route = outputs
+                    .lock()
+                    .expect("outputs map lock")
+                    .get(&session)
+                    .cloned();
+                if let Some(tx) = route {
+                    if tx.send(bytes).is_err() {
+                        outputs.lock().expect("outputs map lock").remove(&session);
+                    }
+                }
+            }
+            Err(FrameError::Timeout) => continue,
+            Err(_) => break,
+        }
+        if shutdown.try_recv().is_ok() {
+            return;
+        }
+    }
+    dead.store(true, Ordering::SeqCst);
+    // Fail every pending caller and close every session channel.
+    pending.lock().expect("pending map lock").clear();
+    outputs.lock().expect("outputs map lock").clear();
 }
 
 /// Map a transport failure onto the offline/stale model: on unix, ANY failed

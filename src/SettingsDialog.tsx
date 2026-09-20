@@ -93,6 +93,8 @@ export function SettingsDialog({
   onResetAll,
   updates,
   shells = [],
+  onStorestationToggle,
+  storestationStatus = null,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -125,6 +127,21 @@ export function SettingsDialog({
   // invoke). Empty = only "Auto" and the custom entry are offered — no shell
   // is ever assumed to exist.
   shells?: ShellEntry[]
+  // The Storestation section (#86, v1.7.0): the daemon toggle + a live
+  // status line. The toggle reports UPWARD (this component stays
+  // invoke-free) — the parent runs the spawn/stop flow, decides whether a
+  // confirmation is needed (live sessions die on stop), and persists the
+  // setting after the backend answers. Absent = the section is not rendered.
+  onStorestationToggle?: (next: boolean) => void
+  // The last probed daemon status (the parent refreshes it when the dialog
+  // opens and after every toggle). null = no status line yet.
+  storestationStatus?: {
+    enabled: boolean
+    running: boolean
+    version?: string
+    sessions?: number
+    attachedClients?: number
+  } | null
 }) {
   // Custom shell entry (#77, fix round 2): the "Custom…" menu item opens a
   // small dialog with the command field. The field prefills with the saved
@@ -466,6 +483,38 @@ export function SettingsDialog({
                 )}
               </div>
             </div>
+          </>
+        )}
+
+        {/* umux Storestation (#86, v1.7.0): the daemon toggle + a live
+            status line, styled like the import row above. The parent owns
+            the flow: toggle ON spawns/connects the daemon before the
+            setting persists; toggle OFF with live sessions asks for a
+            confirmation THERE (this component stays invoke-free). */}
+        {onStorestationToggle != null && (
+          <>
+            <div className="settings-row" data-testid="storestation-row">
+              <div className="settings-row__text">
+                <span className="settings-row__label">umux Storestation</span>
+                <span className="settings-row__description">
+                  Keep terminal sessions running after umux closes. When off,
+                  umux behaves exactly as before.
+                </span>
+              </div>
+              <SettingsToggle
+                label="umux Storestation daemon"
+                checked={settings.storestation.daemonEnabled}
+                testId="toggle-storestation"
+                onToggle={onStorestationToggle}
+              />
+            </div>
+            {storestationStatus != null && (
+              <p className="settings-status" data-testid="storestation-status">
+                {storestationStatus.running
+                  ? `Daemon running${storestationStatus.version ? ` (v${storestationStatus.version})` : ''} — ${storestationStatus.sessions ?? 0} session${(storestationStatus.sessions ?? 0) === 1 ? '' : 's'}.`
+                  : 'Daemon stopped.'}
+              </p>
+            )}
           </>
         )}
 

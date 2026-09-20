@@ -597,4 +597,106 @@ describe('SettingsDialog factory reset (#74)', () => {
 
     expect(onResetAll).toHaveBeenCalledTimes(1)
   })
+
+  // --- umux Storestation (#86, v1.7.0) -------------------------------------
+
+  // The section only renders when the parent wires the toggle (the same
+  // optional-prop contract as the updates row): absent handler = absent
+  // section, so the OFF state's dialog is byte-identical to v1.6.x's.
+  it('hides the Storestation section when no toggle handler is wired', () => {
+    const { queryByTestId } = render(
+      <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
+    )
+    expect(queryByTestId('storestation-row')).toBeNull()
+    expect(queryByTestId('toggle-storestation')).toBeNull()
+  })
+
+  // AC: the section renders — the daemon toggle mirrors the persisted
+  // setting (OFF by default) and the row is labeled.
+  it('renders the Storestation section with the daemon toggle defaulting OFF', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={() => {}}
+        storestationStatus={null}
+      />,
+    )
+    expect(getByTestId('storestation-row')).toBeTruthy()
+    expect(getByTestId('toggle-storestation')).toHaveAttribute('aria-checked', 'false')
+    expect(getByTestId('toggle-storestation').getAttribute('aria-label')).toMatch(
+      /storestation/i,
+    )
+  })
+
+  // The toggle reports UPWARD (invoke-free component): the click hands the
+  // requested next state to the parent, which runs the spawn/stop flow.
+  it('reports a daemon-toggle flip to the parent in both directions', () => {
+    const onStorestationToggle = vi.fn()
+    const { getByTestId, rerender } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={onStorestationToggle}
+      />,
+    )
+    fireEvent.click(getByTestId('toggle-storestation'))
+    expect(onStorestationToggle).toHaveBeenCalledWith(true)
+
+    // After the parent persisted ON, the switch mirrors it and a click
+    // reports OFF (the stop direction).
+    rerender(
+      <SettingsDialog
+        settings={{ ...defaultSettings, storestation: { daemonEnabled: true } }}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={onStorestationToggle}
+      />,
+    )
+    expect(getByTestId('toggle-storestation')).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(getByTestId('toggle-storestation'))
+    expect(onStorestationToggle).toHaveBeenLastCalledWith(false)
+  })
+
+  // The status line: running names the daemon's version and session count;
+  // stopped says so; no status yet renders nothing.
+  it('reflects the live daemon status', () => {
+    const { getByTestId, queryByTestId, rerender } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={() => {}}
+        storestationStatus={null}
+      />,
+    )
+    expect(queryByTestId('storestation-status')).toBeNull()
+
+    rerender(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={() => {}}
+        storestationStatus={{ enabled: true, running: true, version: '1.7.0', sessions: 2 }}
+      />,
+    )
+    const status = getByTestId('storestation-status')
+    expect(status.textContent).toMatch(/running/i)
+    expect(status.textContent).toContain('1.7.0')
+    expect(status.textContent).toContain('2')
+
+    rerender(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={() => {}}
+        storestationStatus={{ enabled: true, running: false }}
+      />,
+    )
+    expect(getByTestId('storestation-status').textContent).toMatch(/stopped/i)
+  })
 })

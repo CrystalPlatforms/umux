@@ -241,6 +241,36 @@ fn stop_stops_the_daemon_and_removes_socket_and_pid_files() {
     assert_eq!(offline["storestation"]["running"], false);
 }
 
+// Regression (HITL 2026-09-20, macOS): `umux status` fired IMMEDIATELY
+// after `stop` — no retry, no sleep — must answer the offline state, exit 0.
+// The stop path used to remove the socket file only AFTER reaping the owned
+// shells, so a status racing into the daemon's wind-down connected to the
+// kernel-backlogged listener and read "the daemon closed the connection"
+// (exit 5). The fix removes the socket before the reap; this test pins it.
+#[test]
+fn status_immediately_after_stop_reads_offline_exit_0() {
+    let store = tempfile::tempdir().unwrap();
+
+    let mut daemon = Daemon::start(store.path());
+    wait_until_running(store.path());
+
+    let (stdout, stderr, code) = run_core(store.path(), &["stop"]);
+    assert_eq!(code, Some(0), "stop exits 0; stderr: {stderr}");
+    assert!(
+        daemon.wait_exit(Duration::from_secs(10)).is_some(),
+        "daemon process exits after stop"
+    );
+
+    // ONE shot, back-to-back with the stop — exactly the repro.
+    let (stdout, _stderr, code) = run_umux(store.path(), &["status", "--json"]);
+    assert_eq!(code, Some(0), "status right after stop exits 0; stdout: {stdout}");
+    let value = json(&stdout);
+    assert_eq!(
+        value["storestation"]["running"], false,
+        "status right after stop must read offline, got: {stdout}"
+    );
+}
+
 // AC4: bogus leftover socket/pid files (a crash's leftovers) are REPORTED as
 // stale by status, and the next daemon start cleans them and serves.
 #[test]

@@ -15,9 +15,16 @@ name = "umux_storestation"
 
 [dependencies]
 store_core = { path = "../store_core" }
+# #84 (v1.7.0 phase 2): the daemon serves real sessions through the shared
+# session engine — the same PtyService the desktop app links in-process.
+session_core = { path = "../session_core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
+# session.write carries its bytes base64-encoded inside the JSON control
+# envelope (binary-safe over the text protocol, same wire economy as the
+# app's pty_output bridge).
+base64 = "0.22"
 # Ctrl+C handling that works on all three platforms (the handler runs on a
 # normal thread, so the graceful socket/pid cleanup is safe there).
 ctrlc = "3"

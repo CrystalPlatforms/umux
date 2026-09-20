@@ -6,6 +6,7 @@ pub mod notification_service;
 pub mod osc_parser;
 pub mod pty_debug;
 pub mod pty_service;
+pub mod session_driver;
 pub mod shell_probe;
 pub mod ssh_manager;
 pub mod updater_probe;
@@ -20,15 +21,22 @@ use store_core::workspace_store::{fallback_warning, Group, Workspace, WorkspaceD
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use notification_service::{NotificationService, Notifier, PanelOrigin};
 use osc_parser::OscParser;
-use pty_service::{PtyHandle, PtyService};
-use ssh_manager::{parse_ssh_target, SshHandle, SshManager};
+use session_driver::{RouterDriver, SessionCore};
+use ssh_manager::parse_ssh_target;
+
+// The SessionCore seam (#85, v1.7.0 phase 3): every session-touching
+// command routes through the driver trait; the engine lives only behind
+// session_driver (the in-process impl today). The pty_service module stays
+// as the re-export path the rest of the crate uses for its pure helpers
+// (process_name below); the ENGINE types are not touched outside the driver.
+use pty_service::process_name;
 
 /// The app-wide notification mute flag. One instance is created in `run()` and
 /// shared (via Arc) with every panel's NotificationService, so a single toggle
@@ -92,13 +100,19 @@ struct PtyCwdPayload {
 #[tauri::command]
 fn pty_open(
     app: AppHandle,
-    state: State<'_, Mutex<PtyService>>,
+    driver: State<'_, RouterDriver>,
     mute: State<'_, MuteFlag>,
     shell: Option<String>,
     cwd: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
     label: Option<String>,
+    // Phase-4 rebind ids (issue #86): which workspace/tab/panel this
+    // surface belongs to, so a Storestation-owned session can be found
+    // again after a relaunch. Absent on older callers — always Optional.
+    workspace_id: Option<String>,
+    tab_id: Option<String>,
+    panel_id: Option<String>,
 ) -> Result<u32, String> {
     // Default to the user's $SHELL, falling back to /bin/sh; an explicit
     // `shell` override (from a future WorkspaceStore config) wins.
@@ -118,11 +132,16 @@ fn pty_open(
     let cols = cols.unwrap_or(80);
     let rows = rows.unwrap_or(24);
 
-    let (handle, rx) = {
-        let mut svc = state.lock().map_err(|e| e.to_string())?;
-        svc.open(&shell, cwd, cols, rows).map_err(|e| e.to_string())?
+    let params = session_driver::PtyOpenParams {
+        shell,
+        cwd,
+        cols,
+        rows,
+        workspace_id,
+        tab_id,
+        panel_id,
     };
-    let id = handle.id;
+    let (id, rx) = driver.pty_open(&params).map_err(|e| e.to_string())?;
 
     // Drain the PTY's output channel on its own thread and forward each chunk
     // to the renderer. The channel disconnects (loop ends) when the PTY closes.
@@ -198,25 +217,24 @@ fn pty_open(
 }
 
 #[tauri::command]
-fn pty_write(state: State<'_, Mutex<PtyService>>, id: u32, data: String) -> Result<(), String> {
+fn pty_write(driver: State<'_, RouterDriver>, id: u32, data: String) -> Result<(), String> {
     let debug_dir = config_dir();
     if pty_debug::enabled(&debug_dir) {
         pty_debug::append(&debug_dir, &pty_debug::input_line(id, data.len()), pty_debug::max_log_bytes());
     }
-    let mut svc = state.lock().map_err(|e| e.to_string())?;
-    svc.write(&PtyHandle { id }, data.as_bytes()).map_err(|e| e.to_string())
+    driver
+        .pty_write(id, data.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn pty_resize(state: State<'_, Mutex<PtyService>>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-    let mut svc = state.lock().map_err(|e| e.to_string())?;
-    svc.resize(&PtyHandle { id }, cols, rows).map_err(|e| e.to_string())
+fn pty_resize(driver: State<'_, RouterDriver>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    driver.pty_resize(id, cols, rows).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn pty_close(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<(), String> {
-    let mut svc = state.lock().map_err(|e| e.to_string())?;
-    svc.close(&PtyHandle { id });
+fn pty_close(driver: State<'_, RouterDriver>, id: u32) -> Result<(), String> {
+    driver.pty_close(id);
     Ok(())
 }
 
@@ -241,9 +259,8 @@ fn pty_debug_paint(id: u32, chars: usize, visible: usize) -> Result<(), String> 
 /// `ssh` client is always the foreground group while connected, and the
 /// remote side is opaque (OSC-only, no polling), so they close without asking.
 #[tauri::command]
-fn pty_is_busy(state: State<'_, Mutex<PtyService>>, id: u32) -> Result<bool, String> {
-    let mut svc = state.lock().map_err(|e| e.to_string())?;
-    Ok(svc.is_busy(&PtyHandle { id }))
+fn pty_is_busy(driver: State<'_, RouterDriver>, id: u32) -> Result<bool, String> {
+    Ok(driver.pty_is_busy(id))
 }
 
 // --- Session snapshot support (v0.2 Phase 5 / #29) ---------------------------
@@ -279,13 +296,12 @@ async fn panel_cwds(
     panels: Vec<CwdQuery>,
 ) -> Result<Vec<CwdAnswer>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<Mutex<PtyService>>();
-        let svc = state.lock().map_err(|e| e.to_string())?;
+        let driver = app.state::<RouterDriver>();
         Ok(panels
             .into_iter()
             .map(|q| {
-                let cwd = svc
-                    .cwd(&PtyHandle { id: q.pty_id })
+                let cwd = driver
+                    .pty_cwd(q.pty_id)
                     .map(|p| p.to_string_lossy().into_owned());
                 CwdAnswer {
                     panel_id: q.panel_id,
@@ -324,28 +340,24 @@ struct PanelProcessAnswer {
 // process_name), and the command is async so the UI thread is never involved.
 #[tauri::command]
 async fn panel_processes(
-    state: State<'_, Mutex<PtyService>>,
+    driver: State<'_, RouterDriver>,
     panels: Vec<CwdQuery>,
 ) -> Result<Vec<PanelProcessAnswer>, String> {
     // Under the lock: only the cheap part — which pid owns each panel's fg.
-    let resolved: Result<Vec<(String, Option<u32>)>, String> = {
-        let mut svc = state.lock().map_err(|e| e.to_string())?;
-        Ok(panels
-            .into_iter()
-            .map(|q| {
-                let pid = svc.foreground_pid(&PtyHandle { id: q.pty_id });
-                (q.panel_id, pid)
-            })
-            .collect())
-    };
-    let resolved = resolved?;
+    let resolved: Vec<(String, Option<u32>)> = panels
+        .into_iter()
+        .map(|q| {
+            let pid = driver.pty_foreground_pid(q.pty_id);
+            (q.panel_id, pid)
+        })
+        .collect();
     // Off the lock (and off the UI thread): name each pid.
     tauri::async_runtime::spawn_blocking(move || {
         Ok(resolved
             .into_iter()
             .map(|(panel_id, pid)| PanelProcessAnswer {
                 panel_id,
-                process: pid.and_then(pty_service::process_name),
+                process: pid.and_then(process_name),
             })
             .collect())
     })
@@ -447,25 +459,21 @@ struct TabPortsAnswer {
 // only collects child pids; the scan runs off-thread.
 #[tauri::command]
 async fn tab_ports(
-    state: State<'_, Mutex<PtyService>>,
+    driver: State<'_, RouterDriver>,
     tabs: Vec<TabPortsQuery>,
 ) -> Result<Vec<TabPortsAnswer>, String> {
     // Under the lock: just the pid roots per tab (cheap).
-    let rooted: Result<Vec<(String, Vec<u32>)>, String> = {
-        let svc = state.lock().map_err(|e| e.to_string())?;
-        Ok(tabs
-            .into_iter()
-            .map(|tab| {
-                let roots: Vec<u32> = tab
-                    .pty_ids
-                    .iter()
-                    .filter_map(|id| svc.child_pid(&PtyHandle { id: *id }))
-                    .collect();
-                (tab.tab_id, roots)
-            })
-            .collect())
-    };
-    let rooted = rooted?;
+    let rooted: Vec<(String, Vec<u32>)> = tabs
+        .into_iter()
+        .map(|tab| {
+            let roots: Vec<u32> = tab
+                .pty_ids
+                .iter()
+                .filter_map(|id| driver.pty_child_pid(*id))
+                .collect();
+            (tab.tab_id, roots)
+        })
+        .collect();
     // Off the lock: the actual socket-table scan.
     tauri::async_runtime::spawn_blocking(move || {
         let listeners = listening_ports::listening_sockets();
@@ -501,7 +509,7 @@ async fn tab_ports(
 #[tauri::command]
 fn ssh_open(
     app: AppHandle,
-    state: State<'_, Mutex<SshManager>>,
+    driver: State<'_, RouterDriver>,
     mute: State<'_, MuteFlag>,
     target: String,
     cols: Option<u16>,
@@ -522,11 +530,9 @@ fn ssh_open(
     let cols = cols.unwrap_or(80);
     let rows = rows.unwrap_or(24);
 
-    let (handle, rx) = {
-        let mut mgr = state.lock().map_err(|e| e.to_string())?;
-        mgr.open(&parsed, cwd, cols, rows).map_err(|e| e.to_string())?
-    };
-    let id = handle.id();
+    let (id, rx) = driver
+        .ssh_open(&parsed, cwd, cols, rows)
+        .map_err(|e| e.to_string())?;
 
     // Same output-stream wiring as a local panel: feed each chunk through the
     // OSC parser (completion sequences → notification) and emit the surviving
@@ -580,7 +586,7 @@ fn ssh_open(
         // a connection failure (255 / signal), emit a `ssh_exit` event carrying
         // a clear message so the frontend can show a diagnostic instead of a
         // dead, blank panel. A clean or remote-command exit yields error=None.
-        let error = poll_ssh_exit(&emit_app, &handle, &host);
+        let error = poll_ssh_exit(&emit_app, id, &host);
         let _ = emit_app.emit("ssh_exit", SshExitPayload { id, error });
     });
 
@@ -588,23 +594,18 @@ fn ssh_open(
 }
 
 #[tauri::command]
-fn ssh_write(state: State<'_, Mutex<SshManager>>, id: u32, data: String) -> Result<(), String> {
-    let mut mgr = state.lock().map_err(|e| e.to_string())?;
-    mgr.write(&SshHandle::from_pty_id(id), data.as_bytes())
-        .map_err(|e| e.to_string())
+fn ssh_write(driver: State<'_, RouterDriver>, id: u32, data: String) -> Result<(), String> {
+    driver.ssh_write(id, data.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn ssh_resize(state: State<'_, Mutex<SshManager>>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-    let mut mgr = state.lock().map_err(|e| e.to_string())?;
-    mgr.resize(&SshHandle::from_pty_id(id), cols, rows)
-        .map_err(|e| e.to_string())
+fn ssh_resize(driver: State<'_, RouterDriver>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    driver.ssh_resize(id, cols, rows).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn ssh_close(state: State<'_, Mutex<SshManager>>, id: u32) -> Result<(), String> {
-    let mut mgr = state.lock().map_err(|e| e.to_string())?;
-    mgr.close(&SshHandle::from_pty_id(id));
+fn ssh_close(driver: State<'_, RouterDriver>, id: u32) -> Result<(), String> {
+    driver.ssh_close(id);
     Ok(())
 }
 
@@ -1035,7 +1036,102 @@ async fn load_settings(app: AppHandle) -> Result<Settings, String> {
 async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<SettingsStore>();
-        state.save(&settings).map_err(|e| e.to_string())
+        state.save(&settings).map_err(|e| e.to_string())?;
+        // The Storestation toggle's live image rides the same write (#86):
+        // the router reads an AtomicBool, never the disk.
+        app.state::<RouterDriver>()
+            .set_daemon_enabled(settings.storestation.daemon_enabled);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// --- umux Storestation (v1.7.0 phase 4 / #86) ---------------------------------
+//
+// The Settings section's backend: a live status probe (offline is a state)
+// and the toggle. Enable makes sure a daemon is running — probing first,
+// spawning the bundled binary when absent (dev: it is the workspace binary
+// sitting beside the app in the cargo target dir) — then installs the
+// daemon-client driver. Disable runs the daemon's own graceful shutdown
+// (every owned shell dies cleanly, story 110).
+
+/// Spawn `umux-storestation run` when no daemon answers. `Ok(false)` = one
+/// was already running; `Ok(true)` = we spawned it and it answered. The
+/// binary is looked up beside the app executable first (installer layout +
+/// the cargo target dir in dev), then PATH.
+fn spawn_daemon_if_absent() -> Result<bool, String> {
+    let dir = config_dir();
+    let probe = |dir: &PathBuf| {
+        umux_storestation::client::Client::connect(dir, "desktop", env!("CARGO_PKG_VERSION"))
+            .is_ok()
+    };
+    if probe(&dir) {
+        return Ok(false); // somebody else's daemon — use it, spawn nothing
+    }
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent()
+                .map(|dir| dir.join(format!("umux-storestation{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .filter(|path| path.is_file());
+    let mut command = match bin {
+        Some(path) => std::process::Command::new(path),
+        None => std::process::Command::new("umux-storestation"),
+    };
+    // Fully detached: the daemon outlives the app by design (THE DEMO).
+    command
+        .arg("run")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "could not start umux-storestation: {e} — in dev, build it once with \
+                 `cd src-tauri && cargo build` (it lands beside the app binary)"
+            )
+        })?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if probe(&dir) {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(
+                "umux-storestation did not answer within 5 s of being started".into(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[tauri::command]
+async fn storestation_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let driver = app.state::<RouterDriver>();
+        driver.storestation_status()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn storestation_set_enabled(
+    app: AppHandle,
+    enable: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let driver = app.state::<RouterDriver>();
+        if enable {
+            spawn_daemon_if_absent()?;
+            driver.connect_daemon()?;
+        } else {
+            driver.disable_daemon()?;
+        }
+        Ok(driver.storestation_status())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1113,12 +1209,12 @@ fn open_settings_file() -> Result<(), String> {
 /// itself was fine). Used by the `ssh_open` reader thread to emit `ssh_exit`.
 ///
 /// This is the testable core of the async-error path; it composes the pure
-/// `friendly_ssh_exit` translator with one bounded poll of the live handle.
-fn poll_ssh_exit(app: &AppHandle, handle: &ssh_manager::SshHandle, host: &str) -> Option<String> {
-    let state = app.state::<Mutex<SshManager>>();
+/// `friendly_ssh_exit` translator with one bounded poll through the driver.
+fn poll_ssh_exit(app: &AppHandle, id: u32, host: &str) -> Option<String> {
+    let driver = app.state::<RouterDriver>();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let code = loop {
-        match state.lock().ok()?.child_exit_code(handle) {
+        match driver.ssh_exit_code(id) {
             Ok(Some(c)) => break c,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
@@ -1303,9 +1399,18 @@ pub fn run() {
     // so the Aptabase plugin below registers unconditionally and nothing can
     // turn it off.
 
+    // The SessionCore router (#85 seam + #86 daemon face): seeded with the
+    // persisted Storestation toggle. Startup with the daemon ON connects
+    // lazily — the first panel open (or the Settings status row) makes the
+    // socket connection, so a daemon that is not up yet never blocks boot.
+    let router = RouterDriver::new(initial_settings.storestation.daemon_enabled);
+
     let builder = tauri::Builder::default()
-        .manage(Mutex::new(PtyService::new()))
-        .manage(Mutex::new(SshManager::new()))
+        // The SessionCore seam (#85): the ONE managed state the session
+        // commands go through. The in-process driver is today's face
+        // (Storestation OFF — byte-identical to v1.6.x); with the daemon ON
+        // the same trait routes to the socket driver.
+        .manage(router)
         .manage(WorkspaceStore::new(config_path()))
         .manage(settings_store)
         .manage(mute)
@@ -1331,6 +1436,8 @@ pub fn run() {
             notify_panel_needs_input,
             load_settings,
             save_settings,
+            storestation_status,
+            storestation_set_enabled,
             reset_all,
             list_shells,
             open_settings_file,

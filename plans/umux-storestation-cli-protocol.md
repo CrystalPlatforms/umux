@@ -98,7 +98,9 @@ Error object (CLI `--json` **and** protocol, same shape):
 
 ## Error catalog (machine codes; v1.8.0 extends additively — clients treat unknown codes as generic)
 
-`storestationNotRunning` · `storestationAlreadyRunning` · `staleSocket` · `protoTooNew` · `protoTooOld` · `unknownOp` · `sessionNotFound` · `limitInvalid` · `ioError`
+`storestationNotRunning` · `storestationAlreadyRunning` · `staleSocket` · `protoTooNew` · `protoTooOld` · `unknownOp` · `badParams` · `sessionNotFound` · `limitInvalid` · `ioError`
+
+(`badParams` joined at phase 2 with the session ops: a syntactically valid request whose params fail validation answers `badParams`, not `unknownOp`.)
 
 ## `agent-context` skeleton
 
@@ -139,9 +141,17 @@ Error object (CLI `--json` **and** protocol, same shape):
 
 Implemented in v1.7.0:
 - `storestation.status` — daemon health (used by `umux status`)
-- `sessions.list` — `limit` (default 100, max 1000) → sessions + `truncated`
-- `sessions.create` (client-generated UUIDv4 id, shell, cwd, cols/rows), `session.write`, `session.resize`, `session.kill`, `session.subscribe` (opens the push stream of `0x02` frames + lifecycle events `session.exit`, `session.title`) — **implemented now because the desktop daemon-client driver is their client**; CLI *commands* for them are v1.8.0
-- `storestation.shutdown` — idempotent graceful stop (used by `umux-storestation stop`)
+- `sessions.list` — `limit` (default 100, max 1000) → sessions + `truncated`; a session entry is `{ id, title, workspaceId, tabId, panelId, cwd, shell, cols, rows, attachedClients, createdAt }` (the three ids and `title` may be null; `createdAt` is unix epoch seconds)
+- `sessions.create` (client-generated UUIDv4 id; optional shell, cwd, cols/rows — default 80x24 — and title/workspaceId/tabId/panelId) → the session's summary. IDEMPOTENT by id: an existing id returns that session's summary and spawns nothing (create-by-key groundwork for v1.8.0 retries). Missing shell/cwd fall back to the daemon's defaults (`$SHELL` → `/bin/sh`; `$HOME`)
+- `session.write` — `{ id, data }` where `data` is BASE64-encoded bytes (binary-safe inside the JSON envelope)
+- `session.resize` — `{ id, cols, rows }`
+- `session.kill` — `{ id }` → kills the child, drops the record, notifies subscribers
+- `session.subscribe` — `{ id, subscriber? }` → opens this connection's push stream of `0x02` data frames for the session plus lifecycle events; result `{ subscribed: true, attachedClients: N }`. The optional `subscriber` token labels the attachment
+- `session.unsubscribe` — `{ id, subscriber }` → detaches exactly that attachment; the session itself keeps living (a closed panel detaches, it does not kill)
+- `session.status` — `{ id }` → the live lookups the desktop driver needs per panel: `{ busy, childPid, foregroundPid, cwd, exitCode }` (phase 2 addition so Storestation ON keeps close-confirmation, agent-status presence, the cwd snapshot and the ports tooltip at full parity)
+- `storestation.shutdown` — idempotent graceful stop (used by `umux-storestation stop`); kills every owned shell first
+
+**Event envelope (phase 2)** — lifecycle events are control frames WITHOUT an `id` (they are not responses): `{"event":"session.exit","session":"<id>","exitCode":<code|null>}` and `{"event":"session.title","session":"<id>","title":"<text>"}`. Exactly one `session.exit` per session, even when a kill and the end-of-stream race. Titles are noticed by a READ-ONLY scan of the stream for OSC 0/2 sequences — the daemon never rewrites a byte (byte-identical rule; the umux OscParser still runs client-side).
 
 Defined but unimplemented (daemon answers `unknownOp` + protocol level until then): future v1.8.0+ ops (e.g. workspace/tab management at app parity).
 

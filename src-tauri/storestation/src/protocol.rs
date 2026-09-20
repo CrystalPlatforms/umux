@@ -53,6 +53,7 @@ pub mod codes {
     pub const PROTO_TOO_NEW: &str = "protoTooNew";
     pub const PROTO_TOO_OLD: &str = "protoTooOld";
     pub const UNKNOWN_OP: &str = "unknownOp";
+    pub const BAD_PARAMS: &str = "badParams";
     pub const SESSION_NOT_FOUND: &str = "sessionNotFound";
     pub const LIMIT_INVALID: &str = "limitInvalid";
     pub const IO_ERROR: &str = "ioError";
@@ -103,13 +104,21 @@ pub enum FrameError {
     Closed,
     /// The peer sent a frame larger than [`MAX_FRAME_BYTES`].
     TooLarge,
+    /// The read budget elapsed with no bytes (stream read timeout). Not an
+    /// error for a persistent connection — the caller just tries again; a
+    /// one-shot client treats it as its bounded request timeout.
+    Timeout,
     /// Anything else (truncated frame, bad JSON, bad data-frame layout).
     Malformed(String),
 }
 
 impl From<std::io::Error> for FrameError {
     fn from(e: std::io::Error) -> Self {
-        FrameError::Malformed(e.to_string())
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => FrameError::Timeout,
+            std::io::ErrorKind::UnexpectedEof => FrameError::Closed,
+            _ => FrameError::Malformed(e.to_string()),
+        }
     }
 }
 
@@ -173,6 +182,17 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Frame, FrameError> {
 pub fn write_control<W: Write>(w: &mut W, value: &Value) -> std::io::Result<()> {
     let body = serde_json::to_vec(value).expect("control frames are always serializable");
     w.write_all(&encode_frame(TAG_CONTROL, &body))
+}
+
+/// Encode one data frame for `session` carrying `bytes` — the push-stream
+/// shape subscribed clients receive session output in (phase 2). Public so
+/// the daemon's writer path and the wire tests share one encoder.
+pub fn encode_data_frame(session: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(2 + session.len() + bytes.len());
+    body.extend_from_slice(&(session.len() as u16).to_le_bytes());
+    body.extend_from_slice(session.as_bytes());
+    body.extend_from_slice(bytes);
+    encode_frame(TAG_DATA, &body)
 }
 
 /// Parse a control envelope into a [`Request`]; a shape violation is the

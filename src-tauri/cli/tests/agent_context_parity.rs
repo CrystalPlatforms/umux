@@ -45,15 +45,17 @@ fn storestation_bin() -> PathBuf {
     candidate
 }
 
-/// The full v1 error catalog from plans/umux-storestation-cli-protocol.md — phase 1
-/// documents ALL of it (clients treat future additions as generic).
-const ERROR_CATALOG: [&str; 9] = [
+/// The full v1 error catalog from plans/umux-storestation-cli-protocol.md —
+/// phase 2 documents ALL of it (clients treat future additions as generic;
+/// `badParams` joined at phase 2 with the session ops).
+const ERROR_CATALOG: [&str; 10] = [
     "storestationNotRunning",
     "storestationAlreadyRunning",
     "staleSocket",
     "protoTooNew",
     "protoTooOld",
     "unknownOp",
+    "badParams",
     "sessionNotFound",
     "limitInvalid",
     "ioError",
@@ -125,10 +127,11 @@ fn agent_context_matches_the_help_surface() {
         );
     }
 
-    // PARITY, direction 2 (phase-1 instance): the two NEW-style commands the
-    // CLI actually ships must be in the table. Legacy v1.6.x commands join
-    // the table at their v1.8.0 retrofit and are deliberately absent now.
-    for name in ["status", "agent-context"] {
+    // PARITY, direction 2 (phase-2 instance): the three NEW-style commands
+    // the CLI actually ships must be in the table. Legacy v1.6.x commands
+    // join the table at their v1.8.0 retrofit and are deliberately absent
+    // now; `sessions list` joined at phase 2 (#84), `attach` joins at 5.
+    for name in ["status", "sessions list", "agent-context"] {
         assert!(
             commands.iter().any(|c| c == name),
             "the table must document \"{name}\" while it ships"

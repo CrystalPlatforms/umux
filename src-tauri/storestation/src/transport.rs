@@ -33,6 +33,15 @@ pub trait StreamTimeouts {
     fn apply_timeouts(&self) {}
 }
 
+/// The split halves of one connection (phase 2): the reader thread owns
+/// `read` (frames from the client), the writer thread owns `write` (request
+/// responses, pushed session data frames, events — one serialized write
+/// path so partial frames can never interleave).
+pub struct StreamHalves {
+    pub read: Box<dyn std::io::Read + Send>,
+    pub write: Box<dyn std::io::Write + Send>,
+}
+
 // --- Unix: UDS, pure std ----------------------------------------------------
 
 #[cfg(unix)]
@@ -107,6 +116,26 @@ mod imp {
     /// daemon start and every clean stop.
     pub fn remove_socket_file(config_dir: &Path) {
         let _ = std::fs::remove_file(socketpath::socket_path(config_dir));
+    }
+
+    /// Split one accepted connection into read/write halves. `try_clone`
+    /// duplicates the fd — both halves are the same socket.
+    pub fn split_stream(stream: super::Stream) -> io::Result<super::StreamHalves> {
+        let write = stream.try_clone()?;
+        Ok(super::StreamHalves {
+            read: Box::new(stream),
+            write: Box::new(write),
+        })
+    }
+
+    /// Split a client-side stream the same way (the desktop daemon-client
+    /// driver's persistent connection, phase 4).
+    pub fn split_client(stream: ClientStream) -> io::Result<super::StreamHalves> {
+        let write = stream.try_clone()?;
+        Ok(super::StreamHalves {
+            read: Box::new(stream),
+            write: Box::new(write),
+        })
     }
 }
 
@@ -260,6 +289,69 @@ mod imp {
 
     /// The pipe is a kernel object — there is no stale file to remove.
     pub fn remove_socket_file(_config_dir: &Path) {}
+
+    /// Split one accepted connection into read/write halves. tokio's
+    /// `into_split` hands out owned halves; each gets its own tiny
+    /// current-thread runtime so the reader thread and the writer thread
+    /// never contend for one runtime.
+    pub fn split_stream(stream: super::Stream) -> io::Result<super::StreamHalves> {
+        let Stream { rt: _, pipe } = stream;
+        let (read, write) = pipe.into_split();
+        Ok(super::StreamHalves {
+            read: Box::new(ReadHalf {
+                rt: new_runtime(),
+                half: read,
+            }),
+            write: Box::new(WriteHalf {
+                rt: new_runtime(),
+                half: write,
+            }),
+        })
+    }
+
+    /// Split a client-side stream the same way (the desktop daemon-client
+    /// driver's persistent connection, phase 4).
+    pub fn split_client(stream: ClientStream) -> io::Result<super::StreamHalves> {
+        let ClientStream { rt: _, pipe } = stream;
+        let (read, write) = pipe.into_split();
+        Ok(super::StreamHalves {
+            read: Box::new(ReadHalf {
+                rt: new_runtime(),
+                half: read,
+            }),
+            write: Box::new(WriteHalf {
+                rt: new_runtime(),
+                half: write,
+            }),
+        })
+    }
+
+    /// The read half of a split stream — owned by the connection's reader.
+    struct ReadHalf {
+        rt: tokio::runtime::Runtime,
+        half: tokio::net::windows::named_pipe::OwnedReadHalf,
+    }
+
+    impl io::Read for ReadHalf {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.rt.block_on(async { self.half.read(buf).await })
+        }
+    }
+
+    /// The write half of a split stream — owned by the connection's writer.
+    struct WriteHalf {
+        rt: tokio::runtime::Runtime,
+        half: tokio::net::windows::named_pipe::OwnedWriteHalf,
+    }
+
+    impl io::Write for WriteHalf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.rt.block_on(async { self.half.write(buf).await })
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.rt.block_on(async { self.half.flush().await })
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -278,8 +370,9 @@ impl StreamTimeouts for imp::ClientStream {}
 // On unix Stream/ClientStream are the type aliases at the top of this
 // module; on windows they are the structs inside imp — re-exported here.
 #[cfg(unix)]
-pub use imp::{connect, endpoint_display, remove_socket_file, Listener};
+pub use imp::{connect, endpoint_display, remove_socket_file, split_client, split_stream, Listener};
 #[cfg(windows)]
 pub use imp::{
-    connect, endpoint_display, remove_socket_file, ClientStream, Listener, Stream,
+    connect, endpoint_display, remove_socket_file, split_client, split_stream, ClientStream,
+    Listener, Stream,
 };

@@ -94,8 +94,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Live sessions owned by umux Storestation (#84, v1.7.0 phase 2)
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsAction,
+    },
     /// Print a machine-readable description of this CLI (schema 1, #83)
     AgentContext,
+}
+
+#[derive(clap::Subcommand)]
+enum SessionsAction {
+    /// List the live sessions Storestation owns (offline → empty list, exit 0)
+    List {
+        /// Print the machine-readable document (the same shape, pretty-printed)
+        #[arg(long)]
+        json: bool,
+        /// Cap the list; beyond it `truncated:true` (default 100, max 1000)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -157,11 +175,15 @@ impl Cli {
 /// --desk/--term, so a forgotten flag is refused instead of silently writing
 /// the desktop store. `notify` touches no store (it only talks to the OS
 /// notification system), so it runs without a target; the Storestation commands
-/// (`status`, `agent-context`) talk to the daemon socket, not a store (#83).
+/// (`status`, `sessions list`, `agent-context`) talk to the daemon socket, not
+/// a store (#83, #84).
 fn needs_store(command: &Command) -> bool {
     !matches!(
         command,
-        Command::Notify { .. } | Command::Status { .. } | Command::AgentContext
+        Command::Notify { .. }
+            | Command::Status { .. }
+            | Command::Sessions { .. }
+            | Command::AgentContext
     )
 }
 
@@ -667,6 +689,11 @@ fn main() {
         Some(Command::Status { json: as_json }) => {
             run_status(as_json);
         }
+        Some(Command::Sessions {
+            action: SessionsAction::List { json: as_json, limit },
+        }) => {
+            run_sessions_list(as_json, limit);
+        }
         Some(Command::AgentContext) => {
             println!(
                 "{}",
@@ -756,6 +783,96 @@ fn run_status(as_json: bool) {
     }
 }
 
+/// `umux sessions list` (#84): one round trip to the daemon socket. Offline
+/// is a state — exit 0 with `{"storestation":{"running":false},"sessions":[],
+/// "truncated":false}` (the `storestation` block makes "no sessions" vs
+/// "daemon off" unambiguous, per the protocol design doc); a LIVE daemon
+/// that then fails the request is the 5 (internal) path. Human output is a
+/// plain line per session; `--json` prints the document.
+fn run_sessions_list(as_json: bool, limit: Option<usize>) {
+    let dir = store_core::paths::config_dir();
+    let mut params = serde_json::Map::new();
+    if let Some(n) = limit {
+        params.insert("limit".into(), serde_json::json!(n));
+    }
+    match umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
+        Ok(mut client) => match client.call("sessions.list", serde_json::Value::Object(params)) {
+            Ok(result) => {
+                if as_json {
+                    let doc = serde_json::json!({
+                        "storestation": { "running": true },
+                        "sessions": result.get("sessions").cloned().unwrap_or_default(),
+                        "truncated": result
+                            .get("truncated")
+                            .and_then(|t| t.as_bool())
+                            .unwrap_or(false),
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&doc)
+                            .expect("session documents are always serializable")
+                    );
+                } else {
+                    let sessions = result
+                        .get("sessions")
+                        .and_then(|s| s.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if sessions.is_empty() {
+                        println!("umux Storestation is running, but owns no sessions.");
+                        return;
+                    }
+                    for session in &sessions {
+                        println!(
+                            "{}\t{}\t{}\t{}x{}\tattached:{}",
+                            session["id"].as_str().unwrap_or("?"),
+                            session["title"].as_str().unwrap_or("?"),
+                            session["cwd"].as_str().unwrap_or("?"),
+                            session["cols"],
+                            session["rows"],
+                            session["attachedClients"],
+                        );
+                    }
+                    let truncated = result
+                        .get("truncated")
+                        .and_then(|t| t.as_bool())
+                        .unwrap_or(false);
+                    if truncated {
+                        println!("(list truncated — pass --limit N to see more)");
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
+                std::process::exit(5);
+            }
+        },
+        Err(umux_storestation::client::ConnectError::NotRunning { stale }) => {
+            if as_json {
+                let doc = serde_json::json!({
+                    "storestation": { "running": false, "staleSocket": stale },
+                    "sessions": [],
+                    "truncated": false,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&doc)
+                        .expect("session documents are always serializable")
+                );
+            } else {
+                println!("umux Storestation is not running — no live sessions.");
+            }
+        }
+        Err(other) => {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&other.to_error_obj()).expect("error objects serialize")
+            );
+            std::process::exit(5);
+        }
+    }
+}
+
 /// The machine-readable self-description (schema 1, per the protocol design
 /// doc). It MUST stay in lockstep with the real `--help` surface — the
 /// `agent_context_parity` test enforces both directions, so any new command
@@ -785,18 +902,28 @@ fn agent_context() -> serde_json::Value {
             umux_storestation::protocol::codes::PROTO_TOO_NEW,
             umux_storestation::protocol::codes::PROTO_TOO_OLD,
             umux_storestation::protocol::codes::UNKNOWN_OP,
+            umux_storestation::protocol::codes::BAD_PARAMS,
             umux_storestation::protocol::codes::SESSION_NOT_FOUND,
             umux_storestation::protocol::codes::LIMIT_INVALID,
             umux_storestation::protocol::codes::IO_ERROR,
         ],
-        // Phase-1 surface. `sessions list` joins at phase 2, `attach` at
-        // phase 5 — each phase extends this table WITH its parity test.
+        // The live surface. `sessions list` joined at phase 2 (#84),
+        // `attach` joins at phase 5 — each phase extends this table WITH
+        // its parity test.
         "commands": [
             {
                 "name": "status",
                 "class": "read",
                 "json": true,
                 "notes": ["exits 0 when Storestation is offline — offline is a state, not an error"],
+            },
+            {
+                "name": "sessions list",
+                "class": "read",
+                "json": true,
+                "limitDefault": 100,
+                "limitMax": 1000,
+                "notes": ["exits 0 with an empty list when Storestation is offline — offline is a state, not an error"],
             },
             {
                 "name": "agent-context",

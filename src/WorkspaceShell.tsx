@@ -422,9 +422,12 @@ type PanelSurfacesProps = {
   // sessions — they all mount the same surfaces). SSH surfaces never receive
   // it; the remote default shell is the server's call.
   shell?: string
+  // This tab's id (#86, v1.7.0): with the workspace id it locates every
+  // panel's daemon session for the relaunch rebind.
+  tabId: string
 }
 
-function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, focused, firstLeafId, panels, zoomedPanelId, onToggleZoom, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled, shell }: PanelSurfacesProps) {
+function PanelSurfaces({ workspaceId, workspaceName, tabId, layout, activePanelId, focused, firstLeafId, panels, zoomedPanelId, onToggleZoom, onResize, onResizeEnd, onClose, onFocusPanel, onPanelActivity, onPanelCompletion, onPanelViewportResize, onPanelUserInput, onPanelOpened, statuses, statusEnabled, shell }: PanelSurfacesProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
 
@@ -530,6 +533,13 @@ function PanelSurfaces({ workspaceId, workspaceName, layout, activePanelId, focu
               // The focused pane of the active tab of the ACTIVE workspace
               // owns the keyboard (HITL): a switch focuses it instantly.
               focused={focused && activePanelId === p.id}
+              // #86: the rebind ids — the daemon records each session
+              // under this triple so a relaunch can rebind to it.
+              context={{
+                workspaceId,
+                tabId,
+                panelId: p.id,
+              }}
               onActivity={(bytes) => onPanelActivity(p.id, bytes)}
               onCompletion={() => onPanelCompletion(p.id)}
               onViewportResize={() => onPanelViewportResize(p.id)}
@@ -1172,6 +1182,76 @@ export function WorkspaceShell() {
     if (!settingsOpen) return
     refreshShells()
   }, [settingsOpen, refreshShells])
+
+  // --- umux Storestation (v1.7.0 phase 4 / #86) -------------------------------
+  //
+  // The Settings section's glue: a status probe refreshed when the dialog
+  // opens (and after every toggle), the toggle flow, and the stop
+  // confirmation. The toggle is pessimistic: the backend runs first
+  // (spawn/connect on ON, graceful shutdown on OFF) and only a successful
+  // answer persists the setting — a failed daemon spawn never leaves the
+  // switch lying.
+  type StorestationStatus = {
+    enabled: boolean
+    running: boolean
+    version?: string
+    sessions?: number
+    attachedClients?: number
+  }
+  const [storestationStatus, setStorestationStatus] = useState<StorestationStatus | null>(null)
+  // Set when a stop is requested while live sessions exist: the dialog
+  // names the count, confirming proceeds, cancelling does nothing.
+  const [storestationStopConfirm, setStorestationStopConfirm] = useState<number | null>(null)
+
+  const refreshStorestationStatus = useCallback(() => {
+    invoke<StorestationStatus>('storestation_status')
+      .then((status) => setStorestationStatus(status))
+      .catch((e) => console.error('storestation_status failed:', e))
+  }, [])
+  useEffect(() => {
+    if (!settingsOpen) return
+    refreshStorestationStatus()
+  }, [settingsOpen, refreshStorestationStatus])
+
+  const applyStorestation = useCallback(
+    (next: boolean) => {
+      invoke<StorestationStatus>('storestation_set_enabled', { enable: next })
+        .then((status) => {
+          setStorestationStatus(status)
+          applySettings({ storestation: { daemonEnabled: next } })
+        })
+        .catch((e) => {
+          console.error('storestation_set_enabled failed:', e)
+          // Reflect reality: the status line shows what actually happened.
+          refreshStorestationStatus()
+        })
+    },
+    // applySettings is stable in practice (a fresh closure per render is
+    // harmless — the callback only runs at event time).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [refreshStorestationStatus],
+  )
+
+  const handleStorestationToggle = useCallback(
+    (next: boolean) => {
+      if (next) {
+        applyStorestation(true)
+        return
+      }
+      // Stopping kills every daemon-owned session (story 110 semantics).
+      // Live sessions make that a CONFIRMED stop, naming the count.
+      const live = storestationStatusRef.current?.sessions ?? 0
+      if (live > 0) {
+        setStorestationStopConfirm(live)
+        return
+      }
+      applyStorestation(false)
+    },
+    [applyStorestation],
+  )
+  const storestationStatusRef = useRef<StorestationStatus | null>(storestationStatus)
+  storestationStatusRef.current = storestationStatus
+
   // Latest settings for event-time readers (the window-close and interval
   // effects hold first-render closures; they must read current values).
   const settingsRef = useRef(settings)
@@ -3842,6 +3922,7 @@ export function WorkspaceShell() {
                       <PanelSurfaces
                         workspaceId={ws.id}
                         workspaceName={ws.name}
+                        tabId={tab.id}
                         layout={tab.layout}
                         activePanelId={
                           tab.id === activeTab?.id ? activePanelOf(state, ws.id) : null
@@ -3911,7 +3992,55 @@ export function WorkspaceShell() {
             onInstall: installUpdate,
           }}
           shells={detectedShells}
+          onStorestationToggle={handleStorestationToggle}
+          storestationStatus={storestationStatus}
         />
+      )}
+
+      {/* Storestation stop confirmation (#86): stopping the daemon kills
+          every session it owns — when any exist, the stop is CONFIRMED and
+          names the count. Cancel does nothing. */}
+      {storestationStopConfirm != null && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Stop umux Storestation"
+          data-testid="storestation-stop-dialog"
+          onClick={() => setStorestationStopConfirm(null)}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-card__header">
+              <span className="modal-card__title">Stop umux Storestation?</span>
+            </div>
+            <div className="modal-card__message">
+              {storestationStopConfirm === 1
+                ? '1 session is still running. Stopping the daemon closes it and every terminal in it.'
+                : `${storestationStopConfirm} sessions are still running. Stopping the daemon closes them and every terminal in them.`}
+            </div>
+            <div className="modal-card__actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                data-testid="storestation-stop-cancel"
+                onClick={() => setStorestationStopConfirm(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                data-testid="storestation-stop-confirm"
+                onClick={() => {
+                  setStorestationStopConfirm(null)
+                  applyStorestation(false)
+                }}
+              >
+                Stop daemon
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Update banner (issue #66): appears only when a check FOUND an update

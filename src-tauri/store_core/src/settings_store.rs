@@ -83,6 +83,23 @@ pub struct Settings {
     /// (new field with a default).
     #[serde(default)]
     pub sidebar_width: Option<u32>,
+    /// v1.7.0 (#86): the umux Storestation block. Additive — a pre-#86
+    /// settings.json loads with the daemon OFF (exactly today's behavior),
+    /// per the additive-fields rule.
+    #[serde(default)]
+    pub storestation: StorestationSettings,
+}
+
+/// The Storestation block of the settings (v1.7.0). Autostart joins at
+/// phase 7; only the daemon toggle exists in phase 4.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StorestationSettings {
+    /// The daemon toggle — default OFF, Storestation is opt-in (PRD story
+    /// 108). OFF = every session opens in-process, byte-identical to the
+    /// pre-Storestation behavior.
+    #[serde(default)]
+    pub daemon_enabled: bool,
 }
 
 /// Serde default for `default_launch_mode`: the GUI is what umux launches
@@ -103,6 +120,7 @@ impl Default for Settings {
             show_tab_folders: false,
             default_shell: None,
             sidebar_width: None,
+            storestation: StorestationSettings::default(),
         }
     }
 }
@@ -221,6 +239,7 @@ mod tests {
             show_tab_folders: true,
             default_shell: None,
             sidebar_width: Some(320),
+            storestation: StorestationSettings::default(),
         };
 
         let text = serialize_settings(&s);
@@ -281,6 +300,7 @@ mod tests {
             show_tab_folders: false,
             default_shell: Some("/bin/bash".into()),
             sidebar_width: Some(480),
+            storestation: StorestationSettings::default(),
         };
 
         SettingsStore::new(path.clone()).save(&s).unwrap();

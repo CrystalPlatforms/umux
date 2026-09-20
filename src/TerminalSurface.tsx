@@ -47,6 +47,7 @@ export function TerminalSurface({
   cwd,
   shell,
   focused,
+  context,
   onActivity,
   onCompletion,
   onViewportResize,
@@ -74,6 +75,12 @@ export function TerminalSurface({
   // terminal — switching workspace or tab makes it typable immediately, no
   // extra click (HITL, #53 fix round).
   focused?: boolean
+  // Where this panel lives (#86, v1.7.0): the ids ride pty_open so a
+  // Storestation-owned session is recorded under them and can be re-bound
+  // after a relaunch. Local panels only — an SSH panel has no daemon
+  // session. Absent = the backend treats the panel as unregistered (always
+  // Optional; older callers unchanged).
+  context?: { workspaceId: string; tabId: string; panelId: string }
   // Reports the backend PTY/SSH id assigned to this surface (v0.2 Phase 4
   // / #28): this component owns the panelId↔ptyId mapping, and the close-
   // confirmation check needs it ("is a live process running in THIS panel?").
@@ -319,7 +326,21 @@ export function TerminalSurface({
     // pre-#77 invoke shape.
     const openArgs = isRemote
       ? { target: sshTarget, cols: term.cols, rows: term.rows, label }
-      : { cwd, ...(shell != null ? { shell } : {}), cols: term.cols, rows: term.rows, label }
+      : {
+          cwd,
+          ...(shell != null ? { shell } : {}),
+          cols: term.cols,
+          rows: term.rows,
+          label,
+          // #86: the rebind ids — present only when the caller knows them.
+          ...(context != null
+            ? {
+                workspaceId: context.workspaceId,
+                tabId: context.tabId,
+                panelId: context.panelId,
+              }
+            : {}),
+        }
     const opened = invoke<number>(openCmd, openArgs).then((id) => {
       if (disposed) {
         void invoke(closeCmd, { id })

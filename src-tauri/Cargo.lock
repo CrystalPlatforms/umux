@@ -125,6 +125,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "session_core",
  "store_core",
  "tauri",
  "tauri-build",
@@ -136,6 +137,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tempfile",
+ "umux-storestation",
  "webview2-com",
  "windows",
  "windows-sys 0.61.2",
@@ -4016,6 +4018,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "session_core"
+version = "1.6.2"
+dependencies = [
+ "portable-pty",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5199,10 +5210,12 @@ dependencies = [
 name = "umux-storestation"
 version = "1.6.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "ctrlc",
  "serde",
  "serde_json",
+ "session_core",
  "store_core",
  "tempfile",
  "tokio",
