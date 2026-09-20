@@ -1,0 +1,32 @@
+[package]
+name = "umux-core"
+version = "1.6.0"
+description = "umux Core — headless daemon: per-user local socket, protocol v1 (core.status/core.shutdown)"
+edition = "2021"
+rust-version = "1.77.2"
+
+# The daemon crate is Tauri-free like store_core (#83, v1.7.0 phase 1): the
+# same library (protocol + client) is linked by the `umux` CLI, and the
+# `umux-core` binary serves the socket. Socket location reuses
+# store_core::paths (UMUX_CONFIG_DIR isolates store + socket + pid together).
+
+[lib]
+name = "umux_core"
+
+[dependencies]
+store_core = { path = "../store_core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+# Ctrl+C handling that works on all three platforms (the handler runs on a
+# normal thread, so the graceful socket/pid cleanup is safe there).
+ctrlc = "3"
+
+# Windows transport: a named pipe instead of a UDS (std has no named-pipe
+# support). Tokio is only pulled on Windows targets; macOS/Linux compile
+# pure-std code paths.
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1", features = ["net", "rt", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
