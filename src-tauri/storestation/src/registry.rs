@@ -112,9 +112,17 @@ struct SessionRecord {
 /// The registry: the daemon's whole live-session state. Owned behind one
 /// `Arc<Mutex<_>>` in the serve state — ops lock it briefly and never
 /// block inside; the pump threads work on their own shared state.
+///
+/// Phase 6 (#88): the registry also maintains the crash-recovery pids file
+/// (`storestation.pids`, one owned-shell pid per line). It is rewritten on
+/// EVERY session-set change under the registry lock, so after a daemon
+/// crash the file names exactly the shells that were alive at that moment —
+/// the next start sweeps them (`server::sweep_stale_shells`). A clean stop
+/// ends with zero sessions and the file removed.
 pub struct Registry {
     pty: PtyService,
     sessions: HashMap<String, SessionRecord>,
+    pids_path: Option<PathBuf>,
 }
 
 /// Everything `sessions.create` accepts (protocol params). `id` is REQUIRED
@@ -152,6 +160,25 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// The largest byte payload ONE replay data frame may carry for a session
+/// whose id is `session_len` bytes: the wire caps every frame at 64 KiB
+/// (protocol), and the frame's body spends 1 tag byte + 2 length bytes +
+/// the session id before any replay bytes. A saturating floor of 1 keeps a
+/// pathological (absurdly long) session id from underflowing.
+fn replay_chunk_len(session_len: usize) -> usize {
+    crate::protocol::MAX_FRAME_BYTES
+        .saturating_sub(3 + session_len)
+        .max(1)
+}
+
+/// The replay budget per subscribe: only the NEWEST 128 KiB of the ring go
+/// out. Beyond xterm's scrollback (1000 lines) no client can display more,
+/// and the full ring delivered as one instant burst overloaded WebKit's DOM
+/// renderer — panels came up black with the text sitting in the DOM (the
+/// #75 failure signature; macOS HITL 2026-09-21). 128 KiB ≈ 2–3 wire frames,
+/// the scale the renderer demonstrably survives.
+const REPLAY_BUDGET: usize = 128 * 1024;
+
 fn exit_event(id: &str, exit_code: Option<i32>) -> Value {
     json!({
         "event": "session.exit",
@@ -161,10 +188,34 @@ fn exit_event(id: &str, exit_code: Option<i32>) -> Value {
 }
 
 impl Registry {
-    pub fn new() -> Self {
+    /// `pids_path` = where the crash-recovery file lives for this instance
+    /// (`socketpath::session_pids_path` of the config dir). `None` keeps an
+    /// instance from touching the filesystem at all (unit tests).
+    pub fn new(pids_path: Option<PathBuf>) -> Self {
         Registry {
             pty: PtyService::new(),
             sessions: HashMap::new(),
+            pids_path,
+        }
+    }
+
+    /// Rewrite the crash-recovery file to exactly the live shells' pids —
+    /// or remove it when none are. Called on every session-set change while
+    /// the registry lock is held; I/O failures are swallowed (the file is a
+    /// best-effort hardening aid, never a session path).
+    fn refresh_pids_file(&self) {
+        let Some(path) = &self.pids_path else { return };
+        let mut body = String::new();
+        for record in self.sessions.values() {
+            if let Some(pid) = self.pty.child_pid(&record.handle) {
+                body.push_str(&pid.to_string());
+                body.push('\n');
+            }
+        }
+        if body.is_empty() {
+            let _ = std::fs::remove_file(path);
+        } else {
+            let _ = std::fs::write(path, body);
         }
     }
 
@@ -228,6 +279,9 @@ impl Registry {
             move || pump_session(session_id, rx, shared, registry)
         });
 
+        // The crash-recovery file now names this shell too (#88).
+        this.refresh_pids_file();
+
         Ok(this.summary(&params.id).expect("just inserted"))
     }
 
@@ -235,7 +289,9 @@ impl Registry {
     /// return the exit code for the exit event.
     fn session_finished(&mut self, id: &str) -> Option<i32> {
         let record = self.sessions.remove(id)?;
-        self.pty.kill_and_reap(&record.handle)
+        let code = self.pty.kill_and_reap(&record.handle);
+        self.refresh_pids_file();
+        code
     }
 
     pub fn write_bytes(&mut self, id: &str, data_b64: &str) -> Result<(), ErrorObj> {
@@ -267,6 +323,15 @@ impl Registry {
     /// the client's attachment token — the same value later handed to
     /// [`Registry::unsubscribe`] removes exactly this attachment (a panel
     /// remount must not leave a phantom subscriber behind).
+    ///
+    /// Phase 5 replay (#87): before the new attachment can receive any LIVE
+    /// frame, it first receives the session's whole captured scrollback as
+    /// data frames — strict replay→live ordering, no gap, no duplication.
+    /// The ring and subscriber locks are taken TOGETHER for snapshot+register:
+    /// the pump releases the ring lock before it ever takes the subscriber
+    /// lock, so nothing else can hold both, and holding both here closes the
+    /// race where a live frame would land between the snapshot and the
+    /// registration (it would reach nobody — the gap phase 5 exists to kill).
     pub fn subscribe(
         &mut self,
         id: &str,
@@ -280,7 +345,25 @@ impl Registry {
                 .ok_or_else(|| session_not_found(id))?
                 .shared,
         );
+        let ring = shared.ring.lock().expect("ring lock");
         let mut subs = shared.subscribers.lock().expect("subscribers lock");
+        // The recorded prefix first — chunked under the frame cap, oldest
+        // bytes first, exactly as they were captured (verbatim; the byte
+        // policy forbids rewriting anything). Only the newest REPLAY_BUDGET
+        // bytes go out — the oldest tail beyond xterm's scrollback is
+        // undisplayable and the full-ring burst blacks WebKit's renderer.
+        let snapshot = ring.snapshot();
+        let replay = if snapshot.len() > REPLAY_BUDGET {
+            &snapshot[snapshot.len() - REPLAY_BUDGET..]
+        } else {
+            &snapshot[..]
+        };
+        for chunk in replay.chunks(replay_chunk_len(id.len())) {
+            let _ = outbound.send(Outbound::Data {
+                session: id.to_string(),
+                bytes: chunk.to_vec(),
+            });
+        }
         subs.push((subscriber.to_string(), outbound));
         Ok(json!({ "subscribed": true, "attachedClients": subs.len() }))
     }
@@ -338,6 +421,7 @@ impl Registry {
             .remove(id)
             .ok_or_else(|| session_not_found(id))?;
         let exit_code = self.pty.kill_and_reap(&record.handle);
+        self.refresh_pids_file();
         let event = exit_event(&record.id, exit_code);
         record.shared.announce_exit(event);
         Ok(json!({ "killed": true, "id": record.id }))
@@ -430,7 +514,7 @@ impl Registry {
 
 impl Default for Registry {
     fn default() -> Self {
-        Registry::new()
+        Registry::new(None)
     }
 }
 

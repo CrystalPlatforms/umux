@@ -22,6 +22,15 @@ pub fn pid_path(config_dir: &Path) -> PathBuf {
     config_dir.join("storestation.pid")
 }
 
+/// The crash-recovery file: `<config_dir>/storestation.pids`, one owned-shell
+/// pid per line (phase 6 / #88). The daemon rewrites it whenever its session
+/// set changes; the NEXT start after a crash sweeps the recorded process
+/// groups (the "Unix group signal") and removes the file. Clean stops remove
+/// it too — a leftover file means a crash happened.
+pub fn session_pids_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("storestation.pids")
+}
+
 /// The Windows named-pipe name for a config dir (windows only).
 #[cfg(windows)]
 pub fn pipe_name(config_dir: &Path) -> String {

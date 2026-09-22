@@ -47,6 +47,23 @@ impl ConnectError {
     }
 }
 
+/// Classify a HELLO-phase transport death: the handshake died before the
+/// daemon said a single word. For the user that is — honestly — "umux
+/// Storestation is not running": BSD/macOS non-blocking connect can hand
+/// back a socket whose ECONNREFUSED is only delivered at FIRST I/O (phase
+/// 6 / #88 found this against stale sockets), and a daemon that died in the
+/// microseconds between connect and hello is equally not running. A LIVE
+/// daemon never EOFs a hello — it answers, even with a protocol error.
+fn hello_io_failure(config_dir: &Path, e: std::io::Error) -> ConnectError {
+    match e.kind() {
+        std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted
+        | std::io::ErrorKind::BrokenPipe
+        | std::io::ErrorKind::UnexpectedEof => offline_error(config_dir, e),
+        _ => ConnectError::Io(e),
+    }
+}
+
 /// Connect WITHOUT the handshake — the liveness probe `server::prepare`
 /// uses to decide single-instance conflicts.
 pub fn raw_connect(config_dir: &Path) -> std::io::Result<transport::ClientStream> {
@@ -73,8 +90,41 @@ impl Client {
         };
         stream.apply_timeouts();
         let mut client = Client { stream, next_id: 1 };
+        // The hello phase is special: a connection that dies before ONE
+        // response byte is the offline state, not a mid-session failure
+        // (see hello_io_failure) — that is why the handshake is inlined
+        // here instead of going through round_trip.
         let hello = hello_request(client_name, client_version);
-        client.round_trip(hello).map_err(ConnectError::Protocol)?;
+        write_control(&mut client.stream, &hello)
+            .map_err(|e| hello_io_failure(config_dir, e))?;
+        let response = loop {
+            match read_frame(&mut client.stream) {
+                Ok(Frame::Control(response)) => break response,
+                Ok(Frame::Data { .. }) => continue,
+                Err(FrameError::Closed) => {
+                    return Err(hello_io_failure(
+                        config_dir,
+                        std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "the connection closed before the umux-storestation daemon answered",
+                        ),
+                    ));
+                }
+                Err(FrameError::Timeout) => {
+                    return Err(ConnectError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the umux-storestation daemon did not answer the handshake",
+                    )));
+                }
+                Err(other) => {
+                    return Err(ConnectError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("bad frame during the handshake: {other:?}"),
+                    )));
+                }
+            }
+        };
+        decode_response(response).map_err(ConnectError::Protocol)?;
         Ok(client)
     }
 
@@ -218,10 +268,12 @@ impl PersistentClient {
             .map_err(|e| ConnectError::Io(e))?;
 
         // Handshake inline (the reader thread starts after it succeeded).
+        // A death before the first answer byte is the offline state (see
+        // hello_io_failure) — same rule as the one-shot client.
         let (mut write, mut read) = (halves.write, halves.read);
         let hello = hello_request(client_name, client_version);
         write_control(&mut write, &hello)
-            .map_err(|e| ConnectError::Io(e))?;
+            .map_err(|e| hello_io_failure(config_dir, e))?;
         let response = loop {
             match read_frame(&mut read) {
                 Ok(Frame::Control(value)) => break value,
@@ -233,10 +285,13 @@ impl PersistentClient {
                     )));
                 }
                 Err(FrameError::Closed) => {
-                    return Err(ConnectError::Io(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "the umux-storestation daemon closed the connection",
-                    )));
+                    return Err(hello_io_failure(
+                        config_dir,
+                        std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "the connection closed before the umux-storestation daemon answered",
+                        ),
+                    ));
                 }
                 Err(other) => {
                     return Err(ConnectError::Io(std::io::Error::new(
@@ -329,7 +384,9 @@ impl PersistentClient {
     /// Open this client's output channel for one session. Register BEFORE
     /// `session.subscribe` so the very first data frame has somewhere to
     /// go; the channel closes when the session exits (a `session.exit`
-    /// event) or the connection dies.
+    /// event) or the connection dies. ONE channel per session per
+    /// connection — several panels rebinding onto the SAME session fan out
+    /// above this layer (the DaemonDriver's dispatcher), not here.
     pub fn subscribe_output(&self, session: &str) -> std::sync::mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         self.outputs

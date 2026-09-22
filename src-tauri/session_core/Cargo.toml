@@ -11,5 +11,15 @@ portable-pty = "0.8"
 # groundwork); the app's daemon-client driver mints them here.
 uuid = { version = "1", features = ["v4"] }
 
+# #88 (v1.7.0 phase 6, Windows): the kill-on-close Job object — owned shells
+# die with their owner process even on a hard kill. Versions match the app
+# crate's tree so the windows-sys types unify.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3"

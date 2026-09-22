@@ -46,6 +46,13 @@ tauri-plugin-notification = "2.3.3"
 # system browser (the opener plugin's open-url path).
 tauri-plugin-opener = "2"
 
+# #87 (v1.7.0 phase 5): a second app launch — via `umux attach`, the macOS
+# Dock, or a double-clicked shortcut — focuses the EXISTING window instead
+# of spawning a duplicate. attach becomes idempotent ({reason:"alreadyRunning",
+# focused:true}) and the store double-writer risk disappears. Registered
+# FIRST in the builder (the plugin's own requirement).
+tauri-plugin-single-instance = "2"
+
 # Window geometry persistence (quickupdate 2026-09-18): size/position/
 # maximized/fullscreen are saved on exit and restored at window creation —
 # while the splash is still up and the main window is hidden — so the app

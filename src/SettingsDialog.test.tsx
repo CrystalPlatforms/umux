@@ -649,7 +649,10 @@ describe('SettingsDialog factory reset (#74)', () => {
     // reports OFF (the stop direction).
     rerender(
       <SettingsDialog
-        settings={{ ...defaultSettings, storestation: { daemonEnabled: true } }}
+        settings={{
+          ...defaultSettings,
+          storestation: { daemonEnabled: true, autostartEnabled: false },
+        }}
         onChange={() => {}}
         onClose={() => {}}
         onStorestationToggle={onStorestationToggle}
@@ -698,5 +701,64 @@ describe('SettingsDialog factory reset (#74)', () => {
       />,
     )
     expect(getByTestId('storestation-status').textContent).toMatch(/stopped/i)
+  })
+
+  // #89 (v1.7.0 phase 7 — story 108 complete): the section shows ALL THREE
+  // controls — daemon toggle, autostart toggle, live status. The autostart
+  // toggle mirrors its persisted flag and reports flips upward like the
+  // daemon one; without the parent's handler the row is absent (backward
+  // compatible with the phase-4 section).
+  it('shows all three Storestation controls and reports autostart flips (#89)', () => {
+    const onStorestationToggle = vi.fn()
+    const onStorestationAutostartToggle = vi.fn()
+    const { getByTestId, queryByTestId, rerender } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={onStorestationToggle}
+        onStorestationAutostartToggle={onStorestationAutostartToggle}
+        storestationStatus={{ enabled: true, running: false }}
+      />,
+    )
+    // Three controls present.
+    expect(getByTestId('toggle-storestation')).toBeTruthy()
+    expect(getByTestId('toggle-storestation-autostart')).toBeTruthy()
+    expect(getByTestId('storestation-status')).toBeTruthy()
+    // Autostart starts OFF (opt-in everywhere).
+    expect(getByTestId('toggle-storestation-autostart')).toHaveAttribute('aria-checked', 'false')
+
+    // The flip reports upward; the persisted ON state mirrors back.
+    fireEvent.click(getByTestId('toggle-storestation-autostart'))
+    expect(onStorestationAutostartToggle).toHaveBeenCalledWith(true)
+    expect(onStorestationToggle).not.toHaveBeenCalled()
+
+    rerender(
+      <SettingsDialog
+        settings={{
+          ...defaultSettings,
+          storestation: { daemonEnabled: false, autostartEnabled: true },
+        }}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={onStorestationToggle}
+        onStorestationAutostartToggle={onStorestationAutostartToggle}
+        storestationStatus={{ enabled: true, running: false }}
+      />,
+    )
+    expect(getByTestId('toggle-storestation-autostart')).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('hides the autostart row when the parent has no handler (phase-4 shape intact)', () => {
+    const { getByTestId, queryByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onStorestationToggle={() => {}}
+      />,
+    )
+    expect(getByTestId('storestation-row')).toBeTruthy()
+    expect(queryByTestId('storestation-autostart-row')).toBeNull()
   })
 })

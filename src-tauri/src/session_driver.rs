@@ -15,7 +15,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use session_core::pty_service::PtyService;
 
@@ -209,6 +209,15 @@ pub struct DaemonDriver {
     /// app-side numeric id → daemon session id. The frontend keeps speaking
     /// u32 pty ids; the daemon speaks UUIDv4.
     map: Mutex<IdMap>,
+    /// Per-(workspace,tab,panel) open slots (macOS HITL 2026-09-22): React
+    /// StrictMode mounts every panel TWICE concurrently, and without this
+    /// both opens list the registry BEFORE either lands its create — both
+    /// mint fresh sessions and the panel gets twin shells. Holding the
+    /// slot's lock across the whole open serializes them: the second open
+    /// lists the first's session and REBINDS to it.
+    open_slots: Mutex<HashMap<(String, String, String), Arc<Mutex<()>>>>,
+    /// Per-session output dispatchers — see [`Dispatcher`].
+    dispatchers: Mutex<HashMap<String, Arc<Dispatcher>>>,
     /// SSH stays app-side even with Storestation ON — remote panels never
     /// cross the socket (issue #86, out-of-scope list).
     ssh: Mutex<SshManager>,
@@ -217,7 +226,21 @@ pub struct DaemonDriver {
 #[derive(Default)]
 struct IdMap {
     next_id: u32,
-    by_app: HashMap<u32, String>,
+    /// app id → (daemon session id, dispatcher feed token). pty_close uses
+    /// the token to detach; when it was the session's last panel, the whole
+    /// dispatcher tears down.
+    by_app: HashMap<u32, (String, u64)>,
+}
+
+/// One rebinding session's fan-out (macOS HITL 2026-09-22): the client
+/// carries ONE output channel per session (keyed by session id), but
+/// SEVERAL panels can ride that session — React StrictMode's remount
+/// REBINDS to its twin's session. The dispatcher owns the connection-side
+/// receiver and tees every chunk to each open panel's channel; when the
+/// last panel detaches, its owner tears it down.
+struct Dispatcher {
+    txs: Mutex<Vec<(u64, std::sync::mpsc::Sender<Vec<u8>>)>>,
+    next_feed: std::sync::atomic::AtomicU64,
 }
 
 impl DaemonDriver {
@@ -237,6 +260,8 @@ impl DaemonDriver {
         Ok(DaemonDriver {
             client,
             map: Mutex::new(IdMap::default()),
+            open_slots: Mutex::new(HashMap::new()),
+            dispatchers: Mutex::new(HashMap::new()),
             ssh: Mutex::new(SshManager::new()),
         })
     }
@@ -247,12 +272,13 @@ impl DaemonDriver {
         self.client.is_dead()
     }
 
-    /// Mint the next app-side id for a daemon session.
-    fn mint_app_id(&self, session_id: String) -> u32 {
+    /// Mint the next app-side id for a daemon session, remembering the
+    /// panel's dispatcher feed (dropped by pty_close).
+    fn mint_app_id(&self, session_id: String, feed_token: u64) -> u32 {
         let mut map = self.map.lock().expect("daemon id map lock");
         let app_id = map.next_id;
         map.next_id += 1;
-        map.by_app.insert(app_id, session_id);
+        map.by_app.insert(app_id, (session_id, feed_token));
         app_id
     }
 
@@ -262,15 +288,7 @@ impl DaemonDriver {
             .expect("daemon id map lock")
             .by_app
             .get(&app_id)
-            .cloned()
-    }
-
-    fn forget(&self, app_id: u32) {
-        self.map
-            .lock()
-            .expect("daemon id map lock")
-            .by_app
-            .remove(&app_id);
+            .map(|(session, _)| session.clone())
     }
 
     /// Ask the daemon for one session's live lookups (`session.status`).
@@ -278,6 +296,90 @@ impl DaemonDriver {
         self.client
             .call("session.status", serde_json::json!({ "id": session_id }))
             .map_err(|e| e.message)
+    }
+
+    /// This open's panel output channel for `session_id` (macOS HITL
+    /// 2026-09-22): the client carries one channel per SESSION, but a
+    /// rebinding remount rides the SAME session as its twin — so the
+    /// dispatcher owns the connection-side receiver and tees every chunk
+    /// to each panel's own channel. Returns the panel's receiver and its
+    /// dispatcher feed (the tx pty_close detaches). The FIRST open spawns
+    /// the tee thread; later opens just join it. The thread ends when the
+    /// session exits, the connection dies, or pty_close detaches the last
+    /// panel (that drops the client-side channel, recv errors, loop ends).
+    fn session_rx(&self, session_id: &str) -> (OutputRx, u64) {
+        use std::sync::atomic::Ordering;
+        let mut dispatchers = self.dispatchers.lock().expect("dispatcher map lock");
+        let (panel_tx, panel_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        if let Some(existing) = dispatchers.get(session_id) {
+            let token = existing.next_feed.fetch_add(1, Ordering::SeqCst);
+            existing
+                .txs
+                .lock()
+                .expect("dispatcher txs lock")
+                .push((token, panel_tx));
+            return (panel_rx, token);
+        }
+        let rx = self.client.subscribe_output(session_id);
+        let dispatcher = Arc::new(Dispatcher {
+            txs: Mutex::new(vec![(0, panel_tx)]),
+            next_feed: std::sync::atomic::AtomicU64::new(1),
+        });
+        dispatchers.insert(session_id.to_string(), Arc::clone(&dispatcher));
+        drop(dispatchers);
+        std::thread::Builder::new()
+            .name(format!("storestation-dispatch-{session_id}"))
+            .spawn(move || loop {
+                match rx.recv() {
+                    Ok(bytes) => {
+                        let mut txs = dispatcher.txs.lock().expect("dispatcher txs lock");
+                        txs.retain(|(_, tx)| tx.send(bytes.clone()).is_ok());
+                        if txs.is_empty() {
+                            drop(txs);
+                            break; // every panel went away — the owner cleans up
+                        }
+                    }
+                    Err(_) => break, // session exit or dead connection
+                }
+            })
+            .expect("spawn the session dispatcher");
+        (panel_rx, 0) // the founding open owns feed token 0
+    }
+
+    /// Detach one open's feed and, when it was the LAST panel on the
+    /// session, tear the dispatcher and the client-side channel down.
+    fn detach(&self, app_id: u32) {
+        let Some((session, feed_token)) = self
+            .map
+            .lock()
+            .expect("daemon id map lock")
+            .by_app
+            .remove(&app_id)
+        else {
+            return;
+        };
+        let mut dispatchers = self.dispatchers.lock().expect("dispatcher map lock");
+        let mut last = false;
+        if let Some(dispatcher) = dispatchers.get(&session) {
+            let mut txs = dispatcher.txs.lock().expect("dispatcher txs lock");
+            txs.retain(|(token, _)| *token != feed_token);
+            last = txs.is_empty();
+        }
+        // THIS open's daemon-side subscription ALWAYS goes — every live
+        // subscriber of this connection receives its own copy of every
+        // frame (the fan-out is per subscriber, the client collapses them
+        // by session id), so a left-behind token doubles every panel's
+        // keystrokes (macOS HITL 2026-09-22). The dispatcher and the
+        // client-side channel die only with the LAST panel.
+        let _ = self.client.call(
+            "session.unsubscribe",
+            serde_json::json!({ "id": session, "subscriber": app_id.to_string() }),
+        );
+        if last {
+            dispatchers.remove(&session);
+            drop(dispatchers);
+            self.client.unsubscribe_output(&session);
+        }
     }
 
     /// How many sessions this daemon owns (the toggle-off confirmation's
@@ -325,10 +427,42 @@ impl DaemonDriver {
 
 impl SessionCore for DaemonDriver {
     fn pty_open(&self, params: &PtyOpenParams) -> io::Result<(u32, OutputRx)> {
+        // Serialize opens for the SAME panel (open_slots — see the field
+        // doc): React StrictMode mounts twice concurrently, and both opens
+        // must not list-then-create against an empty registry. The second
+        // open waits here, then rebinds to the first one's session.
+        let slot_holder: Option<Arc<Mutex<()>>> = match (
+            &params.workspace_id,
+            &params.tab_id,
+            &params.panel_id,
+        ) {
+            (Some(ws), Some(tab), Some(panel)) => Some(
+                self.open_slots
+                    .lock()
+                    .expect("open slots lock")
+                    .entry((ws.clone(), tab.clone(), panel.clone()))
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone(),
+            ),
+            _ => None,
+        };
+        // The Arc lives in slot_holder (to the end of this fn), so the lock
+        // guard's borrow outlives nothing it shouldn't — the WHOLE open is
+        // serialized per panel.
+        let _open_guard = slot_holder
+            .as_ref()
+            .map(|slot| {
+                slot.lock()
+                    .map_err(|e| io::Error::other(format!("open slot poisoned: {e}")))
+            })
+            .transpose()?;
+
         // Rebind first (phase-4 startup rule): a live session recorded for
         // THESE ids is this panel's old session — attach to it instead of
-        // spawning a fresh shell. Scrollback replay is phase 5: reattached
-        // panels start empty by design.
+        // spawning a fresh shell. The daemon replays the session's recorded
+        // scrollback into this connection BEFORE any live frame (#87,
+        // phase 5), so the rebound panel shows its history and then catches
+        // up — strict replay→live ordering, decided daemon-side.
         let session_id = match (&params.workspace_id, &params.tab_id, &params.panel_id) {
             (Some(ws), Some(tab), Some(panel)) => self
                 .find_rebind_target(ws, tab, panel)
@@ -340,8 +474,8 @@ impl SessionCore for DaemonDriver {
         // single frame is missed. The subscription carries the app-side id
         // as its token, so this panel's later close detaches exactly its
         // own attachment (panel remounts subscribe repeatedly).
-        let rx = self.client.subscribe_output(&session_id);
-        let app_id = self.mint_app_id(session_id.clone());
+        let (rx, feed_token) = self.session_rx(&session_id);
+        let app_id = self.mint_app_id(session_id.clone(), feed_token);
         let result = self.client.call(
             "sessions.create",
             serde_json::json!({
@@ -356,8 +490,7 @@ impl SessionCore for DaemonDriver {
             }),
         );
         if let Err(err) = result {
-            self.client.unsubscribe_output(&session_id);
-            self.forget(app_id);
+            self.detach(app_id);
             return Err(io::Error::other(err.message));
         }
         // A rebound session's PREVIOUS app instance subscribed its own
@@ -367,8 +500,7 @@ impl SessionCore for DaemonDriver {
             "session.subscribe",
             serde_json::json!({ "id": session_id, "subscriber": app_id.to_string() }),
         ) {
-            self.client.unsubscribe_output(&session_id);
-            self.forget(app_id);
+            self.detach(app_id);
             return Err(io::Error::other(err.message));
         }
         Ok((app_id, rx))
@@ -404,21 +536,11 @@ impl SessionCore for DaemonDriver {
         // alive daemon-side. This is what makes "close every umux window →
         // the agent keeps running" work at all: an app teardown fires the
         // SAME unmount cleanup as a deliberate panel close, and this path
-        // must never destroy Storestation-owned shells. Sessions die when
-        // the daemon stops (confirmed in Settings), when their shell exits
-        // (session.exit), or explicitly via `session.kill` (v1.8.0 CLI).
-        // The unsubscribe (by this panel's token) also removes the
-        // daemon-side attachment a remount left behind — no phantom
-        // subscribers, no zombie reader threads.
-        let Some(session) = self.session_id_of(id) else {
-            return;
-        };
-        let _ = self.client.call(
-            "session.unsubscribe",
-            serde_json::json!({ "id": session, "subscriber": id.to_string() }),
-        );
-        self.client.unsubscribe_output(&session);
-        self.forget(id);
+        // must never destroy Storestation-owned shells. detach() drops only
+        // THIS open's dispatcher feed — a rebinding remount riding the same
+        // session keeps its stream (the 2026-09-22 black-screen fix) — and
+        // when it was the last panel, also unsubscribes daemon-side.
+        self.detach(id);
     }
 
     fn pty_is_busy(&self, id: u32) -> bool {

@@ -10,6 +10,7 @@
 //! tempdir.
 
 use clap::{CommandFactory, Parser};
+use std::path::{Path, PathBuf};
 use store_core::cmux_import::{
     apply_import_plan, build_import_preview, build_preview_tree, parse_cmux_sources,
 };
@@ -18,6 +19,7 @@ use store_core::settings_store::{serialize_settings, Settings, SettingsStore};
 use store_core::workspace_store::{
     serialize_config, LayoutNode, Orientation, Tab, Workspace, WorkspaceStore,
 };
+use umux_storestation::protocol::{codes, ErrorObj};
 
 mod notify;
 
@@ -98,6 +100,16 @@ enum Command {
     Sessions {
         #[command(subcommand)]
         action: SessionsAction,
+    },
+    /// Launch (or focus) the desktop app bound to umux Storestation (#87,
+    /// v1.7.0 phase 5). Storestation must be running — offline exits 3.
+    Attach {
+        /// Print the machine-readable result object
+        #[arg(long)]
+        json: bool,
+        /// Print the resolved app path and launch nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print a machine-readable description of this CLI (schema 1, #83)
     AgentContext,
@@ -183,6 +195,7 @@ fn needs_store(command: &Command) -> bool {
         Command::Notify { .. }
             | Command::Status { .. }
             | Command::Sessions { .. }
+            | Command::Attach { .. }
             | Command::AgentContext
     )
 }
@@ -694,6 +707,9 @@ fn main() {
         }) => {
             run_sessions_list(as_json, limit);
         }
+        Some(Command::Attach { json: as_json, dry_run }) => {
+            run_attach(as_json, dry_run);
+        }
         Some(Command::AgentContext) => {
             println!(
                 "{}",
@@ -873,6 +889,195 @@ fn run_sessions_list(as_json: bool, limit: Option<usize>) {
     }
 }
 
+// --- umux attach (#87, v1.7.0 phase 5) ---------------------------------------
+
+/// The desktop app's binary name (the bundler's `mainBinaryName`): every
+/// installer lays the CLI BESIDE the app binary — NSIS install dir,
+/// .deb /usr/bin, macOS bundle `Contents/MacOS` — so "next to me" is the
+/// primary resolution everywhere.
+const APP_BINARY_STEM: &str = "umux-app";
+
+/// `tauri.conf.json` → `build.devUrl`. The dev binary beside a target-dir
+/// CLI has THIS server baked in; spawned while it does not answer it shows
+/// a blank white webview (the 2026-09-21 macOS HITL report), so the dev
+/// artifact is only ever resolved while the dev server is up.
+const DEV_SERVER: &str = "127.0.0.1:5173";
+
+fn dev_server_running() -> bool {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    DEV_SERVER
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .and_then(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(150)).ok())
+        .is_some()
+}
+
+/// Resolve the desktop app's executable, given where THIS CLI lives (passed
+/// in — never read here — so the resolution is unit-testable). Order:
+///   0. `UMUX_APP_PATH` — the explicit override (tests, scripts, agent
+///      flows): set and an existing file → wins over every heuristic.
+///   1. the dev world: a cargo-built `app` beside a target-dir CLI, but
+///      ONLY while `tauri dev` serves it — the dev app is the one a dev
+///      attach must reach (the installed release would be a different
+///      application), and a cold dev binary would white-screen.
+///   2. beside the CLI, named `umux-app` (+ exe suffix) — every installer
+///      layout AND the macOS bundle (the sidecar lands in
+///      `umux.app/Contents/MacOS/` next to `umux-app`).
+///   3. macOS only: the standard bundle locations (a standalone CLI — the
+///      curl|sh install — reaching the installed app).
+/// The first existing FILE wins; `None` = unresolvable (attach reports it
+/// with enumerated next steps instead of guessing).
+fn resolve_app_binary_from(exe: &Path) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("UMUX_APP_PATH").map(PathBuf::from) {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let dir = exe.parent()?;
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let dev_app = dir.join(format!("app{suffix}"));
+    if dev_app.is_file() && dev_server_running() {
+        return Some(dev_app);
+    }
+    let mut candidates: Vec<PathBuf> = vec![dir.join(format!("{APP_BINARY_STEM}{suffix}"))];
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for root in [PathBuf::from("/Applications"), home.join("Applications")] {
+            candidates.push(
+                root.join("umux.app")
+                    .join("Contents")
+                    .join("MacOS")
+                    .join(format!("{APP_BINARY_STEM}{suffix}")),
+            );
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// `umux attach [--json] [--dry-run]`: launch (or focus) the desktop app
+/// bound to umux Storestation. Storestation must be running — attach exists
+/// to bring you back to LIVE sessions — so an offline daemon is the exit-3
+/// error object, never a bare spawn. The app binary is resolved beside this
+/// CLI (installer layouts; see resolve_app_binary_from) and spawned
+/// detached; whether the single-instance plugin focused an EXISTING app
+/// instead shows up as an EARLY child exit — the duplicate process exits
+/// almost immediately after handing over, so a child that is gone within
+/// [`ATTACH_ALREADY_RUNNING_GRACE`] reads as `alreadyRunning`, one that
+/// survives it reads as a fresh launch.
+fn run_attach(as_json: bool, dry_run: bool) {
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        eprintln!("could not locate this umux binary: {e}");
+        std::process::exit(5);
+    });
+    let Some(app) = resolve_app_binary_from(&exe) else {
+        let err = ErrorObj::new(
+            codes::IO_ERROR,
+            "could not locate the umux desktop app next to the CLI",
+            vec![
+                "install the desktop app (the CLI and the app ship in one installer)".into(),
+                "or open umux manually, then run: umux attach".into(),
+            ],
+        );
+        if as_json {
+            eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
+        } else {
+            eprintln!("{} — {}", err.message, err.next.join("; "));
+        }
+        std::process::exit(5);
+    };
+    if dry_run {
+        // Resolution preview ONLY — nothing is launched and Storestation is
+        // not required (the contract: "prints the resolved app path and
+        // launches nothing").
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "resolvedPath": app.display().to_string(),
+                }))
+                .expect("dry-run document is always serializable")
+            );
+        } else {
+            println!("would launch: {}", app.display());
+        }
+        return;
+    }
+
+    // Storestation must be alive — offline is exit 3 with the catalog error.
+    let dir = store_core::paths::config_dir();
+    if let Err(e) = umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION"))
+    {
+        let err = e.to_error_obj();
+        if as_json {
+            eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
+        } else {
+            eprintln!("{}", err.message);
+            for step in &err.next {
+                eprintln!("  - {step}");
+            }
+        }
+        std::process::exit(3);
+    }
+
+    let mut child = match std::process::Command::new(&app).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let err = ErrorObj::new(
+                codes::IO_ERROR,
+                format!("could not launch {}: {e}", app.display()),
+                vec![],
+            );
+            if as_json {
+                eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
+            } else {
+                eprintln!("{}", err.message);
+            }
+            std::process::exit(5);
+        }
+    };
+    let app_pid = child.id();
+    let deadline = std::time::Instant::now() + ATTACH_ALREADY_RUNNING_GRACE;
+    let already_running = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break true, // the duplicate handed over and exited
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    break false; // still alive: a real fresh launch
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => break false,
+        }
+    };
+    if as_json {
+        let doc = if already_running {
+            serde_json::json!({
+                "launched": false,
+                "reason": "alreadyRunning",
+                "focused": true,
+            })
+        } else {
+            serde_json::json!({ "launched": true, "appPid": app_pid })
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc).expect("attach document is always serializable")
+        );
+    } else if already_running {
+        println!("umux is already running — brought the existing window to the front.");
+    } else {
+        println!("umux launched (pid {app_pid}).");
+    }
+}
+
+/// How long a spawned app process may take to exit before it counts as a
+/// FRESH launch rather than the single-instance duplicate handing over.
+/// The duplicate's exit happens at plugin init, well inside a second even
+/// on a cold machine; five seconds keeps the false "launched" risk without
+/// approaching the protocol's 15 s attach budget.
+const ATTACH_ALREADY_RUNNING_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The machine-readable self-description (schema 1, per the protocol design
 /// doc). It MUST stay in lockstep with the real `--help` surface — the
 /// `agent_context_parity` test enforces both directions, so any new command
@@ -887,6 +1092,7 @@ fn agent_context() -> serde_json::Value {
         "env": {
             "configDir": "UMUX_CONFIG_DIR",
             "precedence": "flag > env > default",
+            "appPath": "UMUX_APP_PATH (attach: explicit desktop-app binary override)",
         },
         "exitCodes": {
             "0": "ok / Storestation offline state",
@@ -926,10 +1132,93 @@ fn agent_context() -> serde_json::Value {
                 "notes": ["exits 0 with an empty list when Storestation is offline — offline is a state, not an error"],
             },
             {
+                "name": "attach",
+                "class": "bootstrap",
+                "json": true,
+                "dryRun": true,
+                "notes": [
+                    "requires Storestation running — offline exits 3 with storestationNotRunning",
+                    "launches the desktop app beside the CLI (umux-app); a second launch focuses the existing window (single-instance)",
+                ],
+            },
+            {
                 "name": "agent-context",
                 "class": "read",
                 "json": "always",
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod attach_resolution {
+    use super::*;
+
+    // The 2026-09-21 macOS HITL fix, pinned: a standalone CLI (nothing
+    // beside it) reaches the INSTALLED app through the bundle locations —
+    // and never falls back to a dev artifact. The dev branch additionally
+    // requires the dev server, which a unit test cannot control — its
+    // absence here is exactly the state that must NOT resolve the dev
+    // binary, so a scratch dir holding an `app` file proves the order.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn standalone_cli_reaches_the_installed_bundle_not_a_dev_artifact() {
+        let scratch = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        // A dev build sitting beside the CLI — launchable only under a dev
+        // server, which this test does not run.
+        std::fs::write(scratch.path().join("app"), b"dev").unwrap();
+        // The installed app under the (test-controlled) home.
+        let bundle = home
+            .path()
+            .join("Applications")
+            .join("umux.app")
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("umux-app"), b"installed").unwrap();
+
+        let saved_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let resolved = resolve_app_binary_from(&scratch.path().join("umux"));
+        match saved_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+
+        // The machine may own a real /Applications install (this one does),
+        // so the exact path varies — what must hold everywhere: the dev
+        // artifact NEVER wins, and what resolved is an installed bundle.
+        assert_ne!(
+            resolved.as_deref(),
+            Some(scratch.path().join("app")).as_deref(),
+            "a dev artifact must never be resolved while the dev server is down"
+        );
+        let path = resolved.expect("an installed bundle must be reachable");
+        assert!(
+            path.display().to_string().contains("/Applications/"),
+            "expected an installed bundle, got {}",
+            path.display()
+        );
+    }
+
+    // The shipped-macOS layout: `umux-app` beside the CLI (inside the
+    // bundle) wins before the standalone-bundle fallbacks.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_binary_beside_the_cli_wins_over_the_bundle_fallbacks() {
+        let scratch = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("umux-app"), b"beside").unwrap();
+
+        let saved_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path()); // no bundles under this home
+        let resolved = resolve_app_binary_from(&scratch.path().join("umux"));
+        match saved_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(resolved, Some(scratch.path().join("umux-app")));
+    }
 }

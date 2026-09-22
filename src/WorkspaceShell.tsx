@@ -1218,7 +1218,13 @@ export function WorkspaceShell() {
       invoke<StorestationStatus>('storestation_set_enabled', { enable: next })
         .then((status) => {
           setStorestationStatus(status)
-          applySettings({ storestation: { daemonEnabled: next } })
+          // Spread the CURRENT block (event-time ref, not a stale closure):
+          // #89 added autostartEnabled to it, and applySettings merges
+          // patches SHALLOWLY — replacing the block wholesale would reset
+          // the other toggle.
+          applySettings({
+            storestation: { ...settingsRef.current.storestation, daemonEnabled: next },
+          })
         })
         .catch((e) => {
           console.error('storestation_set_enabled failed:', e)
@@ -1230,6 +1236,26 @@ export function WorkspaceShell() {
     // harmless — the callback only runs at event time).
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [refreshStorestationStatus],
+  )
+
+  // The autostart toggle (#89, v1.7.0 phase 7): the backend installs or
+  // removes the login mechanism FIRST; only a success persists the switch
+  // (the same pessimistic contract as the daemon toggle). No daemon flow
+  // rides along — autostart only decides what happens at the NEXT login.
+  const applyStorestationAutostart = useCallback(
+    (next: boolean) => {
+      invoke<void>('storestation_set_autostart', { enable: next })
+        .then(() => {
+          applySettings({
+            storestation: { ...settingsRef.current.storestation, autostartEnabled: next },
+          })
+        })
+        .catch((e) => {
+          console.error('storestation_set_autostart failed:', e)
+        })
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
   )
 
   const handleStorestationToggle = useCallback(
@@ -3993,6 +4019,7 @@ export function WorkspaceShell() {
           }}
           shells={detectedShells}
           onStorestationToggle={handleStorestationToggle}
+          onStorestationAutostartToggle={applyStorestationAutostart}
           storestationStatus={storestationStatus}
         />
       )}

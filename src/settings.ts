@@ -36,8 +36,11 @@ export type Settings = {
   // #86 (v1.7.0): the umux Storestation block. daemonEnabled = the daemon
   // toggle, default OFF — Storestation is opt-in and OFF behaves exactly
   // like the pre-Storestation app. Additive: a pre-#86 settings.json (or a
-  // hand-trimmed one) loads with the daemon off.
-  storestation: { daemonEnabled: boolean }
+  // hand-trimmed one) loads with the daemon off. autostartEnabled (#89,
+  // v1.7.0 phase 7) = the second toggle, default OFF — the OS starts the
+  // daemon headless at login; the setting only REMEMBERS the choice (the
+  // mechanism itself is installed/removed by the dedicated invoke).
+  storestation: { daemonEnabled: boolean; autostartEnabled: boolean }
 }
 
 export const defaultSettings: Settings = {
@@ -50,7 +53,7 @@ export const defaultSettings: Settings = {
   showTabFolders: false,
   defaultShell: null,
   sidebarWidth: null,
-  storestation: { daemonEnabled: false },
+  storestation: { daemonEnabled: false, autostartEnabled: false },
 }
 
 /// Coerce an unknown invoke payload into a complete Settings object: missing
@@ -83,9 +86,12 @@ export function coerceSettings(raw: unknown): Settings {
         ? Math.round(r.sidebarWidth)
         : null,
     // #86: coerce by shape — the block itself OR just the flag may be
-    // missing (a pre-#86 file); anything else defaults to OFF.
+    // missing (a pre-#86 file); anything else defaults to OFF. The phase-7
+    // (#89) autostart flag coerces the same way (a pre-#89 file loads with
+    // autostart off).
     storestation: {
       daemonEnabled: r.storestation?.daemonEnabled === true,
+      autostartEnabled: r.storestation?.autostartEnabled === true,
     },
   }
 }

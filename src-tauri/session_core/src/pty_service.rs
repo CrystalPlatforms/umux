@@ -40,6 +40,80 @@ pub struct PtyHandle {
     pub id: u32,
 }
 
+// --- Crash hardening (#88, v1.7.0 phase 6, Windows): the Job object ---------
+//
+// Owned shells must die WITH their owner — the umux-storestation daemon, or
+// the app running the engine in-process — even when that owner is killed
+// hard. A Job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE does exactly
+// that at the OS level: every session child is assigned to the owner's job
+// right after spawn, descendants join automatically (shells never ask for
+// breakaway), and the kernel terminates every member the moment the job's
+// LAST HANDLE closes — which happens unconditionally at process death,
+// Task-manager-kill semantics included. The handle is process-global (one
+// job per process, created lazily) and deliberately never closed in code.
+
+#[cfg(windows)]
+mod job {
+    use std::sync::OnceLock;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    /// The process-wide kill-on-close job. A creation or configuration
+    /// failure yields None — every caller treats a missing job as "no crash
+    /// guarantee for this child" (the explicit kill paths still work).
+    fn job_handle() -> Option<HANDLE> {
+        static JOB: OnceLock<Option<HANDLE>> = OnceLock::new();
+        *JOB.get_or_init(|| unsafe {
+            // SAFETY: default security + no name; the returned handle is
+            // stored once and intentionally leaked for the process lifetime
+            // (kill-on-close REQUIRES it to close only at process death).
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                return None;
+            }
+            Some(job)
+        })
+    }
+
+    /// Assign one freshly spawned child (by pid) to the process job. Best
+    /// effort: a failed assignment (child already gone, an exotic parent
+    /// job) only loses THIS child's crash guarantee — explicit kills are
+    /// unaffected, so the failure is silently ignored.
+    pub fn assign(child_pid: u32) {
+        let Some(job) = job_handle() else { return };
+        // SAFETY: the handle comes from OpenProcess for exactly this pid and
+        // is closed on every path below; the job handle is the process-global
+        // one created above.
+        unsafe {
+            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, child_pid);
+            if process.is_null() {
+                return;
+            }
+            AssignProcessToJobObject(job, process);
+            CloseHandle(process);
+        }
+    }
+}
+
 struct PtyEntry {
     master: SendMaster,
     writer: Box<dyn Write + Send>,
@@ -667,6 +741,16 @@ impl PtyService {
         // top-level sessions.
         cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
         let child = pair.slave.spawn_command(cmd).map_err(pt_err)?;
+        // #88 (Windows): bind the child's lifetime to THIS process via the
+        // kill-on-close job object — a hard-killed owner takes its shells
+        // with it. Unix relies on the PTY contract instead (the shell is a
+        // session leader on its own controlling tty: process death closes
+        // the masters and the kernel delivers the group SIGHUP), plus the
+        // daemon-start sweep of recorded pids.
+        #[cfg(windows)]
+        if let Some(pid) = child.process_id() {
+            job::assign(pid);
+        }
 
         let reader = pair.master.try_clone_reader().map_err(pt_err)?;
         let writer = pair.master.take_writer().map_err(pt_err)?;

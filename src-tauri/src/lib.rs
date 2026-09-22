@@ -1,4 +1,7 @@
 pub mod analytics;
+// #89 (v1.7.0 phase 7): the login-time daemon launcher (Run key /
+// LaunchAgent / systemd unit) — pure artifact generators + per-OS install.
+pub mod autostart;
 pub mod cmux_import;
 pub mod git_branch;
 pub mod listening_ports;
@@ -1137,6 +1140,19 @@ async fn storestation_set_enabled(
     .map_err(|e| e.to_string())?
 }
 
+/// The autostart toggle (#89, v1.7.0 phase 7): install/remove the login
+/// mechanism (Run key / LaunchAgent / systemd unit) that starts the daemon
+/// headless at login. The persisted setting is written by the FRONTEND
+/// through save_settings after this answers — this command only touches the
+/// OS mechanism, so an ordinary settings save can never re-run or undo an
+/// install. Spawned processes are hidden (reg.exe would flash a console).
+#[tauri::command]
+async fn storestation_set_autostart(enable: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || autostart::set_autostart(enable))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Factory reset (#74): remove EVERY umux state file — workspaces.json (the
 /// workspace/layout/tree store) and settings.json — so the next launch boots
 /// first-run clean. The frontend restarts the app afterwards (plugin-process
@@ -1406,6 +1422,22 @@ pub fn run() {
     let router = RouterDriver::new(initial_settings.storestation.daemon_enabled);
 
     let builder = tauri::Builder::default()
+        // #87 (v1.7.0 phase 5): single-instance goes FIRST — the plugin
+        // requires being the first one registered, because it decides
+        // BEFORE anything else runs whether this process is the duplicate
+        // (which it then sends to the existing instance and exits). The
+        // callback runs in the FIRST instance: bring its main window to
+        // the front, so `umux attach` and a second launch are both
+        // idempotent focuses. A failure to find the window (still
+        // splashing) is a silent no-op — the splash handoff will show it
+        // a moment later anyway.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         // The SessionCore seam (#85): the ONE managed state the session
         // commands go through. The in-process driver is today's face
         // (Storestation OFF — byte-identical to v1.6.x); with the daemon ON
@@ -1438,6 +1470,7 @@ pub fn run() {
             save_settings,
             storestation_status,
             storestation_set_enabled,
+            storestation_set_autostart,
             reset_all,
             list_shells,
             open_settings_file,

@@ -94,6 +94,7 @@ export function SettingsDialog({
   updates,
   shells = [],
   onStorestationToggle,
+  onStorestationAutostartToggle,
   storestationStatus = null,
 }: {
   settings: Settings
@@ -133,6 +134,11 @@ export function SettingsDialog({
   // confirmation is needed (live sessions die on stop), and persists the
   // setting after the backend answers. Absent = the section is not rendered.
   onStorestationToggle?: (next: boolean) => void
+  // The autostart toggle (#89, v1.7.0 phase 7): the second Storestation
+  // control. Same upward-reporting contract as the daemon toggle — the
+  // parent runs the OS install/remove (Run key / LaunchAgent / systemd
+  // unit) and persists the setting. Absent = the row is not rendered.
+  onStorestationAutostartToggle?: (next: boolean) => void
   // The last probed daemon status (the parent refreshes it when the dialog
   // opens and after every toggle). null = no status line yet.
   storestationStatus?: {
@@ -508,6 +514,28 @@ export function SettingsDialog({
                 onToggle={onStorestationToggle}
               />
             </div>
+            {/* The second control (#89, story 108 complete): start the
+                daemon headless at login. Same pessimistic flow as the
+                daemon toggle — the parent installs/removes the OS mechanism
+                first, and only success persists the switch. */}
+            {onStorestationAutostartToggle != null && (
+              <div className="settings-row" data-testid="storestation-autostart-row">
+                <div className="settings-row__text">
+                  <span className="settings-row__label">Start daemon at login</span>
+                  <span className="settings-row__description">
+                    Launches the umux Storestation daemon in the background
+                    when you log in — no window, sessions keep running even
+                    before umux opens.
+                  </span>
+                </div>
+                <SettingsToggle
+                  label="umux Storestation autostart"
+                  checked={settings.storestation.autostartEnabled}
+                  testId="toggle-storestation-autostart"
+                  onToggle={onStorestationAutostartToggle}
+                />
+              </div>
+            )}
             {storestationStatus != null && (
               <p className="settings-status" data-testid="storestation-status">
                 {storestationStatus.running

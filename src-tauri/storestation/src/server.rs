@@ -68,9 +68,14 @@ pub fn prepare(config_dir: &Path) -> Result<Prepared, PrepareError> {
         });
     }
 
-    // Nobody answered — whatever is on disk is a crash leftover.
+    // Nobody answered — whatever is on disk is a crash leftover. The socket
+    // and pid file go first; then the crash-recovery sweep gives any shell
+    // the crashed daemon left behind its group signal (#88). The pid file
+    // is tolerated in ANY state until here — garbage, recycled, stale —
+    // because liveness was decided by connecting, never by trusting it.
     transport::remove_socket_file(config_dir);
     let _ = std::fs::remove_file(socketpath::pid_path(config_dir));
+    sweep_stale_shells(config_dir);
 
     let listener = transport::Listener::bind(config_dir).map_err(PrepareError::Io)?;
     std::fs::write(
@@ -89,9 +94,65 @@ pub fn prepare(config_dir: &Path) -> Result<Prepared, PrepareError> {
             daemon_pid: std::process::id(),
             daemon_version: env!("CARGO_PKG_VERSION"),
             shutdown: AtomicBool::new(false),
-            registry: Arc::new(Mutex::new(Registry::new())),
+            registry: Arc::new(Mutex::new(Registry::new(Some(
+                socketpath::session_pids_path(config_dir),
+            )))),
         }),
     })
+}
+
+/// The crash-recovery sweep (#88, Unix): a hard-killed daemon's owned shells
+/// usually die on their own — process death closes the PTY masters and the
+/// kernel delivers SIGHUP to each shell's session (shells are session
+/// leaders on their own controlling tty). The recorded pids catch the
+/// STRAGGLERS (a shell that ignored the SIGHUP, a tty-less orphan): the
+/// process group gets a SIGHUP, confirmed survivors are SIGKILLed after a
+/// short grace.
+///
+/// Safety against recycled pids, in layers — a pid is only signalled when
+/// EVERY guard holds:
+///   - above the system-reserved range (≤ 1000: init/launchd and kernel
+///     threads are never user shells, and `kill(-1, …)` — the group signal
+///     for pid 1 — would hit EVERY process on the machine);
+///   - still alive (`kill(pid, 0)`);
+///   - still a process-group leader (`getpgid(pid) == pid` — owned shells
+///     always are, portable-pty's setsid).
+/// Windows needs no sweep: the kill-on-close Job object terminated the whole
+/// tree at daemon death.
+fn sweep_stale_shells(config_dir: &Path) {
+    #[cfg(unix)]
+    {
+        let path = socketpath::session_pids_path(config_dir);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let pids: Vec<i32> = text
+                .lines()
+                .filter_map(|line| line.trim().parse::<i32>().ok())
+                .filter(|pid| *pid > 1000)
+                .collect();
+            let ours = |pid: i32| unsafe {
+                libc::kill(pid, 0) == 0 && libc::getpgid(pid) == pid
+            };
+            let live: Vec<i32> = pids.into_iter().filter(|pid| ours(*pid)).collect();
+            for pid in &live {
+                // SAFETY: signal syscalls over a validated pid; failures are
+                // the process having just died — ignore them.
+                unsafe {
+                    let _ = libc::kill(-*pid, libc::SIGHUP);
+                }
+            }
+            if !live.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                for pid in &live {
+                    if ours(*pid) {
+                        unsafe {
+                            let _ = libc::kill(*pid, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(socketpath::session_pids_path(config_dir));
 }
 
 /// Serve until `stop()` turns true, the `storestation.shutdown` op arrives, or an
@@ -134,10 +195,14 @@ pub fn serve<F: Fn() -> bool>(prepared: Prepared, stop: F) {
 }
 
 /// Remove every daemon-owned file for this instance. Idempotent; also what
-/// `umux-storestation stop` runs when it finds only stale leftovers.
+/// `umux-storestation stop` runs when it finds only stale leftovers. NEVER
+/// touches anything outside the daemon's own `storestation.*` markers — the
+/// store files (`workspaces.json`, `settings.json`) are not ours to clean
+/// (#88's cleanup rule).
 pub fn cleanup(config_dir: &Path) {
     transport::remove_socket_file(config_dir);
     let _ = std::fs::remove_file(socketpath::pid_path(config_dir));
+    let _ = std::fs::remove_file(socketpath::session_pids_path(config_dir));
 }
 
 fn read_pid(config_dir: &Path) -> Option<u32> {

@@ -31,9 +31,20 @@ ctrlc = "3"
 
 # Windows transport: a named pipe instead of a UDS (std has no named-pipe
 # support). Tokio is only pulled on Windows targets; macOS/Linux compile
-# pure-std code paths.
+# pure-std code paths. windows-sys (#89) also hides the console window for
+# `run --hidden` (the autostart launch) — versions match the app crate.
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "1", features = ["net", "rt", "time"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+# #88 (v1.7.0 phase 6): the crash-recovery sweep signals recorded shell
+# process groups (kill/getpgid) — the same dep the app crate already carries.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

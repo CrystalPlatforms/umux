@@ -90,8 +90,8 @@ pub struct Settings {
     pub storestation: StorestationSettings,
 }
 
-/// The Storestation block of the settings (v1.7.0). Autostart joins at
-/// phase 7; only the daemon toggle exists in phase 4.
+/// The Storestation block of the settings (v1.7.0). Phase 7 (#89) completes
+/// the section: daemon toggle + autostart + the live status row.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StorestationSettings {
@@ -100,6 +100,13 @@ pub struct StorestationSettings {
     /// pre-Storestation behavior.
     #[serde(default)]
     pub daemon_enabled: bool,
+    /// The autostart toggle (#89, PRD story 109) — default OFF everywhere.
+    /// ON = the OS starts `umux-storestation run` headless at login (Windows
+    /// HKCU Run key / macOS LaunchAgent / Linux systemd user unit). The
+    /// MECHANISM is installed/removed by the dedicated invoke command, not
+    /// by an ordinary save — this field only REMEMBERS the choice.
+    #[serde(default)]
+    pub autostart_enabled: bool,
 }
 
 /// Serde default for `default_launch_mode`: the GUI is what umux launches
@@ -431,5 +438,42 @@ mod tests {
         // A fractional width fails the WHOLE parse — defaults + Corrupted.
         let (_, status) = parse_settings_with_status("{\"sidebarWidth\":600.5}");
         assert_eq!(status, ConfigStatus::Corrupted, "u32 must reject 600.5");
+    }
+
+    // T-AUTOSTART (#89, v1.7.0 phase 7 — the settings-store half of "toggle
+    // persists; enable→disable removes the mechanism fully"): the flag
+    // defaults OFF everywhere (opt-in like the daemon toggle), round-trips
+    // verbatim (an enabled autostart must survive a reload or the next save
+    // would silently uninstall the OS mechanism), carries the camelCase
+    // wire key the frontend coerces, and a pre-#89 file (the block without
+    // the flag) loads with autostart OFF — no schema migration.
+    #[test]
+    fn storestation_autostart_defaults_off_and_round_trips() {
+        assert!(
+            !Settings::default().storestation.autostart_enabled,
+            "autostart is opt-in on every platform"
+        );
+
+        // The persisted toggle survives save/load unchanged.
+        let mut settings = Settings::default();
+        settings.storestation.autostart_enabled = true;
+        let back = parse_settings(&serialize_settings(&settings));
+        assert!(back.storestation.autostart_enabled);
+        assert!(!back.storestation.daemon_enabled, "the daemon toggle is untouched");
+
+        // Wire key: camelCase, like every Storestation field.
+        let text = serialize_settings(&Settings::default());
+        assert!(
+            text.contains("\"autostartEnabled\""),
+            "expected camelCase autostartEnabled, got: {text}"
+        );
+
+        // A pre-#89 settings.json loads with autostart OFF, status Ok —
+        // the additive-fields rule.
+        let (back, status) =
+            parse_settings_with_status(r#"{"storestation":{"daemonEnabled":true}}"#);
+        assert!(back.storestation.daemon_enabled);
+        assert!(!back.storestation.autostart_enabled);
+        assert_eq!(status, ConfigStatus::Ok, "valid JSON shape — no fallback");
     }
 }

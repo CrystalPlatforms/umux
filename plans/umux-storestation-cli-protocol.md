@@ -89,6 +89,15 @@ Storestation off → `"sessions": []` + `"storestation": {"running": false}` —
 
 `umux attach --json`: `{ "launched": true, "appPid": 8123 }` or `{ "launched": false, "reason": "alreadyRunning", "focused": true }`. Storestation off → exit 3 with the error object below.
 
+**`attach` app-executable resolution** (decided at implementation, phase 5 / #87; reworked after the 2026-09-21 macOS HITL — a cold `tauri dev` binary used to white-screen the splash). Resolution order:
+
+0. `UMUX_APP_PATH` — explicit override (tests, scripts, agents): set and an existing file wins over every heuristic. Documented in `agent-context`.
+1. The dev world: the cargo-built `app` beside a target-dir CLI — but ONLY while the dev server (`127.0.0.1:5173`, from `tauri.conf.json` build.devUrl) answers. A dev binary has that URL baked in; spawned cold it shows a blank white webview, so it is never resolved otherwise.
+2. `<cli dir>/umux-app` + platform exe suffix — the NSIS install dir, `.deb /usr/bin`, and the macOS bundle (`umux.app/Contents/MacOS/` holds `umux-app` AND the `umux` sidecar).
+3. macOS only, standalone CLI (the curl|sh install): `/Applications/umux.app/Contents/MacOS/umux-app`, then `~/Applications/umux.app/Contents/MacOS/umux-app`.
+
+The first existing file wins; nothing found → exit 5, `ioError` with next steps. `--dry-run` prints the resolved path and launches nothing (no Storestation requirement). A real launch first requires a live daemon (offline → exit 3), then spawns the binary detached and watches it for the already-running grace ([5 s]): an early child exit means the single-instance plugin handed over → `{launched:false, reason:"alreadyRunning", focused:true}`; a child that survives the grace is a fresh launch → `{launched:true, appPid}`. The grace stays far inside the protocol's 15 s attach budget.
+
 Error object (CLI `--json` **and** protocol, same shape):
 
 ```json
@@ -146,7 +155,7 @@ Implemented in v1.7.0:
 - `session.write` — `{ id, data }` where `data` is BASE64-encoded bytes (binary-safe inside the JSON envelope)
 - `session.resize` — `{ id, cols, rows }`
 - `session.kill` — `{ id }` → kills the child, drops the record, notifies subscribers
-- `session.subscribe` — `{ id, subscriber? }` → opens this connection's push stream of `0x02` data frames for the session plus lifecycle events; result `{ subscribed: true, attachedClients: N }`. The optional `subscriber` token labels the attachment
+- `session.subscribe` — `{ id, subscriber? }` → opens this connection's push stream of `0x02` data frames for the session plus lifecycle events; result `{ subscribed: true, attachedClients: N }`. The optional `subscriber` token labels the attachment. **Replay delivers at most the NEWEST 128 KiB of the recorded ring** (phase 5): beyond xterm's scrollback (1000 lines) the extra bytes are undisplayable, and a full-ring burst blacks WebKit's DOM renderer (macOS HITL 2026-09-21). Ordering stays strict replay→live.
 - `session.unsubscribe` — `{ id, subscriber }` → detaches exactly that attachment; the session itself keeps living (a closed panel detaches, it does not kill)
 - `session.status` — `{ id }` → the live lookups the desktop driver needs per panel: `{ busy, childPid, foregroundPid, cwd, exitCode }` (phase 2 addition so Storestation ON keeps close-confirmation, agent-status presence, the cwd snapshot and the ports tooltip at full parity)
 - `storestation.shutdown` — idempotent graceful stop (used by `umux-storestation stop`); kills every owned shell first

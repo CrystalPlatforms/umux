@@ -131,4 +131,31 @@ describe('coerceSettings', () => {
     expect(coerceSettings({ sidebarWidth: 600.5 }).sidebarWidth).toBe(601)
     expect(coerceSettings({ sidebarWidth: 337.2 }).sidebarWidth).toBe(337)
   })
+
+  // #89 (v1.7.0 phase 7): the autostart toggle rides the Storestation
+  // block. Default OFF everywhere (opt-in like the daemon toggle), a pre-#89
+  // file (the block without the flag, or no block at all) coerces to OFF,
+  // and an explicit value survives — the setting only REMEMBERS the choice;
+  // the mechanism itself lives in the OS.
+  it('defaults the Storestation block to both toggles OFF, autostart included (#89)', () => {
+    expect(defaultSettings.storestation).toEqual({ daemonEnabled: false, autostartEnabled: false })
+    expect(coerceSettings({}).storestation).toEqual({
+      daemonEnabled: false,
+      autostartEnabled: false,
+    })
+  })
+
+  it('coerces a pre-#89 Storestation block (no autostartEnabled) to autostart OFF (#89)', () => {
+    expect(coerceSettings({ storestation: { daemonEnabled: true } }).storestation).toEqual({
+      daemonEnabled: true,
+      autostartEnabled: false,
+    })
+  })
+
+  it('keeps an explicit autostartEnabled value through coerce (#89)', () => {
+    expect(
+      coerceSettings({ storestation: { daemonEnabled: false, autostartEnabled: true } })
+        .storestation,
+    ).toEqual({ daemonEnabled: false, autostartEnabled: true })
+  })
 })

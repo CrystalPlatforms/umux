@@ -38,7 +38,13 @@ struct StorestationCli {
 #[derive(clap::Subcommand)]
 enum Command {
     /// Serve the per-user socket in the foreground until stopped
-    Run,
+    Run {
+        /// Launch with the console window hidden (Windows autostart, #89:
+        /// a Run-key launch of a console binary would otherwise flash one
+        /// at every login). Accepted and inert on macOS/Linux.
+        #[arg(long)]
+        hidden: bool,
+    },
     /// Gracefully stop a running daemon (idempotent — offline is fine)
     Stop {
         /// Print the machine-readable result object
@@ -63,14 +69,39 @@ fn main() {
     }
 
     let code = match cli.command {
-        Some(Command::Run) => cmd_run(),
+        Some(Command::Run { hidden }) => cmd_run(hidden),
         Some(Command::Stop { json }) => cmd_stop(json),
         None => 0,
     };
     std::process::exit(code);
 }
 
-fn cmd_run() -> i32 {
+/// Hide this process's console window (Windows `run --hidden`). Best
+/// effort: a missing console (GUI parent) or a failed call just means the
+/// window question is moot — the daemon serves either way.
+#[cfg(windows)]
+fn hide_console() {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    // SAFETY: parameterless window query + a standard show-state change on
+    // whatever handle the OS returns; both calls are documented no-ops on a
+    // null console.
+    unsafe {
+        let console: HWND = GetConsoleWindow();
+        if !console.is_null() {
+            ShowWindow(console, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_console() {}
+
+fn cmd_run(hidden: bool) -> i32 {
+    if hidden {
+        hide_console();
+    }
     let dir = store_core::paths::config_dir();
     let prepared = match server::prepare(&dir) {
         Ok(prepared) => prepared,
