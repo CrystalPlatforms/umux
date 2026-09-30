@@ -6,7 +6,7 @@ A terminal workspace manager for **Linux, Windows, and macOS** — a lightweight
 
 umux watches the terminal byte stream for the completion signals emitted by AI CLI tools (Claude Code, Aider, etc.) — the standard `OSC 9;9` / `OSC 99` / `OSC 777` escape sequences — and fires a native desktop notification when such a task completes, so you can step away while code is being generated.
 
-> **Platform:** Linux (Ubuntu/Wayland), Windows 10+, and macOS 11+. Releases carry Linux installers and a universal macOS `.dmg`; the Windows installer arrives with the **v1.0.0** release.
+> **Platform:** Linux (Ubuntu/Wayland), Windows 10+, and macOS 11+. Releases carry installers for all three platforms: Linux (`.deb` / `.AppImage` / `.rpm`), a universal macOS `.dmg`, and a Windows NSIS `.exe`.
 >
 > **Stack:** [Tauri v2](https://tauri.app) (Rust backend) + React + TypeScript (frontend), rendering its own embedded terminal via [xterm.js](https://xtermjs.org).
 
@@ -299,6 +299,40 @@ umux reports a **single anonymous event** — `app_open` at startup — to [Apta
 
 ---
 
+## umux Storestation (v1.7.0)
+
+**umux Storestation** is an **optional background daemon** — **off by default** — that owns umux's terminal sessions. With it on, closing every umux window no longer kills your work: agents and long jobs keep running headlessly, and `umux attach` brings the view back. With it off, the desktop app behaves exactly like it always has.
+
+- **Enable it** in **Settings → Storestation**: a daemon on/off switch, an **autostart at login** switch, and a live status line — styled like the import wizard.
+- **`umux attach`** launches (or focuses) the umux app bound to Storestation's living sessions. Storestation must be running — offline `attach` tells you so and exits.
+- **Clean lifecycle** by design: stopping Storestation terminates its shells cleanly (no orphan processes), a hard-killed daemon's leftovers are detected and cleaned on the next start, and a second daemon instance refuses to start (exit code `4`).
+- **Ships inside every installer** (`.deb` / `.AppImage` / `.rpm` / NSIS `.exe` / `.dmg`) beside the `umux` CLI — enabling Storestation never means installing something extra. A normal app update replaces the daemon binary too; its version stays locked to the app's.
+
+### Storestation from the CLI
+
+The `umux` CLI drives Storestation headlessly — these commands talk to the daemon's local socket (see the [protocol spec](plans/umux-storestation-cli-protocol.md)):
+
+```bash
+umux status                       # daemon health — offline is a state, not an error (exit 0)
+umux status --json                # machine-readable: running, version, pid, uptime, sessions, attachedClients
+umux sessions list                # the live sessions Storestation owns (offline → empty list)
+umux sessions list --json --limit 50
+umux agent-context                # machine-readable description of this CLI (schema 1)
+umux attach                       # relaunch/focus the app on Storestation's sessions
+umux attach --dry-run             # print the resolved app path, launch nothing
+
+umux-storestation run             # serve the socket in the foreground (what autostart launches)
+umux-storestation stop            # graceful shutdown — idempotent (offline exits 0)
+```
+
+Where the daemon binary lives mirrors the CLI exactly: `/usr/bin` on `.deb` systems, the NSIS install directory (already on your user PATH) on Windows, and beside the app inside `umux.app/Contents/MacOS/` on macOS — one PATH line covers both (see [`umux` on your PATH](#umux-on-your-path); the plain-CLI `install.sh` installs the daemon alongside too). Exit codes follow the shared catalog (`0` ok/offline, `2` usage, `3` unreachable, `4` already running, `5` internal).
+
+> **Trying it out:** point `UMUX_CONFIG_DIR` at a scratch directory to isolate the test daemon's store, socket and PID files from your daily umux — see the [Storestation protocol spec](plans/umux-storestation-cli-protocol.md) for the full walkthrough.
+
+Zero-cost policy unchanged: builds stay unsigned, so the SmartScreen / Gatekeeper first-run notes in [Option A](#option-a--download-a-prebuilt-package-recommended) apply to the daemon binary exactly as to everything else.
+
+---
+
 ## CLI (`umux`)
 
 umux ships a small command-line tool for scripting and offline work. It reads and writes the **same store files as the app** through the same library, so a CLI write and an app write can never disagree about the format.
@@ -336,15 +370,15 @@ Build it from source instead (it is part of the Cargo workspace). Or install it 
 curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh
 ```
 
-Note for contributors: `src-tauri/binaries/` (the sidecar copy used by the installers) is a gitignored build artifact — if `tauri dev` ever complains about it, generate it once with `node scripts/bundle-cli.mjs`:
+Note for contributors: `src-tauri/binaries/` (the sidecar copies used by the installers — the `umux` CLI and the `umux-storestation` daemon) is a gitignored build artifact — if `tauri dev` ever complains about them, generate them once with `node scripts/bundle-cli.mjs`:
 
 ```bash
 cd src-tauri
-cargo build --release --package umux
-# → src-tauri/target/release/umux
+cargo build --release --package umux --package umux-storestation
+# → src-tauri/target/release/umux + umux-storestation
 ```
 
-Every command that touches a store needs a target: `--desk` (the desktop app's store) or `--term` (the terminal-UI store, whose TUI ships in v1.7.0).
+Every command that touches a store needs a target: `--desk` (the desktop app's store) or `--term` (the terminal-UI store, whose TUI ships in v1.9.0).
 
 ```bash
 umux list --desk                    # saved workspaces as JSON
@@ -371,7 +405,7 @@ umux notify "build finished"        # desktop notification, no app needed
 
 ### Exchange format
 
-`umux export` writes a **neutral, self-describing JSON document** — the format `umux import umux` restores and Desktop↔Terminal transfer (v1.7.0) reads back. Settings are deliberately not part of it: they are per-app configuration, not state you move between surfaces.
+`umux export` writes a **neutral, self-describing JSON document** — the format `umux import umux` restores and Desktop↔Terminal transfer (v1.9.0) reads back. Settings are deliberately not part of it: they are per-app configuration, not state you move between surfaces.
 
 ```json
 {

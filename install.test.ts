@@ -99,4 +99,35 @@ describe("install.sh smoke (issue #65)", () => {
             expect(`${r.stdout}${r.stderr}`).toMatch(/x86_64 only|unsupported/i);
         },
     );
+
+    // --- Issue #90 (v1.7.0 Phase 8): the installer carries the daemon too ---
+    //
+    // Since v1.7.0 the script installs TWO binaries (the `umux` CLI and the
+    // `umux-storestation` daemon). The dry-run must announce both targets so
+    // a cautious user previews the full footprint; the release-note path for
+    // pre-v1.7.0 images (daemon absent → CLI-only install) is exercised by
+    // running the script for real against a pinned old version (HITL).
+
+    it.skipIf(process.platform === "win32")(
+        "lists the umux-storestation daemon beside the CLI among the install targets",
+        () => {
+            for (const os of ["macos", "linux"]) {
+                const r = run({
+                    UMUX_OS: os,
+                    UMUX_ARCH: os === "macos" ? "aarch64" : "x86_64",
+                    UMUX_VERSION: "1.7.0",
+                });
+                expect(r.status, `${os} dry-run must succeed`).toBe(0);
+                const targets = r.stdout.split("\n").filter((l) => l.includes("target:"));
+                expect(
+                    targets,
+                    `${os} dry-run must print two install targets`,
+                ).toHaveLength(2);
+                expect(r.stdout).toMatch(new RegExp(`target:\\s+\\S+/umux$`, "m"));
+                expect(r.stdout).toMatch(
+                    new RegExp(`target:\\s+\\S+/umux-storestation$`, "m"),
+                );
+            }
+        },
+    );
 });

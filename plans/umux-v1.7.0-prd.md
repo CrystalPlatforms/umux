@@ -1,6 +1,6 @@
 # umux v1.7.0 — PRD (umux Storestation + landing-page revamp)
 
-**Status:** planned — the next build target. Discovered 2026-09-04 (the "umux Ecosystem" /ask + /blueprint session) as part of v2.0; **rescheduled 2026-09-12 (PO decision)** to be v1.7.0 — the first ecosystem piece to ship. Built on branch **`core`**, released from `main` like any 1.x version.
+**Status:** shipped — implemented in full on branch **`core`** (issues #83–#91, phases 1–9), released from `main` as **v1.7.0**. Discovered 2026-09-04 (the "umux Ecosystem" /ask + /blueprint session) as part of v2.0; **rescheduled 2026-09-12 (PO decision)** to be v1.7.0 — the first ecosystem piece to ship. Built on branch **`core`**, released from `main` like any 1.x version.
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
 **Scope:** the optional umux Storestation daemon (stories #105–#113) plus the landing-page revamp (story #136 — docs section and more; exact scope decided at v1.7.0 planning).
 **HITL order (PO decision 2026-09-12):** macOS and Windows first, Ubuntu after.
@@ -74,3 +74,14 @@ With Storestation OFF, the desktop app behaves exactly like today — the daemon
 - The rest of the ecosystem (Bridge, PWA, NativeApps) — `development` branch, ships as v3.0.0 (documented in the Ecosystem PRD there).
 - The TUI itself and full live-CLI parity — v1.9.0 and v1.8.0 respectively.
 - Plugins, marketplace, browser pane — Beyond the Ecosystem. Cross-machine synchronization — out of scope (remote access is control, not sync).
+
+## Release Notes (v1.7.0)
+
+- **umux Storestation** — the optional background daemon, **off by default**: with it on, sessions outlive every closed window and **`umux attach`** restores the view; with it off the app behaves exactly like v1.6.x.
+- **Settings → Storestation** — daemon on/off, autostart at login, live status (styled like the import wizard).
+- **Autostart at login** per platform (systemd user unit / LaunchAgent / `HKCU` Run key with the hidden console flag).
+- **Hardened lifecycle** — graceful stop with zero orphan shells, crash-leftover cleanup on next start, single-instance guard.
+- **Headless CLI surface** — `umux status [--json]`, `umux sessions list`, `umux agent-context`, `umux attach`; plus the `umux-storestation run|stop` daemon binary.
+- **Storestation ships inside all five installers** (`.deb` / `.AppImage` / `.rpm` / NSIS `.exe` / `.dmg`, story #113) and updates with the app — the plain-CLI `install.sh` installs the daemon alongside.
+- **Landing-page revamp** (story #136) — a docs section (per-platform install with the unsigned-build notes, build from source, feature tour), a roadmap block, and the ecosystem teaser; deployed on the existing free Cloudflare Pages site.
+- Zero-cost policy unchanged — unsigned builds, GitHub Releases as the only update source.

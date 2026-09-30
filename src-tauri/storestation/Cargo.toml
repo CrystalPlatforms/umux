@@ -1,6 +1,6 @@
 [package]
 name = "umux-storestation"
-version = "1.6.0"
+version = "1.7.0"
 description = "umux Storestation — headless daemon: per-user local socket, protocol v1 (storestation.status/storestation.shutdown)"
 edition = "2021"
 rust-version = "1.77.2"

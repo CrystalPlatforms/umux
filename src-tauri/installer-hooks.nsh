@@ -1,8 +1,12 @@
 ; installer-hooks.nsh — issue #64: put the umux CLI on the user's PATH.
 ;
 ; The installer drops the CLI (umux.exe) into $INSTDIR alongside the app
-; (umux-app.exe). Tauri runs these macros at the marked points of its NSIS
-; script; everything here is BASE NSIS only — no plugins, no StrFunc.
+; (umux-app.exe); since issue #90 the umux-storestation daemon binary rides
+; in the same directory, so this hook needs no daemon-specific logic —
+; exposing the DIRECTORY on PATH covers both, and the uninstaller removes
+; every file Tauri installed (both sidecars) plus the PATH entry below.
+; Tauri runs these macros at the marked points of its NSIS script;
+; everything here is BASE NSIS only — no plugins, no StrFunc.
 ; (First attempt used StrStr, which lives in StrFunc.nsh and is NOT part of
 ; the base instruction set — makensis refused to compile the hook.)
 ;

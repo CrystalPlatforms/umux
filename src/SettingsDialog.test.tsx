@@ -711,7 +711,7 @@ describe('SettingsDialog factory reset (#74)', () => {
   it('shows all three Storestation controls and reports autostart flips (#89)', () => {
     const onStorestationToggle = vi.fn()
     const onStorestationAutostartToggle = vi.fn()
-    const { getByTestId, queryByTestId, rerender } = render(
+    const { getByTestId, rerender } = render(
       <SettingsDialog
         settings={defaultSettings}
         onChange={() => {}}

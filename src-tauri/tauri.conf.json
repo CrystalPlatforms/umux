@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "umux",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "identifier": "com.umux.app",
   "build": {
     "frontendDist": "../dist",
@@ -57,7 +57,8 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/umux"
+      "binaries/umux",
+      "binaries/umux-storestation"
     ],
     "createUpdaterArtifacts": true,
     "icon": [

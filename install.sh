@@ -1,5 +1,6 @@
 #!/bin/sh
-# install.sh — install the `umux` CLI from GitHub Releases (issue #65).
+# install.sh — install the `umux` CLI (+ the umux-storestation daemon since
+# v1.7.0, issue #90) from GitHub Releases (issue #65).
 #
 #   curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh
 #
@@ -9,9 +10,13 @@
 # package formats stay untouched.
 #
 #   macOS : the universal .dmg is mounted and the CLI is copied out of
-#           umux.app/Contents/MacOS/umux (same binary the app bundles).
+#           umux.app/Contents/MacOS/umux (same binary the app bundles);
+#           the daemon rides beside it in the same folder of the bundle.
 #   Linux : the .deb is opened in place and usr/bin/umux is extracted
-#           (needs ar from binutils and tar — present on any distro).
+#           (needs ar from binutils and tar — present on any distro);
+#           usr/bin/umux-storestation is extracted alongside.
+# Releases older than v1.7.0 carry no daemon — the script installs the CLI
+# and skips the daemon with a note instead of failing.
 #
 # Environment overrides (also the test hooks — see install.test.ts):
 #   UMUX_OS           force the platform   (macos | linux)
@@ -124,6 +129,7 @@ if [ "${1:-}" = "--dry-run" ]; then
   say "  version: $VERSION${UMUX_VERSION:+ (pinned)}"
   say "  asset:   $ASSET_NAME"
   say "  target:  $INSTALL_DIR/umux"
+  say "  target:  $INSTALL_DIR/umux-storestation"
   exit 0
 fi
 
@@ -140,6 +146,8 @@ mkdir -p "$INSTALL_DIR"
 
 # --- Extract + install ----------------------------------------------------
 
+DAEMON_INSTALLED=""
+
 case "$OS" in
   macos)
     MNT="$WORK/mnt"
@@ -152,10 +160,21 @@ case "$OS" in
       err "CLI not found inside the image (unexpected bundle layout)"
     fi
     cp "$SRC" "$INSTALL_DIR/umux"
+    # Issue #90: the umux-storestation daemon ships beside the CLI inside
+    # the bundle (Contents/MacOS/) — install it too, so `umux status` and
+    # autostart work from the plain-CLI install exactly as from the app.
+    if [ -f "$MNT/umux.app/Contents/MacOS/umux-storestation" ]; then
+      cp "$MNT/umux.app/Contents/MacOS/umux-storestation" "$INSTALL_DIR/umux-storestation"
+      DAEMON_INSTALLED=1
+    else
+      say "note: this release carries no umux-storestation daemon (pre-v1.7.0 image) — installing the CLI only"
+    fi
     hdiutil detach "$MNT" >/dev/null 2>&1 || true
-    # The downloaded image carries the macOS quarantine flag; a CLI copied
+    # The downloaded image carries the macOS quarantine flag; a binary copied
     # out of it would be stopped by Gatekeeper on first run. Drop it.
     xattr -d com.apple.quarantine "$INSTALL_DIR/umux" 2>/dev/null || true
+    [ -z "$DAEMON_INSTALLED" ] ||
+      xattr -d com.apple.quarantine "$INSTALL_DIR/umux-storestation" 2>/dev/null || true
     ;;
   linux)
     command -v ar >/dev/null 2>&1 ||
@@ -177,10 +196,22 @@ case "$OS" in
     done
     [ -n "$EXTRACTED" ] || err "usr/bin/umux not found inside the .deb"
     mv "$EXTRACTED" "$INSTALL_DIR/umux"
+    # Issue #90: extract the daemon from the same payload — it lives beside
+    # the CLI in /usr/bin on v1.7.0+ images.
+    for path in usr/bin/umux-storestation ./usr/bin/umux-storestation; do
+      if ar p "$PKG" "$MEMBER" | tar -x -C "$WORK" -O "$path" > "$WORK/umux-storestation" 2>/dev/null; then
+        mv "$WORK/umux-storestation" "$INSTALL_DIR/umux-storestation"
+        DAEMON_INSTALLED=1
+        break
+      fi
+    done
+    [ -n "$DAEMON_INSTALLED" ] ||
+      say "note: this .deb carries no umux-storestation daemon (pre-v1.7.0 package) — installing the CLI only"
     ;;
 esac
 
 chmod +x "$INSTALL_DIR/umux"
+[ -z "$DAEMON_INSTALLED" ] || chmod +x "$INSTALL_DIR/umux-storestation"
 
 # --- Post-install check ---------------------------------------------------
 # Only meaningful for a native install — cross-extracting (e.g. the Linux
@@ -196,12 +227,22 @@ if [ "$OS" = "$HOST_OS" ]; then
   if ! "$INSTALL_DIR/umux" --version >/dev/null 2>&1; then
     err "installed binary failed to run — see https://github.com/$REPO#umux-on-your-path"
   fi
+  if [ -n "$DAEMON_INSTALLED" ] && ! "$INSTALL_DIR/umux-storestation" --version >/dev/null 2>&1; then
+    err "installed umux-storestation daemon failed to run — see https://github.com/$REPO#umux-on-your-path"
+  fi
 fi
 
 if [ "$OS" = "$HOST_OS" ]; then
   say "Installed: $INSTALL_DIR/umux ($("$INSTALL_DIR/umux" --version))"
 else
   say "Installed: $INSTALL_DIR/umux (cross-extracted $OS binary — not executed here)"
+fi
+if [ -n "$DAEMON_INSTALLED" ]; then
+  if [ "$OS" = "$HOST_OS" ]; then
+    say "Installed: $INSTALL_DIR/umux-storestation ($("$INSTALL_DIR/umux-storestation" --version))"
+  else
+    say "Installed: $INSTALL_DIR/umux-storestation (cross-extracted $OS binary — not executed here)"
+  fi
 fi
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

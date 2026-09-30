@@ -25,6 +25,15 @@ import { JSDOM } from "jsdom";
 //    an inline-SVG onerror fallback until real files are dropped in.
 //  - GoatCounter is ACTIVE (account `crystalstudio`, 2026-08-27) and is the
 //    page's single external script; the UI logic itself stays inline.
+//  - #91 (v1.7.0 Phase 9) adds three more sections: docs (per-platform
+//    install + first-run + build from source + feature tour), a roadmap
+//    block and an ecosystem teaser. Their internal anchors must resolve to
+//    real ids; "no dead external links" is asserted as a destination
+//    WHITELIST (we can't fetch the network from a unit test — a link to an
+//    unknown host/path shape is the failure mode worth catching here).
+//    Roadmap copy mirrors the 2026-09-12 renumbered roadmap (Storestation
+//    v1.7.0, Core Always-On v1.7.5, live CLI v1.8.0, TUI v1.9.0,
+//    Agents View v2.0.0).
 //  - Boundary: intentionally NOT tested — the real Cloudflare deployment
 //    (HITL by Adam), visual appearance, shields.io uptime, and whether the
 //    actual GIF/screenshots exist yet.
@@ -197,10 +206,13 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
     });
 
     it("shows the real product screenshots with a placeholder fallback", () => {
-        // Adam's shots (2026-08-27): umux-first is the big hero image,
-        // umux-agent illustrates the agent-status feature, umux-session the
-        // session-restore one. All live in landing/assets/. A broken image
-        // must still degrade to the inline placeholder, never a broken-icon.
+        // Every shipped-feature tile carries its own screenshot (Adam,
+        // 2026-09-16): umux-first is the big hero image, and the tiles use
+        // umux-workspaces / umux-terminal / umux-agent / umux-ssh /
+        // umux-updates / umux-session / umux-cmux. Only the herdr tile stays
+        // imageless — that feature isn't built yet, there is nothing to shoot.
+        // A broken image must still degrade to the inline placeholder, never
+        // a broken-icon.
         const doc = parse();
         const hero = doc.querySelector(".demo-frame img");
         expect(hero?.getAttribute("src")).toBe("assets/umux-first.png");
@@ -208,18 +220,27 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         const features = [...doc.querySelectorAll(".feature")];
         const byHeading = (re: RegExp) =>
             features.find((f) => re.test(f.querySelector("h2")?.textContent ?? ""));
-        expect(
-            byHeading(/agent status/i)?.querySelector("img")?.getAttribute("src"),
-        ).toBe("assets/umux-agent.png");
-        expect(
-            byHeading(/session restore/i)?.querySelector("img")?.getAttribute("src"),
-        ).toBe("assets/umux-session.png");
+        const expectTileImg = (re: RegExp, file: string) =>
+            expect(
+                byHeading(re)?.querySelector("img")?.getAttribute("src"),
+                `the "${re}" tile must use assets/${file}`,
+            ).toBe(`assets/${file}`);
+        expectTileImg(/workspaces/i, "umux-workspaces.png");
+        expectTileImg(/embedded terminal/i, "umux-terminal.png");
+        expectTileImg(/agent status/i, "umux-agent.png");
+        expectTileImg(/ssh panels/i, "umux-ssh.png");
+        expectTileImg(/in-app updates/i, "umux-updates.png");
+        expectTileImg(/session restore/i, "umux-session.png");
+        expectTileImg(/import from cmux/i, "umux-cmux.png");
 
-        const media = [
-            hero,
-            byHeading(/agent status/i)?.querySelector("img"),
-            byHeading(/session restore/i)?.querySelector("img"),
-        ];
+        // Exactly one tile stays imageless: herdr (coming soon).
+        const imgTiles = features.filter((f) => f.querySelector("img"));
+        expect(imgTiles, "every tile except herdr must carry a screenshot").toHaveLength(
+            features.length - 1,
+        );
+        expect(byHeading(/herdr/i)?.querySelector("img")).toBeNull();
+
+        const media = [hero, ...doc.querySelectorAll(".feature img")];
         for (const img of media) {
             expect(
                 img?.getAttribute("onerror"),
@@ -230,16 +251,17 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(html).not.toMatch(/demo\.gif|screenshot-(linux|macos|windows)\.png/);
     });
 
-    it("leads with the one-line pitch and the six feature tiles", () => {
-        // Hero pitch + six tiles: the three v1 highlights (workspaces & panels,
-        // agent status & notifications, session restore) plus import from cmux
-        // (shipped), import from herdr and embedded terminal (both announced as
-        // not-yet-available).
+    it("leads with the one-line pitch and the eight feature tiles", () => {
+        // Hero pitch + eight tiles (2026-09-16 refresh to the v1.6.2 state):
+        // workspaces & panels, embedded terminal (shipped since v0.1 — its
+        // old "coming soon" badge was wrong), agent status & notifications,
+        // SSH panels, in-app updates, session restore, import from cmux
+        // (shipped) and import from herdr (the only still-unbuilt one).
         const doc = parse();
         expect(doc.querySelector("h1")?.textContent ?? "").toMatch(/terminal workspace/i);
 
         const features = [...doc.querySelectorAll(".feature")];
-        expect(features, "expected six feature tiles").toHaveLength(6);
+        expect(features, "expected eight feature tiles").toHaveLength(8);
         const text = features
             .map((f) => f.textContent?.toLowerCase() ?? "")
             .join("\n");
@@ -251,12 +273,17 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(text).toMatch(/import from cmux/);
         expect(text).toMatch(/import from herdr/);
         expect(text).toMatch(/embedded terminal/);
+        expect(text).toMatch(/ssh/);
+        expect(text).toMatch(/in-app updates/);
         // Unbuilt features must say so up front on their tiles.
         const byHeading = (re: RegExp) =>
             features.find((f) => re.test(f.querySelector("h2")?.textContent ?? ""));
-        for (const tile of [byHeading(/herdr/i), byHeading(/embedded terminal/i)]) {
-            expect(tile?.textContent ?? "").toMatch(/coming soon/i);
-        }
+        expect(byHeading(/herdr/i)?.textContent ?? "").toMatch(/coming soon/i);
+        // Regression guard: the embedded terminal shipped long ago (xterm.js,
+        // v0.1) — the "coming soon" badge it once carried must never return.
+        expect(byHeading(/embedded terminal/i)?.textContent ?? "").not.toMatch(
+            /coming soon/i,
+        );
     });
 
     it("renders link-preview meta (Open Graph / Twitter card)", () => {
@@ -438,6 +465,14 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         );
     });
 
+    it("never mentions telemetry anywhere on the page", () => {
+        // Standing rule (Adam, 2026-09-16): the word "telemetry" must not
+        // appear on the landing — no claims about it in either direction.
+        // The old CTA promised "no telemetry", which stopped being a claim
+        // the page should make; the topic stays off the page entirely.
+        expect(html.toLowerCase()).not.toContain("telemetry");
+    });
+
     it("gates animations behind JS and honors reduced motion", () => {
         // Reveal-hiding may only apply under `html.js` (set by a tiny head
         // script), so a no-JS visitor never sees blank sections. A
@@ -448,5 +483,187 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         const style = doc.querySelector("style")?.textContent ?? "";
         expect(style).toMatch(/\.js \.reveal\s*\{/);
         expect(style).toContain("prefers-reduced-motion: reduce");
+    });
+});
+
+// --- Docs, roadmap and ecosystem sections (#91, v1.7.0 Phase 9) -----------
+
+describe("umux landing page — docs, roadmap, ecosystem (Issue #91, Phase 9)", () => {
+    it("wires the header nav to the page's own sections", () => {
+        // Four plain anchor links at the top; each must resolve to a real
+        // section id so the nav can never 404 the visitor within the page.
+        const doc = parse();
+        const nav = doc.querySelector("nav.nav-links");
+        expect(nav, "header nav missing").toBeTruthy();
+        const hrefs = [...nav!.querySelectorAll("a")].map((a) =>
+            a.getAttribute("href"),
+        );
+        expect(hrefs).toEqual(["#features", "#docs", "#roadmap", "#ecosystem"]);
+        for (const href of hrefs) {
+            const target = doc.getElementById(href!.slice(1));
+            expect(target, `nav anchor ${href} resolves to nothing`).toBeTruthy();
+        }
+    });
+
+    it("documents the install for all three platforms", () => {
+        // The docs section is the visitor's substitute for digging through
+        // the README: one card per platform, each naming its package format
+        // and the exact first-run workaround for unsigned builds.
+        const doc = parse();
+        const docs = doc.querySelector("section.docs#docs");
+        expect(docs, "docs section missing").toBeTruthy();
+        const cards = [...docs!.querySelectorAll(".doc-card")];
+        const cardText = (re: RegExp) => {
+            const card = cards.find((c) => re.test(c.querySelector("h3")?.textContent ?? ""));
+            expect(card, `doc card matching ${re} missing`).toBeTruthy();
+            return (card?.textContent ?? "").toLowerCase();
+        };
+
+        const linux = cardText(/^linux/i);
+        expect(linux).toMatch(/apt install/);
+        expect(linux).toMatch(/appimage/);
+        expect(linux).toMatch(/dnf|zypper/);
+
+        const windows = cardText(/windows/i);
+        expect(windows).toMatch(/smartscreen/i);
+        expect(windows).toMatch(/run anyway/i);
+        expect(windows).toMatch(/umux-storestation/);
+
+        const macos = cardText(/macos/i);
+        expect(macos).toMatch(/dmg/i);
+        expect(macos).toMatch(/open anyway|right-click/);
+        expect(macos).toMatch(/contents\/macos/);
+    });
+
+    it("documents building from source", () => {
+        // Build-from-source must name the prerequisites and the two commands
+        // a newcomer runs, and hand off to the README for the full guide.
+        const doc = parse();
+        const cards = [...doc.querySelectorAll(".doc-card")];
+        const build = cards.find((c) =>
+            /build from source/i.test(c.querySelector("h3")?.textContent ?? ""),
+        );
+        expect(build, "build-from-source card missing").toBeTruthy();
+        const text = build?.textContent ?? "";
+        expect(text).toMatch(/node\.js 20/i);
+        expect(text).toMatch(/rustup/i);
+        expect(text).toMatch(/npm install/);
+        expect(text).toMatch(/tauri dev/);
+        expect(text).toMatch(/tauri build/);
+        const link = build?.querySelector("a[href*='CrystalPlatforms/umux']");
+        expect(link, "build card must link the README guide").toBeTruthy();
+    });
+
+    it("carries the feature tour distilled from the README", () => {
+        // Ten shipped capabilities, one line each — the tour must cover the
+        // breadth of the tool (not just the hero features) and end with the
+        // CLI and Storestation, which are the v1.7.0-era additions.
+        const doc = parse();
+        const tour = doc.querySelector(".tour-grid");
+        expect(tour, "feature tour missing").toBeTruthy();
+        const items = [...tour!.querySelectorAll("div > div, div > strong")];
+        const text = (tour?.textContent ?? "").toLowerCase();
+        for (const topic of [
+            "workspaces",
+            "panels",
+            "terminal",
+            "agent status",
+            "ssh",
+            "session restore",
+            "updates",
+            "keyboard",
+            "cli",
+            "storestation",
+        ]) {
+            expect(text, `feature tour must mention ${topic}`).toContain(topic);
+        }
+        expect(items.length, "expected a substantial tour").toBeGreaterThanOrEqual(10);
+    });
+
+    it("shows the roadmap: the current release and what's next", () => {
+        // Copy mirrors the renumbered roadmap (2026-09-12): Storestation is
+        // v1.7.0 (the current item), then Core Always-On v1.7.5, live CLI
+        // v1.8.0, TUI v1.9.0, Agents View v2.0.0. Exactly one timeline entry
+        // may be marked as current.
+        const doc = parse();
+        const roadmap = doc.querySelector("section.roadmap#roadmap");
+        expect(roadmap, "roadmap section missing").toBeTruthy();
+        const text = (roadmap?.textContent ?? "").toLowerCase();
+        expect(text).toMatch(/v1\.7\.0/);
+        expect(text).toMatch(/storestation/);
+        expect(text).toMatch(/v1\.7\.5/);
+        expect(text).toMatch(/always-on|core/i);
+        expect(text).toMatch(/v1\.8\.0/);
+        expect(text).toMatch(/v1\.9\.0/);
+        expect(text).toMatch(/v2\.0\.0/);
+        expect(text).toMatch(/agents view/);
+
+        const items = [...roadmap!.querySelectorAll(".timeline-item")];
+        const current = items.filter((i) => i.classList.contains("now"));
+        expect(current, "exactly one roadmap entry may be current").toHaveLength(1);
+        expect(current[0]?.textContent ?? "").toMatch(/v1\.7\.0/);
+    });
+
+    it("teases the ecosystem: Bridge, PWA and NativeApps", () => {
+        // The "what's next" band names all three companions briefly — enough
+        // to set direction, not a full roadmap for them (they live on the
+        // development branch).
+        const doc = parse();
+        const eco = doc.querySelector("section.ecosystem#ecosystem");
+        expect(eco, "ecosystem section missing").toBeTruthy();
+        const text = eco?.textContent ?? "";
+        expect(text).toMatch(/umux bridge/i);
+        expect(text).toMatch(/pwa/i);
+        expect(text).toMatch(/nativeapp|android & ios/i);
+        const cards = eco!.querySelectorAll(".eco-card");
+        expect(cards, "expected three ecosystem cards").toHaveLength(3);
+    });
+
+    it("resolves every internal anchor on the page", () => {
+        // Every href="#name" (the whole page, not just the nav) must point
+        // at an existing id — a dead in-page anchor is a silent 404.
+        const doc = parse();
+        const internal = [...doc.querySelectorAll("a[href^='#']")];
+        expect(internal.length, "the page should have internal anchors").toBeGreaterThan(0);
+        for (const a of internal) {
+            const id = a.getAttribute("href")!.slice(1);
+            expect(
+                doc.getElementById(id),
+                `internal anchor #${id} resolves to nothing`,
+            ).toBeTruthy();
+        }
+    });
+
+    it("links only to known-good external destinations", () => {
+        // "No dead external links" as a whitelist: every http(s) href must
+        // live on a host the project actually controls or explicitly relies
+        // on. A new link to a typo'd or renamed host fails here before a
+        // visitor hits it. Fetchability itself is the HITL click-through.
+        const allowed = [
+            "https://github.com/CrystalPlatforms/umux",
+            "https://raw.githubusercontent.com/CrystalPlatforms/umux/",
+            "https://umux.pages.dev/",
+            "https://crystal-studio.dev",
+            "https://img.shields.io/",
+            "https://gc.zgo.at/",
+            "https://rustup.rs",
+        ];
+        const doc = parse();
+        const external = [
+            ...doc.querySelectorAll("a[href^='http']"),
+        ].map((a) => a.getAttribute("href")!);
+        expect(external.length, "expected external links to audit").toBeGreaterThan(0);
+        for (const href of external) {
+            expect(
+                allowed.some((base) => href.startsWith(base)),
+                `unexpected external destination: ${href}`,
+            ).toBe(true);
+        }
+    });
+
+    it("never mentions telemetry in the new sections either", () => {
+        // Same standing rule as the base page (Adam, 2026-09-16), extended
+        // over the #91 sections: the topic stays off the page entirely.
+        expect(html.toLowerCase()).not.toContain("telemetry");
     });
 });

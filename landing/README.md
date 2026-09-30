@@ -21,8 +21,13 @@ Media żyją w `landing/assets/` pod własnymi nazwami.
 | Plik | Gdzie się pokazuje |
 |---|---|
 | `assets/umux-first.png` | duży obraz w hero (główne okno: workspaces, taby, panele) |
+| `assets/umux-workspaces.png` | karta „Workspaces & panels" (sidebar: grupy, taby, panele) |
+| `assets/umux-terminal.png` | karta „Embedded terminal" (vim/htop w panelu) |
 | `assets/umux-agent.png` | karta „Agent status & notifications" |
+| `assets/umux-ssh.png` | karta „SSH panels" (panel ze zdalną maszyną) |
+| `assets/umux-updates.png` | karta „In-app updates" (Settings → App updates) |
 | `assets/umux-session.png` | karta „Session restore" |
+| `assets/umux-cmux.png` | karta „Import from cmux" (kreator importu) |
 | `assets/og.jpg` | podgląd linku na X/Discord/LinkedIn (meta `og:image`, 1200×630) |
 | `assets/umux-logo.png` | logo w nagłówku |
 | `assets/umux-favicon.ico` | ikona karty przeglądarki |
