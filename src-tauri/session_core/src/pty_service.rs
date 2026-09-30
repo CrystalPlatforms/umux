@@ -66,12 +66,25 @@ mod job {
         OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
     };
 
+    /// A HANDLE that may live inside a `static`. A raw `*mut c_void` is
+    /// neither Send nor Sync, but a Win32 handle is an opaque per-process
+    /// OS token with no thread affinity — the newtype only restores the
+    /// traits the raw pointer loses.
+    #[derive(Clone, Copy)]
+    struct SharedHandle(HANDLE);
+    // SAFETY: the wrapped handle is created once, shared read-only and
+    // intentionally leaked for the process lifetime (kill-on-close REQUIRES
+    // it to close only at process death), so sharing it across threads is
+    // sound; no code ever mutates or closes it.
+    unsafe impl Send for SharedHandle {}
+    unsafe impl Sync for SharedHandle {}
+
     /// The process-wide kill-on-close job. A creation or configuration
     /// failure yields None — every caller treats a missing job as "no crash
     /// guarantee for this child" (the explicit kill paths still work).
     fn job_handle() -> Option<HANDLE> {
-        static JOB: OnceLock<Option<HANDLE>> = OnceLock::new();
-        *JOB.get_or_init(|| unsafe {
+        static JOB: OnceLock<Option<SharedHandle>> = OnceLock::new();
+        let handle = *JOB.get_or_init(|| unsafe {
             // SAFETY: default security + no name; the returned handle is
             // stored once and intentionally leaked for the process lifetime
             // (kill-on-close REQUIRES it to close only at process death).
@@ -90,8 +103,9 @@ mod job {
             if ok == 0 {
                 return None;
             }
-            Some(job)
-        })
+            Some(SharedHandle(job))
+        });
+        handle.map(|wrapped| wrapped.0)
     }
 
     /// Assign one freshly spawned child (by pid) to the process job. Best

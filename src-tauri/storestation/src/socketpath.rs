@@ -31,6 +31,11 @@ pub fn session_pids_path(config_dir: &Path) -> PathBuf {
     config_dir.join("storestation.pids")
 }
 
+/// The daemon's pipe namespace (windows only) — the binary name, so the
+/// test's `\\.\pipe\umux-storestation-` prefix and the docs stay honest.
+#[cfg(windows)]
+const DAEMON_NAME: &str = "umux-storestation";
+
 /// The Windows named-pipe name for a config dir (windows only).
 #[cfg(windows)]
 pub fn pipe_name(config_dir: &Path) -> String {

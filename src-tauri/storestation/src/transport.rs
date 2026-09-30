@@ -272,37 +272,52 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use std::sync::OnceLock;
     use std::time::Instant;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, ServerOptions};
+    use tokio::net::windows::named_pipe::{
+        ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+    };
 
     /// ERROR_PIPE_BUSY — every other pipe instance is busy; retrying is the
     /// documented client behavior for local RPC pipes.
     const ERROR_PIPE_BUSY: i32 = 231;
 
-    fn new_runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio current-thread runtime")
+    /// The ONE process-wide runtime for all pipe I/O. Tokio named pipes
+    /// register with the reactor of the runtime they were created under —
+    /// an operation from a DIFFERENT runtime would park forever waiting on
+    /// an IOCP completion nobody drains. A per-object runtime (the first
+    /// draft) broke exactly that, because `Listener::bind` created each
+    /// pipe under ITS runtime while the `Stream` wrappers drove the same
+    /// handle on freshly built ones. Every pipe is therefore created and
+    /// driven through this shared runtime; `block_on` from arbitrary
+    /// threads is safe on a multi-thread runtime.
+    fn shared() -> &'static tokio::runtime::Runtime {
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("tokio runtime for named-pipe transport")
+        })
     }
 
     pub struct Listener {
-        rt: tokio::runtime::Runtime,
         name: String,
         server: Option<NamedPipeServer>,
     }
 
     impl Listener {
         pub fn bind(config_dir: &Path) -> io::Result<Listener> {
-            let rt = new_runtime();
             let name = socketpath::pipe_name(config_dir);
-            let server = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&name)?;
+            let server = shared().block_on(async {
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&name)
+            })?;
             Ok(Listener {
-                rt,
                 name,
                 server: Some(server),
             })
@@ -318,14 +333,16 @@ mod imp {
             if stop() {
                 return Ok(None);
             }
-            let mut server = self.server.as_mut().expect("listener is bound");
-            match self.rt.block_on(async {
+            let server = self.server.as_mut().expect("listener is bound");
+            let connected = shared().block_on(async {
                 tokio::time::timeout(ACCEPT_TICK, server.connect()).await
-            }) {
+            });
+            match connected {
                 Ok(Ok(())) => {
-                    let connected = self.server.take().expect("just used");
-                    self.server = Some(ServerOptions::new().create(&self.name)?);
-                    Ok(Some(super::Stream::new(connected)))
+                    let used = self.server.take().expect("just used");
+                    self.server =
+                        Some(shared().block_on(async { ServerOptions::new().create(&self.name) })?);
+                    Ok(Some(super::Stream::new(used)))
                 }
                 Ok(Err(e)) => Err(e),
                 Err(_elapsed) => Ok(None),
@@ -333,71 +350,58 @@ mod imp {
         }
     }
 
-    /// Server side of one accepted connection — owns its tiny runtime, so a
-    /// handler thread needs nothing from the accept loop.
-    pub struct Stream {
-        rt: tokio::runtime::Runtime,
-        pipe: NamedPipeServer,
-    }
+    /// Server side of one accepted connection.
+    pub struct Stream(NamedPipeServer);
 
     impl Stream {
         fn new(pipe: NamedPipeServer) -> Stream {
-            Stream {
-                rt: new_runtime(),
-                pipe,
-            }
+            Stream(pipe)
         }
     }
 
     impl io::Read for Stream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.rt.block_on(async { self.pipe.read(buf).await })
+            shared().block_on(async { self.0.read(buf).await })
         }
     }
 
     impl io::Write for Stream {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.rt.block_on(async { self.pipe.write(buf).await })
+            shared().block_on(async { self.0.write(buf).await })
         }
         fn flush(&mut self) -> io::Result<()> {
-            self.rt.block_on(async { self.pipe.flush().await })
+            shared().block_on(async { self.0.flush().await })
         }
     }
 
     /// Client side — what the CLI (and later the desktop driver) holds.
-    pub struct ClientStream {
-        rt: tokio::runtime::Runtime,
-        pipe: NamedPipeClient,
-    }
+    pub struct ClientStream(NamedPipeClient);
 
     impl io::Read for ClientStream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.rt.block_on(async { self.pipe.read(buf).await })
+            shared().block_on(async { self.0.read(buf).await })
         }
     }
 
     impl io::Write for ClientStream {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.rt.block_on(async { self.pipe.write(buf).await })
+            shared().block_on(async { self.0.write(buf).await })
         }
         fn flush(&mut self) -> io::Result<()> {
-            self.rt.block_on(async { self.pipe.flush().await })
+            shared().block_on(async { self.0.flush().await })
         }
     }
 
     /// Open the pipe; ENOENT answers instantly (offline check), a busy
-    /// server is retried within the connect budget.
+    /// server is retried within the connect budget. The open itself needs
+    /// the runtime context (the handle registers with the reactor there),
+    /// hence the `block_on` wrapper around the synchronous call.
     pub fn connect(config_dir: &Path) -> io::Result<ClientStream> {
         let name = socketpath::pipe_name(config_dir);
         let deadline = Instant::now() + CONNECT_TIMEOUT;
         loop {
-            match ClientOptions::new().open(&name) {
-                Ok(pipe) => {
-                    return Ok(ClientStream {
-                        rt: new_runtime(),
-                        pipe,
-                    })
-                }
+            match shared().block_on(async { ClientOptions::new().open(&name) }) {
+                Ok(pipe) => return Ok(ClientStream(pipe)),
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {}
                 Err(e) => return Err(e),
             }
@@ -418,66 +422,72 @@ mod imp {
     /// The pipe is a kernel object — there is no stale file to remove.
     pub fn remove_socket_file(_config_dir: &Path) {}
 
-    /// Split one accepted connection into read/write halves. tokio's
-    /// `into_split` hands out owned halves; each gets its own tiny
-    /// current-thread runtime so the reader thread and the writer thread
-    /// never contend for one runtime.
+    /// Split one accepted connection into read/write halves.
+    /// `tokio::io::split` is the generic BiLock split (named pipes have no
+    /// owned-halves API): the halves share one lock that is held only
+    /// across a `poll`, never across an await — so the connection's reader
+    /// thread can block in `read` while the writer thread pushes session
+    /// data without starving it.
     pub fn split_stream(stream: super::Stream) -> io::Result<super::StreamHalves> {
-        let Stream { rt: _, pipe } = stream;
-        let (read, write) = pipe.into_split();
+        let (read, write) = tokio::io::split(stream.0);
         Ok(super::StreamHalves {
-            read: Box::new(ReadHalf {
-                rt: new_runtime(),
-                half: read,
-            }),
-            write: Box::new(WriteHalf {
-                rt: new_runtime(),
-                half: write,
-            }),
+            read: Box::new(BlockingHalf { half: read }),
+            write: Box::new(BlockingHalf { half: write }),
         })
     }
 
     /// Split a client-side stream the same way (the desktop daemon-client
     /// driver's persistent connection, phase 4).
     pub fn split_client(stream: ClientStream) -> io::Result<super::StreamHalves> {
-        let ClientStream { rt: _, pipe } = stream;
-        let (read, write) = pipe.into_split();
+        let (read, write) = tokio::io::split(stream.0);
         Ok(super::StreamHalves {
-            read: Box::new(ReadHalf {
-                rt: new_runtime(),
-                half: read,
-            }),
-            write: Box::new(WriteHalf {
-                rt: new_runtime(),
-                half: write,
-            }),
+            read: Box::new(BlockingHalf { half: read }),
+            write: Box::new(BlockingHalf { half: write }),
         })
     }
 
-    /// The read half of a split stream — owned by the connection's reader.
-    struct ReadHalf {
-        rt: tokio::runtime::Runtime,
-        half: tokio::net::windows::named_pipe::OwnedReadHalf,
+    /// One half of a `tokio::io::split` pipe, driven back to blocking
+    /// semantics through the shared runtime.
+    struct BlockingHalf<R> {
+        half: R,
     }
 
-    impl io::Read for ReadHalf {
+    /// The server-side read half: `tokio::io::ReadHalf<NamedPipeServer>`.
+    type ServerReadHalf = tokio::io::ReadHalf<NamedPipeServer>;
+    /// The server-side write half.
+    type ServerWriteHalf = tokio::io::WriteHalf<NamedPipeServer>;
+    /// The client-side read half: `tokio::io::ReadHalf<NamedPipeClient>`.
+    type ClientReadHalf = tokio::io::ReadHalf<NamedPipeClient>;
+    /// The client-side write half.
+    type ClientWriteHalf = tokio::io::WriteHalf<NamedPipeClient>;
+
+    impl io::Read for BlockingHalf<ServerReadHalf> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.rt.block_on(async { self.half.read(buf).await })
+            shared().block_on(async { self.half.read(buf).await })
         }
     }
 
-    /// The write half of a split stream — owned by the connection's writer.
-    struct WriteHalf {
-        rt: tokio::runtime::Runtime,
-        half: tokio::net::windows::named_pipe::OwnedWriteHalf,
+    impl io::Read for BlockingHalf<ClientReadHalf> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            shared().block_on(async { self.half.read(buf).await })
+        }
     }
 
-    impl io::Write for WriteHalf {
+    impl io::Write for BlockingHalf<ServerWriteHalf> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.rt.block_on(async { self.half.write(buf).await })
+            shared().block_on(async { self.half.write(buf).await })
         }
         fn flush(&mut self) -> io::Result<()> {
-            self.rt.block_on(async { self.half.flush().await })
+            shared().block_on(async { self.half.flush().await })
+        }
+    }
+
+    impl io::Write for BlockingHalf<ClientWriteHalf> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            shared().block_on(async { self.half.write(buf).await })
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            shared().block_on(async { self.half.flush().await })
         }
     }
 }

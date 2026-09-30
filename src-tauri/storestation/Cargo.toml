@@ -31,10 +31,12 @@ ctrlc = "3"
 
 # Windows transport: a named pipe instead of a UDS (std has no named-pipe
 # support). Tokio is only pulled on Windows targets; macOS/Linux compile
-# pure-std code paths. windows-sys (#89) also hides the console window for
-# `run --hidden` (the autostart launch) — versions match the app crate.
+# pure-std code paths. `io-util` provides the AsyncReadExt/AsyncWriteExt
+# traits the blocking pipe wrappers call. windows-sys (#89) also hides the
+# console window for `run --hidden` (the autostart launch) — versions match
+# the app crate.
 [target.'cfg(windows)'.dependencies]
-tokio = { version = "1", features = ["net", "rt", "time"] }
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time", "io-util"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_Console",
