@@ -243,55 +243,22 @@
     .cta p { color: var(--muted); margin-top: 8px; }
     .cta-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
 
-    /* Docs section (#91): per-platform install, first run, build from
-       source and the feature tour — learn the tool without the repo. */
-    .docs { padding-top: 56px; padding-bottom: 24px; }
-    .docs > h2, .roadmap > h2, .ecosystem > h2 {
+    /* Roadmap / changelog block (#91): every released version and what's
+       planned, one short line each. */
+    .roadmap { padding-top: 40px; padding-bottom: 24px; }
+    .roadmap > h2 {
       font-size: clamp(1.4rem, 3vw, 1.8rem);
       letter-spacing: -0.01em;
       text-align: center;
       margin-bottom: 8px;
     }
-    .docs > .section-lead, .roadmap > .section-lead, .ecosystem > .section-lead {
+    .roadmap > .section-lead {
       color: var(--muted);
       text-align: center;
       max-width: 46rem;
       margin: 0 auto 28px;
       font-size: 0.98rem;
     }
-    .doc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-    .doc-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 20px;
-    }
-    .doc-card.wide { grid-column: 1 / -1; }
-    .doc-card h3 { font-size: 1rem; color: var(--accent); margin-bottom: 10px; }
-    .doc-card p { color: var(--muted); font-size: 0.92rem; }
-    .doc-card ol, .doc-card ul { color: var(--muted); font-size: 0.92rem; padding-left: 20px; display: grid; gap: 6px; }
-    .doc-card li strong { color: var(--text); font-weight: 600; }
-    .doc-card code {
-      color: var(--accent);
-      font: 0.88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      overflow-wrap: anywhere;
-    }
-    .doc-card a { color: var(--accent); text-decoration: none; }
-    .tour-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 10px 24px;
-      margin-top: 4px;
-    }
-    .tour-grid div { color: var(--muted); font-size: 0.92rem; }
-    .tour-grid strong { color: var(--text); font-weight: 600; }
-    @media (max-width: 720px) {
-      .doc-grid { grid-template-columns: 1fr; }
-      .tour-grid { grid-template-columns: 1fr; }
-    }
-
-    /* Roadmap / changelog block (#91): where umux is and what's next. */
-    .roadmap { padding-top: 40px; padding-bottom: 24px; }
     .timeline { max-width: 760px; margin: 0 auto; display: grid; gap: 10px; }
     .timeline-item {
       display: flex;
@@ -318,27 +285,6 @@
       color: var(--muted);
       white-space: nowrap;
     }
-
-    /* Ecosystem teaser (#91): Bridge / PWA / NativeApps direction. */
-    .ecosystem { padding-top: 40px; padding-bottom: 24px; }
-    .ecosystem .eco-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-      max-width: 900px;
-      margin: 0 auto;
-    }
-    .eco-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 20px;
-      text-align: center;
-    }
-    .eco-card svg { width: 26px; height: 26px; color: var(--accent); margin-bottom: 10px; }
-    .eco-card h3 { font-size: 1rem; margin-bottom: 6px; }
-    .eco-card p { color: var(--muted); font-size: 0.9rem; }
-    @media (max-width: 720px) { .ecosystem .eco-grid { grid-template-columns: 1fr; } }
 
     /* Motion: subtle, JS-gated (no JS = everything visible), reduced-motion
        users get content instantly with zero transitions. */
@@ -427,9 +373,7 @@
     <a class="brand" href="https://github.com/CrystalPlatforms/umux"><img src="assets/umux-logo.png" alt="umux logo"></a>
     <nav class="nav-links" aria-label="Page sections">
       <a href="#features">Features</a>
-      <a href="#docs">Docs</a>
       <a href="#roadmap">Roadmap</a>
-      <a href="#ecosystem">What's next</a>
     </nav>
     <div class="header-actions">
       <a class="icon-btn" href="https://github.com/CrystalPlatforms/umux" aria-label="umux on GitHub" target="_blank" rel="noopener">
@@ -566,112 +510,81 @@
     <p><a href="https://github.com/CrystalPlatforms/umux#installation">Full installation instructions →</a></p>
   </section>
 
-  <section class="docs reveal" id="docs">
-    <h2>Documentation</h2>
-    <p class="section-lead">The short version of everything you need to install, run and build umux. The README in the repo carries the full detail.</p>
-    <div class="doc-grid">
-      <div class="doc-card">
-        <h3>Linux</h3>
-        <ol>
-          <li><strong>.deb</strong> (Ubuntu / Debian): <code>sudo apt install ./umux_amd64.deb</code> — installs to the system, <code>umux</code> works in any fresh shell.</li>
-          <li><strong>.AppImage</strong> (any distro): <code>chmod +x umux_amd64.AppImage &amp;&amp; ./umux_amd64.AppImage</code> — portable, nothing installed.</li>
-          <li><strong>.rpm</strong> (Fedora / openSUSE): <code>sudo dnf install ./umux_x86_64.rpm</code> (openSUSE: <code>zypper in</code>).</li>
-        </ol>
-      </div>
-      <div class="doc-card">
-        <h3>Windows</h3>
-        <ol>
-          <li>Download <code>umux_x64-setup.exe</code> and run it.</li>
-          <li>On the <strong>SmartScreen</strong> prompt (builds are unsigned — zero-cost policy): <em>More info</em> → <em>Run anyway</em>.</li>
-          <li>The installer puts <code>umux</code> (CLI) and <code>umux-storestation</code> (daemon) on your user PATH automatically — open a <em>new</em> terminal and both work. Uninstalling removes the PATH entry.</li>
-        </ol>
-      </div>
-      <div class="doc-card">
-        <h3>macOS</h3>
-        <ol>
-          <li>Mount <code>umux_universal.dmg</code> (one image, Apple Silicon + Intel) and drag <strong>umux</strong> to Applications.</li>
-          <li>First run (unsigned build): right-click the app → <em>Open</em>, or System Settings → Privacy &amp; Security → <em>Open Anyway</em>.</li>
-          <li>Optional PATH one-liner for the bundled CLI and daemon:
-            <code>echo 'export PATH="/Applications/umux.app/Contents/MacOS:$PATH"' &gt;&gt; ~/.zshrc</code></li>
-        </ol>
-      </div>
-      <div class="doc-card wide">
-        <h3>Build from source</h3>
-        <p>You need <strong>Node.js 20+</strong>, <strong>Rust</strong> (via <a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a>), and on Linux the WebKit/GTK dev packages (<code>libwebkit2gtk-4.1-dev</code>, <code>libappindicator3-dev</code>, <code>librsvg2-dev</code>, <code>patchelf</code>, <code>libssl-dev</code>). Then:</p>
-        <ul>
-          <li><code>git clone https://github.com/CrystalPlatforms/umux &amp;&amp; cd umux</code></li>
-          <li><code>npm install</code></li>
-          <li><code>npm run tauri dev</code> — run it live; <code>npm run tauri build</code> — produce installers</li>
-        </ul>
-        <p>Step-by-step detail, troubleshooting and the test suite: the <a href="https://github.com/CrystalPlatforms/umux#option-b--build-from-source" target="_blank" rel="noopener">README build guide →</a></p>
-      </div>
-      <div class="doc-card wide">
-        <h3>Feature tour</h3>
-        <div class="tour-grid">
-          <div><strong>Workspaces</strong> — one per project, grouped and ordered; your setup persists across restarts.</div>
-          <div><strong>Tabs &amp; unlimited panels</strong> — tabs inside a workspace, any tab splits into as many resizable panels as you need; pane zoom fills a tab and restores itself.</div>
-          <div><strong>Embedded terminal</strong> — a real terminal surface (colors, alternate screen) so vim, htop and fzf render right; opens your own shell.</div>
-          <div><strong>Agent status &amp; notifications</strong> — live working / needs-attention / idle per panel, read from OSC escape sequences; a native ping when a long task finishes.</div>
-          <div><strong>SSH panels</strong> — remote machines over your local agent and keys; remote panels behave exactly like local ones (Linux &amp; macOS).</div>
-          <div><strong>Session restore</strong> — reopen umux and your workspaces, layouts, working directories and shells are back.</div>
-          <div><strong>In-app updates</strong> — quiet check on startup, one-click update from GitHub Releases, signature-verified bundles.</div>
-          <div><strong>Keyboard-first</strong> — switch workspaces, split and close panels without leaving the keyboard.</div>
-          <div><strong><code>umux</code> CLI</strong> — script the saved store: list, create, export / import, import from cmux; ships inside every installer.</div>
-          <div><strong>umux Storestation</strong> — optional background daemon (off by default): close every window and your sessions keep running; <code>umux attach</code> brings them back.</div>
-        </div>
-      </div>
-    </div>
-  </section>
-
   <section class="roadmap reveal" id="roadmap">
     <h2>Roadmap</h2>
     <p class="section-lead">Where umux is, and where it goes next. Everything shipped lives in <a href="https://github.com/CrystalPlatforms/umux/releases" target="_blank" rel="noopener">GitHub Releases</a>.</p>
     <div class="timeline">
+      <div class="timeline-item">
+        <span class="version">v0.2.0</span>
+        <span class="what">Unlimited panels, per-panel agent status, Settings, session restore.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v1.0.0</span>
+        <span class="what">Windows and macOS launch, pane zoom, in-app updates, landing page.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v1.0.3 / v1.0.4</span>
+        <span class="what">Import from cmux, the <code>umux</code> CLI, workspace groups.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v1.5.0</span>
+        <span class="what">Colors for workspaces, tabs and groups; port-click to browser.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v1.6.0</span>
+        <span class="what">Cross-platform shell picker; sidebar metadata switches.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v1.6.1</span>
+        <span class="what">Sidebar drag-resize fix with persisted width.</span>
+      </div>
       <div class="timeline-item now">
         <span class="version">v1.7.0</span>
-        <span class="what"><strong>umux Storestation</strong> — optional daemon (off by default): sessions outlive the window, <code>umux attach</code> restores them, autostart at login; ships inside every installer. Plus this expanded docs page.</span>
+        <span class="what"><strong>umux Storestation</strong> — sessions outlive the window; <code>umux attach</code>, autostart; ships in every installer.</span>
       </div>
       <div class="timeline-item">
         <span class="version">v1.7.5</span>
-        <span class="what"><strong>umux Core (Always-On)</strong> — a Settings switch that keeps the machine awake (not the screen) while sessions run.</span>
+        <span class="what">umux Core (Always-On) — keep the machine awake while sessions run.</span>
       </div>
       <div class="timeline-item">
         <span class="version">v1.8.0</span>
-        <span class="what"><strong>Live CLI</strong> — <code>umux</code> drives a running umux over the local socket, at full app parity.</span>
+        <span class="what">Live CLI at full app parity over the local socket.</span>
       </div>
       <div class="timeline-item">
         <span class="version">v1.9.0</span>
-        <span class="what"><strong>umux Terminal</strong> — the terminal-UI face of umux, attached to the same Storestation sessions.</span>
+        <span class="what">umux Terminal — the TUI, attached to the same Storestation sessions.</span>
       </div>
       <div class="timeline-item">
         <span class="version">v2.0.0</span>
-        <span class="what"><strong>Agents View</strong> — a dedicated agent overview with unread markers and the Local / Agents / SSH sidebar switcher.</span>
+        <span class="what">Agents View with unread markers; the sidebar switcher.</span>
       </div>
       <div class="timeline-item">
-        <span class="version">v2.1+</span>
-        <span class="what"><strong>Beyond</strong> — herdr import, command palette + shortcut editor, native menus &amp; pinned tabs, teammates as panes, SSH view, multi-window.</span>
+        <span class="version">v2.1.0</span>
+        <span class="what">Herdr import, lucide icons, the global accent color.</span>
       </div>
-    </div>
-  </section>
-
-  <section class="ecosystem reveal" id="ecosystem">
-    <h2>What's next — the umux Ecosystem</h2>
-    <p class="section-lead">Beyond the desktop: three companions that put your umux sessions in your pocket and on your other machines. Prototyped, on the way after v2.0.</p>
-    <div class="eco-grid">
-      <div class="eco-card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-        <h3>umux Bridge</h3>
-        <p>Reach umux from your other devices — control your sessions remotely, securely, without exposing them.</p>
+      <div class="timeline-item">
+        <span class="version">v2.2.0</span>
+        <span class="what">Command palette + shortcut editor.</span>
       </div>
-      <div class="eco-card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        <h3>umux Application (PWA)</h3>
-        <p>The workspace overview as a web app — check on your agents from any browser, install it like a native app.</p>
+      <div class="timeline-item">
+        <span class="version">v2.3.0</span>
+        <span class="what">Native menus + pinned tabs.</span>
       </div>
-      <div class="eco-card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
-        <h3>umux NativeApp</h3>
-        <p>Android &amp; iOS companions — glance at session status, get finish notifications, send a nudge to an agent.</p>
+      <div class="timeline-item">
+        <span class="version">v2.4.0</span>
+        <span class="what">Teammates and subagents as native panes.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v2.5.0</span>
+        <span class="what">SSH View — machine list and remote umux control.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v2.6.0</span>
+        <span class="what">Multi-window — many OS windows, one process and store.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v3.0.0</span>
+        <span class="what">The umux Ecosystem finale (development branch).</span>
       </div>
     </div>
   </section>

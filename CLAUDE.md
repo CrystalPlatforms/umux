@@ -68,3 +68,7 @@ The modules marked *(deep)* are intended to have small interfaces hiding large, 
 ## Working on this repo
 
 The product owner (Adam) does not write code; implementation is done by Claude Code, with Adam reviewing output and testing locally on Ubuntu/Wayland. Keep explanations and next-steps step-by-step and beginner-friendly, and frame acceptance against Adam actually running the app on his machine.
+
+## Landing page — Adam accepts before it goes live
+
+Cloudflare Pages deploys `landing/` from `main` automatically, so **pushing landing changes to `main` IS publishing them**. Standing rule (Adam, 2026-09-30): every landing edit (HTML/copy/assets) is shown to Adam for acceptance FIRST — preview locally (`npx serve landing` from the repo root, or paste the rendered sections), and push to `main` only after his explicit OK. Code (app/CLI/daemon) follows the normal TDD → HITL-test flow; the landing is the public storefront and gets a review gate.
