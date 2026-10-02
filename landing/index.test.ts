@@ -230,17 +230,19 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expectTileImg(/workspaces/i, "umux-workspaces.png");
         expectTileImg(/embedded terminal/i, "umux-terminal.png");
         expectTileImg(/agent status/i, "umux-agent.png");
-        expectTileImg(/ssh panels/i, "umux-ssh.png");
         expectTileImg(/in-app updates/i, "umux-updates.png");
         expectTileImg(/session restore/i, "umux-session.png");
         expectTileImg(/import from cmux/i, "umux-cmux.png");
 
-        // Exactly one tile stays imageless: herdr (coming soon).
+        // Exactly two tiles stay imageless (2026-10-02, Adam): herdr (coming
+        // soon) and SSH panels — its placeholder shot was pulled, the card
+        // moved to the end of the list right before herdr.
         const imgTiles = features.filter((f) => f.querySelector("img"));
-        expect(imgTiles, "every tile except herdr must carry a screenshot").toHaveLength(
-            features.length - 1,
+        expect(imgTiles, "every tile except ssh/herdr must carry a screenshot").toHaveLength(
+            features.length - 2,
         );
         expect(byHeading(/herdr/i)?.querySelector("img")).toBeNull();
+        expect(byHeading(/ssh panels/i)?.querySelector("img")).toBeNull();
 
         const media = [hero, ...doc.querySelectorAll(".feature img")];
         for (const img of media) {
