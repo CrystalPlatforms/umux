@@ -554,11 +554,39 @@ describe('SettingsDialog import dropdown (#59 rework)', () => {
 //  - The invoke + relaunch live in WorkspaceShell — this component only
 //    reports upward (same invoke-free contract as every other row).
 describe('SettingsDialog factory reset (#74)', () => {
-  it('hides the Reset row when no onResetAll is given', () => {
+  it('hides the Reset section when no onResetAll is given', () => {
     const { queryByTestId } = render(
       <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
     )
-    expect(queryByTestId('reset-row')).toBeNull()
+    expect(queryByTestId('reset-open')).toBeNull()
+    expect(queryByTestId('reset-button')).toBeNull()
+  })
+
+  // 2026-10-02 rework: the entry button OPENS the reset screen; the confirm
+  // flow itself lives there, unchanged (arm on first click, fire on second).
+  it('the entry button opens a dedicated reset screen with the confirm inside', () => {
+    const onResetAll = vi.fn()
+    const { getByTestId, queryByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onResetAll={onResetAll}
+      />,
+    )
+    expect(queryByTestId('reset-button')).toBeNull()
+
+    fireEvent.click(getByTestId('reset-open'))
+
+    expect(getByTestId('settings-back')).toBeTruthy()
+    expect(getByTestId('reset-row')).toBeTruthy()
+    expect(getByTestId('reset-button')).toBeTruthy()
+    // The reset screen REPLACES the settings page too.
+    expect(queryByTestId('toggle-notifications')).toBeNull()
+
+    fireEvent.click(getByTestId('settings-back'))
+    expect(queryByTestId('reset-button')).toBeNull()
+    expect(getByTestId('toggle-notifications')).toBeTruthy()
   })
 
   it('the first click only ARMS the button — onResetAll does not fire', () => {
@@ -572,6 +600,7 @@ describe('SettingsDialog factory reset (#74)', () => {
       />,
     )
 
+    fireEvent.click(getByTestId('reset-open'))
     const button = getByTestId('reset-button')
     expect(button.textContent).toMatch(/reset umux/i)
     fireEvent.click(button)
@@ -591,6 +620,7 @@ describe('SettingsDialog factory reset (#74)', () => {
       />,
     )
 
+    fireEvent.click(getByTestId('reset-open'))
     const button = getByTestId('reset-button')
     fireEvent.click(button) // arm
     fireEvent.click(button) // confirm
@@ -600,21 +630,24 @@ describe('SettingsDialog factory reset (#74)', () => {
 
   // --- umux Storestation (#86, v1.7.0) -------------------------------------
 
-  // The section only renders when the parent wires the toggle (the same
-  // optional-prop contract as the updates row): absent handler = absent
-  // section, so the OFF state's dialog is byte-identical to v1.6.x's.
+  // The Storestation section only renders when the parent wires the toggle
+  // (the same optional-prop contract as the updates row): absent handler =
+  // absent entry button AND absent sub-view, so the OFF state's dialog is
+  // byte-identical to v1.6.x's.
   it('hides the Storestation section when no toggle handler is wired', () => {
     const { queryByTestId } = render(
       <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
     )
-    expect(queryByTestId('storestation-row')).toBeNull()
+    expect(queryByTestId('storestation-open')).toBeNull()
     expect(queryByTestId('toggle-storestation')).toBeNull()
   })
 
-  // AC: the section renders — the daemon toggle mirrors the persisted
-  // setting (OFF by default) and the row is labeled.
-  it('renders the Storestation section with the daemon toggle defaulting OFF', () => {
-    const { getByTestId } = render(
+  // 2026-10-02 rework: the main settings page keeps only the entry BUTTON;
+  // the switches live in the dedicated sub-view it opens. Opening shows the
+  // Back button and the daemon toggle mirroring the persisted setting (OFF
+  // by default).
+  it('opens a dedicated Storestation view with the daemon toggle defaulting OFF', () => {
+    const { getByTestId, queryByTestId } = render(
       <SettingsDialog
         settings={defaultSettings}
         onChange={() => {}}
@@ -623,11 +656,49 @@ describe('SettingsDialog factory reset (#74)', () => {
         storestationStatus={null}
       />,
     )
-    expect(getByTestId('storestation-row')).toBeTruthy()
+    expect(getByTestId('storestation-open')).toBeTruthy()
+    expect(queryByTestId('toggle-storestation')).toBeNull()
+
+    fireEvent.click(getByTestId('storestation-open'))
+
+    expect(getByTestId('settings-back')).toBeTruthy()
     expect(getByTestId('toggle-storestation')).toHaveAttribute('aria-checked', 'false')
     expect(getByTestId('toggle-storestation').getAttribute('aria-label')).toMatch(
       /storestation/i,
     )
+    // The sub-view REPLACES the settings page: not one main-page control
+    // survives (2026-10-02 rework round 2, Adam).
+    expect(queryByTestId('toggle-notifications')).toBeNull()
+    expect(queryByTestId('reset-button')).toBeNull()
+    expect(queryByTestId('update-check')).toBeNull()
+    // …but the settings.json footnote is ALWAYS the last line (round 3).
+    expect(document.querySelector('.settings-footnote')).toBeTruthy()
+  })
+
+  // Back and Escape both return ONE level (sub-view → main page) without
+  // closing the dialog; on the main page Escape closes as before.
+  it('back and Escape return from the Storestation view without closing', () => {
+    const onClose = vi.fn()
+    const { getByTestId, queryByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={onClose}
+        onStorestationToggle={() => {}}
+      />,
+    )
+    fireEvent.click(getByTestId('storestation-open'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(queryByTestId('settings-back')).toBeNull()
+
+    fireEvent.click(getByTestId('storestation-open'))
+    fireEvent.click(getByTestId('settings-back'))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(queryByTestId('toggle-storestation')).toBeNull()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   // The toggle reports UPWARD (invoke-free component): the click hands the
@@ -642,6 +713,7 @@ describe('SettingsDialog factory reset (#74)', () => {
         onStorestationToggle={onStorestationToggle}
       />,
     )
+    fireEvent.click(getByTestId('storestation-open'))
     fireEvent.click(getByTestId('toggle-storestation'))
     expect(onStorestationToggle).toHaveBeenCalledWith(true)
 
@@ -663,8 +735,8 @@ describe('SettingsDialog factory reset (#74)', () => {
     expect(onStorestationToggle).toHaveBeenLastCalledWith(false)
   })
 
-  // The status line: running names the daemon's version and session count;
-  // stopped says so; no status yet renders nothing.
+  // The status line (sub-view only): running names the daemon's version and
+  // session count; stopped says so; no status yet renders nothing.
   it('reflects the live daemon status', () => {
     const { getByTestId, queryByTestId, rerender } = render(
       <SettingsDialog
@@ -675,6 +747,7 @@ describe('SettingsDialog factory reset (#74)', () => {
         storestationStatus={null}
       />,
     )
+    fireEvent.click(getByTestId('storestation-open'))
     expect(queryByTestId('storestation-status')).toBeNull()
 
     rerender(
@@ -703,7 +776,7 @@ describe('SettingsDialog factory reset (#74)', () => {
     expect(getByTestId('storestation-status').textContent).toMatch(/stopped/i)
   })
 
-  // #89 (v1.7.0 phase 7 — story 108 complete): the section shows ALL THREE
+  // #89 (v1.7.0 phase 7 — story 108 complete): the sub-view shows ALL THREE
   // controls — daemon toggle, autostart toggle, live status. The autostart
   // toggle mirrors its persisted flag and reports flips upward like the
   // daemon one; without the parent's handler the row is absent (backward
@@ -721,6 +794,7 @@ describe('SettingsDialog factory reset (#74)', () => {
         storestationStatus={{ enabled: true, running: false }}
       />,
     )
+    fireEvent.click(getByTestId('storestation-open'))
     // Three controls present.
     expect(getByTestId('toggle-storestation')).toBeTruthy()
     expect(getByTestId('toggle-storestation-autostart')).toBeTruthy()
@@ -758,7 +832,11 @@ describe('SettingsDialog factory reset (#74)', () => {
         onStorestationToggle={() => {}}
       />,
     )
-    expect(getByTestId('storestation-row')).toBeTruthy()
+    expect(getByTestId('storestation-open')).toBeTruthy()
+
+    fireEvent.click(getByTestId('storestation-open'))
+
+    expect(getByTestId('toggle-storestation')).toBeTruthy()
     expect(queryByTestId('storestation-autostart-row')).toBeNull()
   })
 })

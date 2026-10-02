@@ -19,6 +19,12 @@
 // Accessibility: each switch is a real <button role="switch"> with
 // aria-checked mirroring the state, so assistive tech announces it as a
 // toggle. Escape and the header X close the dialog.
+//
+// Storestation sub-view (2026-10-02 rework, Adam): the two Storestation
+// switches and the live status moved OUT of the main settings page into a
+// dedicated view, reached through one full-width "umux Storestation" entry
+// button. The view's own Back button and Escape both return to the main
+// page first — one dismissal reflex per level.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
@@ -149,6 +155,13 @@ export function SettingsDialog({
     attachedClients?: number
   } | null
 }) {
+  // The sub-views (2026-10-02 rework, Adam): 'main' is the regular settings
+  // page; 'storestation' and 'reset' are the dedicated screens the entry
+  // buttons open — each REPLACES the whole settings page. Local
+  // presentational state only — WorkspaceShell renders this dialog
+  // conditionally, so every fresh open starts on 'main'.
+  const [view, setView] = useState<'main' | 'storestation' | 'reset'>('main')
+
   // Custom shell entry (#77, fix round 2): the "Custom…" menu item opens a
   // small dialog with the command field. The field prefills with the saved
   // command when one is in effect and it is not already a detected entry.
@@ -163,7 +176,9 @@ export function SettingsDialog({
 
   // Escape closes the dialog — the same dismissal key the rename/create
   // inputs use, so the app has one "back out" reflex everywhere. While the
-  // custom-shell dialog is open, Escape closes ONLY that dialog.
+  // custom-shell dialog is open, Escape closes ONLY that dialog; inside a
+  // sub-view (Storestation / reset), Escape is the BACK key — one level per
+  // press, returning to the main settings page.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -171,11 +186,15 @@ export function SettingsDialog({
         setCustomOpen(false)
         return
       }
+      if (view !== 'main') {
+        setView('main')
+        return
+      }
       onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, customOpen])
+  }, [onClose, customOpen, view])
 
   // The Import dropdown (HITL round): open state + close on any press outside
   // it — the same interaction pattern as the header's "+" dropdown.
@@ -271,7 +290,9 @@ export function SettingsDialog({
       >
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
-          <span className="modal-card__title settings-dialog__title">Settings</span>
+          <span className="modal-card__title settings-dialog__title">
+            {view === 'storestation' ? 'umux Storestation' : view === 'reset' ? 'Reset umux' : 'Settings'}
+          </span>
           <button
             type="button"
             className="icon-btn"
@@ -293,6 +314,12 @@ export function SettingsDialog({
           </button>
         </div>
 
+        {/* The main settings page (2026-10-02 rework, Adam): EVERYTHING
+            below — switches, shell picker, updates, import, reset, footnote
+            — hides while the Storestation view is open. That view shows only
+            Back and the Storestation controls, nothing else. */}
+        {view === 'main' && (
+          <>
         <SettingsToggle
           label="Desktop notifications"
           checked={settings.notificationsEnabled}
@@ -491,15 +518,48 @@ export function SettingsDialog({
             </div>
           </>
         )}
+        {/* Close of the view==='main' fragment — everything above is the
+            main settings page only. */}
+        </>
+      )}
 
-        {/* umux Storestation (#86, v1.7.0): the daemon toggle + a live
-            status line, styled like the import row above. The parent owns
-            the flow: toggle ON spawns/connects the daemon before the
-            setting persists; toggle OFF with live sessions asks for a
-            confirmation THERE (this component stays invoke-free). */}
-        {onStorestationToggle != null && (
+        {/* umux Storestation (#86, v1.7.0; 2026-10-02 rework, Adam): the
+            main settings page keeps only ONE entry control — a full-width,
+            plain-text button in the workspace folder-open button's style
+            (no description line). It opens the dedicated Storestation view
+            below. Sits OUTSIDE the view==='main' fragment — opening it
+            replaces the whole settings page. The parent still owns the whole
+            flow: toggle ON spawns/connects the daemon before the setting
+            persists; toggle OFF with live sessions asks for a confirmation
+            THERE (this component stays invoke-free). */}
+        {onStorestationToggle != null && view === 'main' && (
+          <button
+            type="button"
+            className="settings-nav-entry"
+            data-testid="storestation-open"
+            aria-label="umux Storestation"
+            onClick={() => setView('storestation')}
+          >
+            umux Storestation
+          </button>
+        )}
+
+        {/* The Storestation view itself (2026-10-02 rework, Adam): the Back
+            button, the two switches and the live status line — nothing else,
+            the main settings page is fully replaced. Left via Back or
+            Escape. Same upward contracts as before — nothing about the flow
+            changed, only where the controls live. */}
+        {view === 'storestation' && onStorestationToggle != null && (
           <>
-            <div className="settings-row" data-testid="storestation-row">
+            <button
+              type="button"
+              className="settings-nav-entry"
+              data-testid="settings-back"
+              onClick={() => setView('main')}
+            >
+              ← Back
+            </button>
+            <div className="settings-row" data-testid="storestation-daemon-row">
               <div className="settings-row__text">
                 <span className="settings-row__label">umux Storestation</span>
                 <span className="settings-row__description">
@@ -524,7 +584,7 @@ export function SettingsDialog({
                   <span className="settings-row__label">Start daemon at login</span>
                   <span className="settings-row__description">
                     Launches the umux Storestation daemon in the background
-                    when you log in — no window, sessions keep running even
+                    when you log in, no window, sessions keep running even
                     before umux opens.
                   </span>
                 </div>
@@ -546,38 +606,63 @@ export function SettingsDialog({
           </>
         )}
 
-        {/* Factory reset (#74): removes EVERY umux state file (workspaces,
-            layouts, groups, settings) and relaunches first-run clean. The
-            two-click arm keeps a stray press from wiping the store. */}
-        {onResetAll != null && (
-          <div className="settings-row" data-testid="reset-row">
-            <div className="settings-row__text">
-              <span className="settings-row__label">Reset umux</span>
-              <span className="settings-row__description">
-                Removes all workspaces, layouts and settings, then restarts
-                umux. This cannot be undone.
-              </span>
+        {/* Factory reset (#74; 2026-10-02 rework, Adam — same shape as the
+            Storestation view): the main page keeps only the "Reset umux…"
+            entry button UNDER the Storestation one. Clicking opens a
+            dedicated screen with the description and the two-click confirm;
+            the arm/confirm flow itself is unchanged. */}
+        {onResetAll != null && view === 'main' && (
+          <button
+            type="button"
+            className="settings-nav-entry"
+            data-testid="reset-open"
+            aria-label="Reset umux"
+            onClick={() => setView('reset')}
+          >
+            Reset umux…
+          </button>
+        )}
+        {view === 'reset' && onResetAll != null && (
+          <>
+            <button
+              type="button"
+              className="settings-nav-entry"
+              data-testid="settings-back"
+              onClick={() => setView('main')}
+            >
+              ← Back
+            </button>
+            <div className="settings-row" data-testid="reset-row">
+              <div className="settings-row__text">
+                <span className="settings-row__label">Reset umux</span>
+                <span className="settings-row__description">
+                  Removes all workspaces, layouts and settings, then restarts
+                  umux. This cannot be undone.
+                </span>
+              </div>
+              <div className="settings-import">
+                <button
+                  type="button"
+                  className={resetArmed ? 'btn-danger' : 'btn-secondary'}
+                  data-testid="reset-button"
+                  onClick={() => {
+                    if (!resetArmed) {
+                      setResetArmed(true)
+                      return
+                    }
+                    setResetArmed(false)
+                    onResetAll()
+                  }}
+                >
+                  {resetArmed ? 'Really reset everything?' : 'Reset umux…'}
+                </button>
+              </div>
             </div>
-            <div className="settings-import">
-              <button
-                type="button"
-                className={resetArmed ? 'btn-danger' : 'btn-secondary'}
-                data-testid="reset-button"
-                onClick={() => {
-                  if (!resetArmed) {
-                    setResetArmed(true)
-                    return
-                  }
-                  setResetArmed(false)
-                  onResetAll()
-                }}
-              >
-                {resetArmed ? 'Really reset everything?' : 'Reset umux…'}
-              </button>
-            </div>
-          </div>
+          </>
         )}
 
+        {/* The footnote is ALWAYS the last line of the dialog — on the main
+            page and inside both sub-views (2026-10-02, Adam). */}
         <div className="settings-footnote">
           Changes apply immediately and are saved to{' '}
           <button

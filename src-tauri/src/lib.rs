@@ -1421,23 +1421,34 @@ pub fn run() {
     // socket connection, so a daemon that is not up yet never blocks boot.
     let router = RouterDriver::new(initial_settings.storestation.daemon_enabled);
 
-    let builder = tauri::Builder::default()
-        // #87 (v1.7.0 phase 5): single-instance goes FIRST — the plugin
-        // requires being the first one registered, because it decides
-        // BEFORE anything else runs whether this process is the duplicate
-        // (which it then sends to the existing instance and exits). The
-        // callback runs in the FIRST instance: bring its main window to
-        // the front, so `umux attach` and a second launch are both
-        // idempotent focuses. A failure to find the window (still
-        // splashing) is a silent no-op — the splash handoff will show it
-        // a moment later anyway.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let builder = tauri::Builder::default();
+    // #87 (v1.7.0 phase 5): single-instance goes FIRST in release builds —
+    // the plugin requires being the first one registered, because it decides
+    // BEFORE anything else runs whether this process is the duplicate
+    // (which it then sends to the existing instance and exits). The
+    // callback runs in the FIRST instance: bring its main window to
+    // the front, so `umux attach` and a second launch are both
+    // idempotent focuses. A failure to find the window (still
+    // splashing) is a silent no-op — the splash handoff will show it
+    // a moment later anyway.
+    //
+    // Dev builds skip the plugin entirely (2026-10-02): the macOS lock is a
+    // /tmp socket keyed by the app identifier alone, so `tauri dev` and the
+    // installed /Applications copy fought over the SAME singleton and the
+    // dev process exited silently with no window and no error. Before
+    // v1.7.0 dev and the installed app coexisted fine; release behavior is
+    // unchanged.
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(
+        |app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             }
-        }))
+        },
+    ));
+    let builder = builder
         // The SessionCore seam (#85): the ONE managed state the session
         // commands go through. The in-process driver is today's face
         // (Storestation OFF — byte-identical to v1.6.x); with the daemon ON

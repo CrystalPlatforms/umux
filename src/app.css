@@ -1446,6 +1446,37 @@ body.is-dragging * {
   margin-bottom: 6px;
 }
 
+/* The settings sub-view navigation buttons (2026-10-02 rework, Adam): the
+   workspace folder-open button's look — plain text, no pill, hover is
+   COLOR ONLY — but a step bigger than the sidebar's and stretched across
+   the dialog's full width. Entries open the Storestation / reset screens,
+   the in-screen Back leaves them. */
+.settings-nav-entry {
+  display: block;
+  width: 100%;
+  padding: 7px 2px;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: var(--text-lg);
+  color: var(--text-faint);
+  text-align: left;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  outline: none;
+  transition: transform 0.1s ease-out;
+}
+
+.settings-nav-entry:active {
+  transform: scale(var(--press-scale));
+}
+
+.settings-nav-entry:hover,
+.settings-nav-entry:focus-visible {
+  color: var(--text);
+}
+
 .modal-card__title {
   font-size: var(--text-lg);
   font-weight: 600;
