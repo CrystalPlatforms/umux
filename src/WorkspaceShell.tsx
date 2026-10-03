@@ -1203,9 +1203,32 @@ export function WorkspaceShell() {
   // names the count, confirming proceeds, cancelling does nothing.
   const [storestationStopConfirm, setStorestationStopConfirm] = useState<number | null>(null)
 
+  // --- umux Core (Always-On device, v1.7.5 phase 2 / #94) ---------------------
+  //
+  // The Core switch deliberately has NO settings.json entry: the daemon owns
+  // the Core flag (it must survive daemon restarts with every window closed
+  // — the plan's durable decision), so this glue only MIRRORS the daemon's
+  // answer. Same pessimistic contract as the Storestation toggles: the op
+  // must succeed before the mirror adopts it; a failure leaves the mirror
+  // untouched and surfaces the error in the Core view (never silent).
+  type CoreView = {
+    enabled: boolean
+    held: boolean
+    instruction: string | null
+  }
+  const [coreMirror, setCoreMirror] = useState<CoreView | null>(null)
+  const [coreError, setCoreError] = useState<string | null>(null)
+
   const refreshStorestationStatus = useCallback(() => {
-    invoke<StorestationStatus>('storestation_status')
-      .then((status) => setStorestationStatus(status))
+    invoke<StorestationStatus & { core?: CoreView | null }>('storestation_status')
+      .then((status) => {
+        setStorestationStatus(status)
+        // The Core mirror re-syncs with the daemon's truth on every probe:
+        // this is what makes the switch "mirror the daemon-reported state"
+        // when the dialog opens (a daemon that is gone = Core off, by
+        // construction — the block dies with the daemon).
+        setCoreMirror(status.core ?? null)
+      })
       .catch((e) => console.error('storestation_status failed:', e))
   }, [])
   useEffect(() => {
@@ -1277,6 +1300,28 @@ export function WorkspaceShell() {
   )
   const storestationStatusRef = useRef<StorestationStatus | null>(storestationStatus)
   storestationStatusRef.current = storestationStatus
+
+  // The Core toggle (#94): one command on the Rust side — it spawns the
+  // daemon when absent (Core's whole point: works with every window
+  // closed), sends core.set, and answers the daemon's view. Pessimistic:
+  // the mirror adopts the answer ONLY on success; a failure sets the error
+  // the Core view renders and re-syncs with reality.
+  const applyCoreToggle = useCallback(
+    (next: boolean) => {
+      setCoreError(null)
+      invoke<CoreView>('core_set_enabled', { enable: next })
+        .then((view) => {
+          setCoreMirror(view)
+          refreshStorestationStatus()
+        })
+        .catch((e) => {
+          console.error('core_set_enabled failed:', e)
+          setCoreError(typeof e === 'string' ? e : String(e))
+          refreshStorestationStatus()
+        })
+    },
+    [refreshStorestationStatus],
+  )
 
   // Latest settings for event-time readers (the window-close and interval
   // effects hold first-render closures; they must read current values).
@@ -4021,6 +4066,16 @@ export function WorkspaceShell() {
           onStorestationToggle={handleStorestationToggle}
           onStorestationAutostartToggle={applyStorestationAutostart}
           storestationStatus={storestationStatus}
+          onCoreToggle={applyCoreToggle}
+          coreStatus={{
+            // The mirror (daemon's truth). null mirror = a daemon that has
+            // not reported (or is gone) — the switch reads OFF, the honest
+            // default: nothing outside a live daemon can hold the block.
+            enabled: coreMirror?.enabled ?? false,
+            held: coreMirror?.held ?? false,
+            instruction: coreMirror?.instruction ?? null,
+            error: coreError,
+          }}
         />
       )}
 

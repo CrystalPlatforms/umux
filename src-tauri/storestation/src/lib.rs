@@ -12,6 +12,9 @@
 //! Module map (small interfaces, deep implementations):
 //! - [`protocol`] — pure wire layer: framing, envelopes, the error object.
 //!   No sockets — unit-testable with byte fixtures.
+//! - [`core`] — umux Core (Always-On device, v1.7.5 phase 1): the
+//!   daemon-owned sleep block — persisted flag, the macOS power assertion,
+//!   the honest `held`/`instruction` status.
 //! - [`socketpath`] — where the socket and pid file live for a config dir
 //!   (including the Windows named-pipe name derived from the config dir, so
 //!   `UMUX_CONFIG_DIR` isolates store + socket + pid together).
@@ -25,6 +28,7 @@
 //!   app's daemon-client driver will use in phase 4.
 
 pub mod client;
+pub mod core;
 pub mod protocol;
 pub mod registry;
 pub mod server;

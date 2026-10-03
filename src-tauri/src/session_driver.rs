@@ -749,6 +749,9 @@ impl RouterDriver {
 
     /// The Storestation status the Settings section shows: the toggle's
     /// live value plus what the daemon itself reports. Offline is a state.
+    /// The daemon's `core` object (umux Core, v1.7.5 #93) rides through
+    /// verbatim — the Settings Core section mirrors the daemon, it never
+    /// owns the state; an older daemon (no core object) reads as off.
     pub fn storestation_status(&self) -> serde_json::Value {
         let mut doc = serde_json::json!({
             "enabled": self.daemon_enabled(),
@@ -766,6 +769,9 @@ impl RouterDriver {
                 doc["sessions"] = result.get("sessions").cloned().unwrap_or_default();
                 doc["attachedClients"] =
                     result.get("attachedClients").cloned().unwrap_or_default();
+                doc["core"] = result.get("core").cloned().unwrap_or_else(|| {
+                    serde_json::json!({ "enabled": false, "held": false, "instruction": null })
+                });
             }
         }
         doc

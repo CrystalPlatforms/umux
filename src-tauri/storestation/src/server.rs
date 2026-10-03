@@ -25,6 +25,7 @@ use crate::protocol::{
     self, classify_hello, codes, parse_request, read_frame, response_err, response_ok,
     write_control, ErrorObj, Frame, FrameError, Request,
 };
+use crate::core;
 use crate::registry::{Outbound, Registry};
 use crate::socketpath;
 use crate::transport::{self, StreamTimeouts};
@@ -47,6 +48,10 @@ pub struct ServeState {
     /// The daemon's live sessions (#84). One lock; ops hold it briefly and
     /// never block inside (session pumps work on their own shared state).
     registry: Arc<Mutex<Registry>>,
+    /// umux Core (v1.7.5 phase 1 / #93): the daemon-owned sleep block —
+    /// the persisted flag was already applied in `prepare` (a Core ON
+    /// daemon re-asserts before the first client ever connects).
+    core: Mutex<core::CoreState>,
 }
 
 #[derive(Debug)]
@@ -97,6 +102,7 @@ pub fn prepare(config_dir: &Path) -> Result<Prepared, PrepareError> {
             registry: Arc::new(Mutex::new(Registry::new(Some(
                 socketpath::session_pids_path(config_dir),
             )))),
+            core: Mutex::new(core::CoreState::restore(config_dir)),
         }),
     })
 }
@@ -192,6 +198,9 @@ pub fn serve<F: Fn() -> bool>(prepared: Prepared, stop: F) {
     // where nobody is watching the socket anymore.
     cleanup(&config_dir);
     state.registry.lock().expect("registry lock").kill_all();
+    // Core's explicit release on the clean path (hygiene — the kernel
+    // releases the assertion with the process either way, story 143).
+    state.core.lock().expect("core lock").release();
 }
 
 /// Remove every daemon-owned file for this instance. Idempotent; also what
@@ -330,6 +339,7 @@ pub fn dispatch(
         "storestation.status" => {
             let (sessions, attached_clients) =
                 state.registry.lock().expect("registry lock").counts();
+            let core_view = state.core.lock().expect("core lock").view();
             Ok(json!({
                 "proto": protocol::PROTOCOL_VERSION,
                 "daemonVersion": state.daemon_version,
@@ -338,6 +348,8 @@ pub fn dispatch(
                 "sessions": sessions,
                 "attachedClients": attached_clients,
                 "dataDir": state.data_dir,
+                // umux Core (#93): the daemon-owned sleep block's live truth.
+                "core": core_view,
             }))
         }
         "storestation.shutdown" => {
@@ -352,6 +364,26 @@ pub fn dispatch(
             // still reaped by the serve loop's exit path (kill_all).
             cleanup(&state.config_dir);
             Ok(json!({ "stopping": true }))
+        }
+        // umux Core (v1.7.5 phase 1 / #93): set the Always-On block. The
+        // flag persists before the assertion is touched (the choice is
+        // never lost to an assertion hiccup); the result carries the live
+        // held/instruction truth. Params: `{"enabled": <bool>}`.
+        "core.set" => {
+            let enabled = request
+                .params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    ErrorObj::new(codes::BAD_PARAMS, "params need boolean \"enabled\"", vec![])
+                })?;
+            state
+                .core
+                .lock()
+                .expect("core lock")
+                .set_enabled(&state.config_dir, enabled)
+                .map_err(|message| ErrorObj::new(codes::IO_ERROR, message, vec![]))?;
+            Ok(state.core.lock().expect("core lock").view())
         }
         "sessions.list" => {
             let limit = parse_limit(&request.params)?;

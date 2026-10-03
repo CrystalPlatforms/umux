@@ -1,11 +1,13 @@
 //! `umux-storestation` — the headless umux Storestation daemon (#83, v1.7.0 phase 1).
 //!
-//! Two commands, one vocabulary with the `umux` CLI (flags, exit codes and
+//! Three commands, one vocabulary with the `umux` CLI (flags, exit codes and
 //! error codes are identical by design):
 //! - `run`  — serve the per-user socket in the foreground until stopped
 //!            (`umux-storestation stop`, the `storestation.shutdown` op, or Ctrl+C).
 //!            A second run against a live instance exits 4.
 //! - `stop` — graceful shutdown; idempotent (offline exits 0).
+//! - `core` — set umux Core (Always-On device, #93) on or off on a running
+//!            daemon; exits 3 when the daemon is not reachable.
 //!
 //! Exit codes (catalog): 0 ok/offline · 2 usage (clap) · 3 storestation unreachable
 //! (future live commands) · 4 already running · 5 internal.
@@ -51,6 +53,23 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Set umux Core (Always-On device, #93) on or off on a running daemon
+    Core {
+        /// The new Core state
+        #[arg(value_enum)]
+        state: CoreStateArg,
+        /// Print the machine-readable result object
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The `core` subcommand's argument — clap's ValueEnum keeps the on|off
+/// vocabulary and hands bad values the usage exit code (2) for free.
+#[derive(clap::ValueEnum, Clone)]
+enum CoreStateArg {
+    On,
+    Off,
 }
 
 fn main() {
@@ -71,6 +90,7 @@ fn main() {
     let code = match cli.command {
         Some(Command::Run { hidden }) => cmd_run(hidden),
         Some(Command::Stop { json }) => cmd_stop(json),
+        Some(Command::Core { state, json }) => cmd_core(state, json),
         None => 0,
     };
     std::process::exit(code);
@@ -182,6 +202,66 @@ fn cmd_stop(json: bool) -> i32 {
         }
         Err(other) => {
             print_error(&other.to_error_obj());
+            5
+        }
+    }
+}
+
+/// `umux-storestation core on|off` (#93): flip the daemon-owned Always-On
+/// block over the socket. The daemon is REQUIRED (Core lives in the daemon;
+/// spawning one from here would be a second, divergent spawn path) —
+/// offline is exit 3 with the catalog code, never a hang.
+fn cmd_core(state: CoreStateArg, json: bool) -> i32 {
+    let enable = matches!(state, CoreStateArg::On);
+    let dir = store_core::paths::config_dir();
+    let mut client = match Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
+        Ok(client) => client,
+        Err(ConnectError::NotRunning { stale }) => {
+            if stale {
+                server::cleanup(&dir);
+            }
+            print_error(&ErrorObj::new(
+                codes::STORESTATION_NOT_RUNNING,
+                "umux Storestation is not running — umux Core needs the daemon.",
+                vec![
+                    "run: umux-storestation run".into(),
+                    format!("then: umux-storestation core {}", if enable { "on" } else { "off" }),
+                ],
+            ));
+            return 3;
+        }
+        Err(other) => {
+            print_error(&other.to_error_obj());
+            return 5;
+        }
+    };
+    match client.call("core.set", serde_json::json!({ "enabled": enable })) {
+        Ok(view) => {
+            let held = view.get("held").and_then(serde_json::Value::as_bool) == Some(true);
+            let instruction = view
+                .get("instruction")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&view).expect("core views serialize")
+                );
+            } else if !enable {
+                println!("umux Core is off.");
+            } else if held {
+                println!("umux Core is on — system sleep is prevented.");
+                if let Some(instruction) = instruction {
+                    println!("note: {instruction}");
+                }
+            } else {
+                println!("umux Core is on — but the sleep block is NOT held.");
+                println!("note: {}", instruction.unwrap_or("unknown reason"));
+            }
+            0
+        }
+        Err(err) => {
+            print_error(&err);
             5
         }
     }

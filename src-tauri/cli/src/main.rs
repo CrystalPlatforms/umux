@@ -21,6 +21,8 @@ use store_core::workspace_store::{
 };
 use umux_storestation::protocol::{codes, ErrorObj};
 
+use serde_json::Value;
+
 mod notify;
 
 #[derive(Parser)]
@@ -731,6 +733,23 @@ fn run_status(as_json: bool) {
     match umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
         Ok(mut client) => match client.call("storestation.status", serde_json::json!({})) {
             Ok(result) => {
+                // umux Core (#93): the daemon's core object carries the live
+                // truth; `sleepPrevented` is its held bit flattened into the
+                // status document, `sleepInstruction` the honest limit when
+                // the guarantee is limited. A daemon older than the field
+                // reads as "not held, nothing to instruct" (additive rule).
+                let core_enabled = result
+                    .pointer("/core/enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let sleep_prevented = result
+                    .pointer("/core/held")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let sleep_instruction = result
+                    .pointer("/core/instruction")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 let svc = serde_json::json!({
                     "running": true,
                     "version": result.get("daemonVersion"),
@@ -739,6 +758,13 @@ fn run_status(as_json: bool) {
                     "sessions": result.get("sessions"),
                     "attachedClients": result.get("attachedClients"),
                     "dataDir": result.get("dataDir"),
+                    "core": {
+                        "enabled": core_enabled,
+                        "held": sleep_prevented,
+                        "instruction": sleep_instruction,
+                    },
+                    "sleepPrevented": sleep_prevented,
+                    "sleepInstruction": sleep_instruction,
                 });
                 if as_json {
                     let doc = serde_json::json!({
@@ -772,10 +798,18 @@ fn run_status(as_json: bool) {
         },
         Err(umux_storestation::client::ConnectError::NotRunning { stale }) => {
             if as_json {
+                // The same Core keys as the running document — a daemon that
+                // is not running holds nothing, by construction (#93).
                 let doc = serde_json::json!({
                     "cliVersion": env!("CARGO_PKG_VERSION"),
                     "protocol": umux_storestation::protocol::PROTOCOL_VERSION,
-                    "storestation": { "running": false, "staleSocket": stale },
+                    "storestation": {
+                        "running": false,
+                        "staleSocket": stale,
+                        "core": { "enabled": false, "held": false, "instruction": null },
+                        "sleepPrevented": false,
+                        "sleepInstruction": null,
+                    },
                 });
                 println!(
                     "{}",

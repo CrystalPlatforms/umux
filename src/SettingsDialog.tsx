@@ -25,6 +25,13 @@
 // dedicated view, reached through one full-width "umux Storestation" entry
 // button. The view's own Back button and Escape both return to the main
 // page first — one dismissal reflex per level.
+//
+// Core sub-view (v1.7.5 phase 2, #94): same pattern, one level deeper in
+// the story — "Core (Always-On device)". The switch does NOT live in
+// settings.json: the daemon owns the Core flag (it must survive restarts
+// with every window closed), so this dialog only MIRRORS the daemon's
+// reported state and reports toggles upward. The instruction string and
+// the toggle error render in the view — nothing is ever silent.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
@@ -102,6 +109,8 @@ export function SettingsDialog({
   onStorestationToggle,
   onStorestationAutostartToggle,
   storestationStatus = null,
+  onCoreToggle,
+  coreStatus = null,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -154,13 +163,27 @@ export function SettingsDialog({
     sessions?: number
     attachedClients?: number
   } | null
+  // The Core (Always-On device) section (#94, v1.7.5 phase 2): the toggle
+  // reports UPWARD like every other control (this component stays
+  // invoke-free) — the parent spawns the daemon if absent, sends core.set,
+  // and only adopts the daemon's answer on success. The mirror state is
+  // the DAEMON's view (enabled/held/instruction), never local UI state;
+  // `error` carries a failed op so the view can surface it. Absent = the
+  // section is not rendered.
+  onCoreToggle?: (next: boolean) => void
+  coreStatus?: {
+    enabled: boolean
+    held: boolean
+    instruction: string | null
+    error: string | null
+  } | null
 }) {
   // The sub-views (2026-10-02 rework, Adam): 'main' is the regular settings
-  // page; 'storestation' and 'reset' are the dedicated screens the entry
-  // buttons open — each REPLACES the whole settings page. Local
+  // page; 'storestation', 'core' and 'reset' are the dedicated screens the
+  // entry buttons open — each REPLACES the whole settings page. Local
   // presentational state only — WorkspaceShell renders this dialog
   // conditionally, so every fresh open starts on 'main'.
-  const [view, setView] = useState<'main' | 'storestation' | 'reset'>('main')
+  const [view, setView] = useState<'main' | 'storestation' | 'core' | 'reset'>('main')
 
   // Custom shell entry (#77, fix round 2): the "Custom…" menu item opens a
   // small dialog with the command field. The field prefills with the saved
@@ -177,8 +200,8 @@ export function SettingsDialog({
   // Escape closes the dialog — the same dismissal key the rename/create
   // inputs use, so the app has one "back out" reflex everywhere. While the
   // custom-shell dialog is open, Escape closes ONLY that dialog; inside a
-  // sub-view (Storestation / reset), Escape is the BACK key — one level per
-  // press, returning to the main settings page.
+  // sub-view (Storestation / Core / reset), Escape is the BACK key — one
+  // level per press, returning to the main settings page.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -291,7 +314,13 @@ export function SettingsDialog({
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
           <span className="modal-card__title settings-dialog__title">
-            {view === 'storestation' ? 'umux Storestation' : view === 'reset' ? 'Reset umux' : 'Settings'}
+            {view === 'storestation'
+              ? 'umux Storestation'
+              : view === 'core'
+                ? 'umux Core'
+                : view === 'reset'
+                  ? 'Reset umux'
+                  : 'Settings'}
           </span>
           <button
             type="button"
@@ -544,6 +573,23 @@ export function SettingsDialog({
           </button>
         )}
 
+        {/* umux Core (v1.7.5 phase 2, #94): the second entry button, same
+            full-width plain-text pattern — "umux Core (Always-On)". Like
+            Storestation, opening it replaces the whole settings page; the
+            parent owns the whole flow (spawn daemon if absent → core.set →
+            mirror the daemon's answer). */}
+        {onCoreToggle != null && view === 'main' && (
+          <button
+            type="button"
+            className="settings-nav-entry"
+            data-testid="core-open"
+            aria-label="umux Core (Always-On)"
+            onClick={() => setView('core')}
+          >
+            umux Core (Always-On)
+          </button>
+        )}
+
         {/* The Storestation view itself (2026-10-02 rework, Adam): the Back
             button, the two switches and the live status line — nothing else,
             the main settings page is fully replaced. Left via Back or
@@ -601,6 +647,57 @@ export function SettingsDialog({
                 {storestationStatus.running
                   ? `Daemon running${storestationStatus.version ? ` (v${storestationStatus.version})` : ''} — ${storestationStatus.sessions ?? 0} session${(storestationStatus.sessions ?? 0) === 1 ? '' : 's'}.`
                   : 'Daemon stopped.'}
+              </p>
+            )}
+          </>
+        )}
+
+        {/* The Core view itself (v1.7.5 phase 2, #94): Back, the Always-On
+            switch, the daemon status line and (when present) the platform
+            instruction — nothing else, same shape as the Storestation view.
+            The switch mirrors the DAEMON's reported state (coreStatus), not
+            a local setting: a failed op leaves the mirror untouched and the
+            error renders below, so nothing is ever silent. */}
+        {view === 'core' && onCoreToggle != null && (
+          <>
+            <button
+              type="button"
+              className="settings-nav-entry"
+              data-testid="settings-back"
+              onClick={() => setView('main')}
+            >
+              ← Back
+            </button>
+            <div className="settings-row" data-testid="core-row">
+              <div className="settings-row__text">
+                <span className="settings-row__label">umux Core (Always-On)</span>
+                <span className="settings-row__description">
+                  Keeps your machine awake, even if you close the laptop
+                  cover. The screen may turn off.
+                </span>
+              </div>
+              <SettingsToggle
+                label="umux Core (Always-On)"
+                checked={coreStatus?.enabled ?? false}
+                testId="toggle-core"
+                onToggle={onCoreToggle}
+              />
+            </div>
+            {storestationStatus != null && (
+              <p className="settings-status" data-testid="core-status">
+                {storestationStatus.running
+                  ? `Daemon running${storestationStatus.version ? ` (v${storestationStatus.version})` : ''} — sleep prevention ${coreStatus?.held ? 'held.' : 'NOT held.'}`
+                  : 'Daemon stopped.'}
+              </p>
+            )}
+            {coreStatus?.instruction != null && coreStatus.instruction !== '' && (
+              <p className="settings-status" data-testid="core-instruction">
+                {coreStatus.instruction}
+              </p>
+            )}
+            {coreStatus?.error != null && coreStatus.error !== '' && (
+              <p className="settings-status settings-status--error" data-testid="core-error">
+                {coreStatus.error}
               </p>
             )}
           </>

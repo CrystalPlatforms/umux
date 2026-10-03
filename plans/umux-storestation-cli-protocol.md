@@ -39,6 +39,7 @@ umux (existing CLI binary — additions only)
 umux-storestation (new daemon binary)
   run                [--config-dir]             serve foreground until stop; single instance enforced
   stop               [--json] [--config-dir]    graceful shutdown: kills owned shells, cleans socket
+  core <on|off>      [--json] [--config-dir]    umux Core (Always-On device, v1.7.5): flip the daemon-owned sleep block (requires a running daemon; offline is exit 3)
   --version
 ```
 
@@ -65,12 +66,16 @@ Existing v1.6.x commands unchanged (`list export notify import new rm rename spl
   "storestation": {
     "running": true, "version": "1.7.0", "pid": 4212,
     "uptimeSeconds": 3600, "sessions": 2, "attachedClients": 1,
-    "dataDir": "C:\\Users\\adam\\AppData\\Roaming\\umux"
+    "dataDir": "C:\\Users\\adam\\AppData\\Roaming\\umux",
+    "core": { "enabled": true, "held": true, "instruction": null },
+    "sleepPrevented": true, "sleepInstruction": null
   }
 }
 ```
 
-`umux status --json` (Storestation off): `{ "cliVersion": "1.7.0", "protocol": 1, "storestation": { "running": false, "staleSocket": false } }` — **exit 0**.
+`umux status --json` (Storestation off): `{ "cliVersion": "1.7.0", "protocol": 1, "storestation": { "running": false, "staleSocket": false, "core": { "enabled": false, "held": false, "instruction": null }, "sleepPrevented": false, "sleepInstruction": null } }` — **exit 0**.
+
+The `core`/`sleepPrevented`/`sleepInstruction` keys (v1.7.5, umux Core — issue #93): `core` is the daemon's live view `{enabled, held, instruction}` — `enabled` is the persisted user choice, `held` the platform's live assertion truth, `instruction` the honest limit string when the OS limits the guarantee (macOS on battery) or the backend is missing (Windows/Linux before their phases). `sleepPrevented` flattens `held`; `sleepInstruction` mirrors `instruction`. A daemon older than the field reads as off (additive rule); a client older than the field ignores the keys.
 
 `umux sessions list --json`:
 
@@ -159,6 +164,9 @@ Implemented in v1.7.0:
 - `session.unsubscribe` — `{ id, subscriber }` → detaches exactly that attachment; the session itself keeps living (a closed panel detaches, it does not kill)
 - `session.status` — `{ id }` → the live lookups the desktop driver needs per panel: `{ busy, childPid, foregroundPid, cwd, exitCode }` (phase 2 addition so Storestation ON keeps close-confirmation, agent-status presence, the cwd snapshot and the ports tooltip at full parity)
 - `storestation.shutdown` — idempotent graceful stop (used by `umux-storestation stop`); kills every owned shell first
+
+Implemented in v1.7.5 (umux Core, issue #93):
+- `core.set` — `{ enabled: <bool> }` → the daemon's core view `{ enabled, held, instruction }`: `enabled` is the persisted user choice (written to `<config_dir>/storestation.core.json` BEFORE the assertion is touched — the choice survives a crash), `held` the live assertion truth, `instruction` the honest limit string when present (macOS on battery; the platform backend missing until its phase ships). Mistyped/missing `enabled` → `badParams`. The daemon is the SINGLE holder: it re-asserts from the flag on every start (no client call), and daemon stop releases by construction. `storestation.status` carries the same view in its `core` object.
 
 **Event envelope (phase 2)** — lifecycle events are control frames WITHOUT an `id` (they are not responses): `{"event":"session.exit","session":"<id>","exitCode":<code|null>}` and `{"event":"session.title","session":"<id>","title":"<text>"}`. Exactly one `session.exit` per session, even when a kill and the end-of-stream race. Titles are noticed by a READ-ONLY scan of the stream for OSC 0/2 sequences — the daemon never rewrites a byte (byte-identical rule; the umux OscParser still runs client-side).
 

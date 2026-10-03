@@ -839,4 +839,230 @@ describe('SettingsDialog factory reset (#74)', () => {
     expect(getByTestId('toggle-storestation')).toBeTruthy()
     expect(queryByTestId('storestation-autostart-row')).toBeNull()
   })
+
+  // --- umux Core (Always-On device, #94, v1.7.5 phase 2) -------------------
+  //
+  // Assumptions (state-before-RED): the Core switch has NO settings.json
+  // entry — the daemon owns the flag — so the component's contract is
+  // mirror-and-report: `coreStatus` IS the daemon's view (enabled/held/
+  // instruction) plus the parent's `error` from a failed op; the click
+  // reports upward; nothing renders from local state.
+
+  // The same optional-prop contract as Storestation: no wired handler = no
+  // section at all, the dialog is byte-identical to the pre-Core tree.
+  it('hides the Core section when no toggle handler is wired', () => {
+    const { queryByTestId } = render(
+      <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
+    )
+    expect(queryByTestId('core-open')).toBeNull()
+    expect(queryByTestId('toggle-core')).toBeNull()
+  })
+
+  // AC1: the switch is OFF by default and MIRRORS the daemon-reported
+  // state — with a daemon reporting enabled, the freshly opened view shows
+  // it ON. The entry button reads "Core (Always-On device)".
+  it('opens the Core view; the switch mirrors the daemon-reported state, OFF by default', () => {
+    const { getByTestId, queryByTestId, rerender } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{ enabled: false, held: false, instruction: null, error: null }}
+      />,
+    )
+    expect(getByTestId('core-open').textContent).toMatch(/umux Core \(Always-On\)/)
+    expect(queryByTestId('toggle-core')).toBeNull()
+
+    fireEvent.click(getByTestId('core-open'))
+
+    expect(getByTestId('settings-back')).toBeTruthy()
+    expect(getByTestId('toggle-core').getAttribute('aria-label')).toMatch(
+      /umux Core \(Always-On\)/,
+    )
+    expect(getByTestId('toggle-core')).toHaveAttribute('aria-checked', 'false')
+
+    // The parent re-syncs the mirror from the daemon (its only source of
+    // truth): an enabled daemon shows the switch ON.
+    rerender(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{ enabled: true, held: true, instruction: null, error: null }}
+      />,
+    )
+    expect(getByTestId('toggle-core')).toHaveAttribute('aria-checked', 'true')
+  })
+
+  // The view replaces the whole settings page; the footnote is ALWAYS the
+  // last line inside it (2026-10-02 rework rule, carried to Core).
+  it('the Core view replaces the main page and keeps the footnote last', () => {
+    const { getByTestId, queryByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{ enabled: false, held: false, instruction: null, error: null }}
+      />,
+    )
+    fireEvent.click(getByTestId('core-open'))
+
+    expect(queryByTestId('toggle-notifications')).toBeNull()
+    expect(queryByTestId('toggle-storestation')).toBeNull()
+    expect(queryByTestId('reset-button')).toBeNull()
+    expect(document.querySelector('.settings-footnote')).toBeTruthy()
+    // One Back button — the Core view's own (Storestation's lives in ITS
+    // view; they never render together).
+    expect(document.querySelectorAll('[data-testid="settings-back"]').length).toBe(1)
+  })
+
+  // AC2 (component side of the pessimistic flow): the click reports the
+  // requested next state upward — the parent spawns the daemon when absent
+  // and sends core.set; the switch only ever MIRRORS the daemon's answer.
+  it('reports a core-toggle flip to the parent in both directions', () => {
+    const onCoreToggle = vi.fn()
+    const { getByTestId, rerender } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={onCoreToggle}
+        coreStatus={{ enabled: false, held: false, instruction: null, error: null }}
+      />,
+    )
+    fireEvent.click(getByTestId('core-open'))
+    fireEvent.click(getByTestId('toggle-core'))
+    expect(onCoreToggle).toHaveBeenCalledWith(true)
+
+    // After the daemon answered ON, a click reports the OFF direction.
+    rerender(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={onCoreToggle}
+        coreStatus={{ enabled: true, held: true, instruction: null, error: null }}
+      />,
+    )
+    expect(getByTestId('toggle-core')).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(getByTestId('toggle-core'))
+    expect(onCoreToggle).toHaveBeenLastCalledWith(false)
+  })
+
+  // AC3: a failed op leaves the persisted (daemon-reported) state UNTOUCHED
+  // and surfaces the error — the switch keeps showing the daemon's truth,
+  // the error renders in the view, and nothing hides silently.
+  it('a failed op renders the error and leaves the mirrored state untouched', () => {
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{
+          enabled: false,
+          held: false,
+          instruction: null,
+          error: 'umux Storestation is not running.',
+        }}
+      />,
+    )
+    fireEvent.click(getByTestId('core-open'))
+
+    const error = getByTestId('core-error')
+    expect(error.textContent).toContain('umux Storestation is not running.')
+    expect(getByTestId('toggle-core')).toHaveAttribute('aria-checked', 'false')
+  })
+
+  // AC4: the platform instruction renders when present (the battery caveat
+  // on macOS) and the line is ABSENT when there is nothing to instruct
+  // about — the screen hides nothing, and invents nothing.
+  it('renders the platform instruction only when the daemon reports one', () => {
+    const { getByTestId, queryByTestId, rerender } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{
+          enabled: true,
+          held: true,
+          instruction: 'Running on battery power: macOS can still force sleep.',
+          error: null,
+        }}
+      />,
+    )
+    fireEvent.click(getByTestId('core-open'))
+    expect(getByTestId('core-instruction').textContent).toContain(
+      'Running on battery power',
+    )
+
+    rerender(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{ enabled: true, held: true, instruction: null, error: null }}
+      />,
+    )
+    expect(queryByTestId('core-instruction')).toBeNull()
+  })
+
+  // The daemon status line: a running daemon names itself and says whether
+  // the sleep block is held; a stopped daemon says so.
+  it('reflects the daemon status in the Core view', () => {
+    const { getByTestId, rerender } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{ enabled: true, held: true, instruction: null, error: null }}
+        storestationStatus={{ enabled: true, running: true, version: '1.7.0' }}
+      />,
+    )
+    fireEvent.click(getByTestId('core-open'))
+    const status = getByTestId('core-status')
+    expect(status.textContent).toMatch(/running/i)
+    expect(status.textContent).toContain('1.7.0')
+    expect(status.textContent).toMatch(/sleep prevention held\./i)
+
+    rerender(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={{ enabled: true, held: false, instruction: null, error: null }}
+        storestationStatus={{ enabled: true, running: false }}
+      />,
+    )
+    expect(getByTestId('core-status').textContent).toMatch(/daemon stopped\./i)
+  })
+
+  // Escape returns ONE level (Core view → main page) without closing the
+  // dialog — the one dismissal reflex per level, same as Storestation.
+  it('Escape returns from the Core view to the main page without closing', () => {
+    const onClose = vi.fn()
+    const { getByTestId, queryByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={onClose}
+        onCoreToggle={() => {}}
+        coreStatus={{ enabled: false, held: false, instruction: null, error: null }}
+      />,
+    )
+    fireEvent.click(getByTestId('core-open'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(queryByTestId('toggle-core')).toBeNull()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
 })

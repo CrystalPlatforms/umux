@@ -1153,6 +1153,45 @@ async fn storestation_set_autostart(enable: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+/// The Core (Always-On device) toggle (v1.7.5 phase 2, #94): the pessimistic
+/// flow, same as the Storestation toggle — ON first makes sure a daemon is
+/// running (spawn if absent: Core's whole point is "every window closed"),
+/// then sends `core.set` over the socket. OFF with no daemon is already the
+/// released state (the block dies with the daemon), answered as success so
+/// the switch never hangs on an absent daemon. There is NO app-side setting
+/// to save: the flag is daemon-owned state (the plan's durable decision) —
+/// the returned view is the truth the switch mirrors.
+#[tauri::command]
+async fn core_set_enabled(enable: bool) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if enable {
+            spawn_daemon_if_absent()?;
+        }
+        let dir = config_dir();
+        let sent = match umux_storestation::client::Client::connect(
+            &dir,
+            "desktop",
+            env!("CARGO_PKG_VERSION"),
+        ) {
+            Ok(mut client) => {
+                client.call("core.set", serde_json::json!({ "enabled": enable }))
+            }
+            Err(umux_storestation::client::ConnectError::NotRunning { .. }) if !enable => {
+                // Nothing to release — that IS the off state.
+                Ok(serde_json::json!({
+                    "enabled": false,
+                    "held": false,
+                    "instruction": null,
+                }))
+            }
+            Err(other) => Err(other.to_error_obj()),
+        };
+        sent.map_err(|e| e.message)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Factory reset (#74): remove EVERY umux state file — workspaces.json (the
 /// workspace/layout/tree store) and settings.json — so the next launch boots
 /// first-run clean. The frontend restarts the app afterwards (plugin-process
@@ -1482,6 +1521,7 @@ pub fn run() {
             storestation_status,
             storestation_set_enabled,
             storestation_set_autostart,
+            core_set_enabled,
             reset_all,
             list_shells,
             open_settings_file,
