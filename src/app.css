@@ -1781,6 +1781,23 @@ button.settings-footnote__path:hover {
   color: var(--danger);
 }
 
+/* The Windows lid-help step list (issue #95 follow-up): numbered, compact,
+   matching the dialog's quiet typography — a help screen, not a manual. */
+.settings-steps {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.settings-steps strong {
+  color: var(--text-muted, var(--text));
+  font-weight: 600;
+}
+
 /* The update banner (issue #66): a small card pinned bottom-right, raised
    only when a check found an update. Never blocks the app. */
 .update-banner {

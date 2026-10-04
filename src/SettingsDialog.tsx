@@ -183,7 +183,16 @@ export function SettingsDialog({
   // entry buttons open — each REPLACES the whole settings page. Local
   // presentational state only — WorkspaceShell renders this dialog
   // conditionally, so every fresh open starts on 'main'.
-  const [view, setView] = useState<'main' | 'storestation' | 'core' | 'reset'>('main')
+  const [view, setView] =
+    useState<'main' | 'storestation' | 'core' | 'core-lid-help' | 'reset'>('main')
+
+  // The Windows lid caveat (#95): when the daemon HOLDS the block, its
+  // instruction is the long lid how-to — the Core screen shows a short note
+  // plus a dedicated help view instead. Refusals (held:false) and
+  // non-Windows caveats (the macOS battery note) render in full: the screen
+  // hides nothing.
+  const lidHelpShown =
+    isWindowsPlatform() && coreStatus?.held === true && !!coreStatus.instruction
 
   // Custom shell entry (#77, fix round 2): the "Custom…" menu item opens a
   // small dialog with the command field. The field prefills with the saved
@@ -318,9 +327,11 @@ export function SettingsDialog({
               ? 'umux Storestation'
               : view === 'core'
                 ? 'umux Core'
-                : view === 'reset'
-                  ? 'Reset umux'
-                  : 'Settings'}
+                : view === 'core-lid-help'
+                  ? 'umux Core'
+                  : view === 'reset'
+                    ? 'Reset umux'
+                    : 'Settings'}
           </span>
           <button
             type="button"
@@ -672,8 +683,8 @@ export function SettingsDialog({
               <div className="settings-row__text">
                 <span className="settings-row__label">umux Core (Always-On)</span>
                 <span className="settings-row__description">
-                  Keeps your machine awake, even if you close the laptop
-                  cover. The screen may turn off.
+                  Keeps your machine awake while it sits idle. The screen may
+                  turn off.
                 </span>
               </div>
               <SettingsToggle
@@ -690,16 +701,93 @@ export function SettingsDialog({
                   : 'Daemon stopped.'}
               </p>
             )}
-            {coreStatus?.instruction != null && coreStatus.instruction !== '' && (
-              <p className="settings-status" data-testid="core-instruction">
-                {coreStatus.instruction}
-              </p>
+            {lidHelpShown ? (
+              <>
+                <p className="settings-status" data-testid="core-lid-note">
+                  Heads-up: closing the lid follows your Windows power plan,
+                  not this switch.
+                </p>
+                <button
+                  type="button"
+                  className="settings-nav-entry"
+                  data-testid="core-lid-help"
+                  onClick={() => setView('core-lid-help')}
+                >
+                  How to keep the machine awake with the lid closed…
+                </button>
+              </>
+            ) : (
+              coreStatus?.instruction != null &&
+              coreStatus.instruction !== '' && (
+                <p className="settings-status" data-testid="core-instruction">
+                  {coreStatus.instruction}
+                </p>
+              )
             )}
             {coreStatus?.error != null && coreStatus.error !== '' && (
               <p className="settings-status settings-status--error" data-testid="core-error">
                 {coreStatus.error}
               </p>
             )}
+          </>
+        )}
+
+        {/* The Windows lid help view (issue #95 follow-up): the step list
+            the short caveat's button opens. The Control Panel path works on
+            Windows 10 and 11 alike — the modern Settings app has no lid
+            switch. Back returns to the Core view; Escape keeps the dialog's
+            one-reflex rule (sub-view → main). */}
+        {view === 'core-lid-help' && (
+          <>
+            <button
+              type="button"
+              className="settings-nav-entry"
+              data-testid="settings-back"
+              onClick={() => setView('core')}
+            >
+              ← Back
+            </button>
+            <div data-testid="core-lid-help-view">
+              <div className="settings-row">
+                <div className="settings-row__text">
+                  <span className="settings-row__label">
+                    Keep the machine awake with the lid closed
+                  </span>
+                  <span className="settings-row__description">
+                    umux Core already stops idle sleep. Closing the lid is a
+                    separate Windows power-plan rule no app can change for
+                    you — set it once, yourself:
+                  </span>
+                </div>
+              </div>
+              <ol className="settings-steps">
+                <li>
+                  Open the <strong>Start</strong> menu, type{' '}
+                  <strong>Control Panel</strong> and press Enter. (Works on
+                  Windows 10 and 11 — the new Settings app has no lid switch.)
+                </li>
+                <li>
+                  Go to <strong>Hardware and Sound → Power Options</strong>.
+                </li>
+                <li>
+                  In the left sidebar, click{' '}
+                  <strong>“Choose what closing the lid does”</strong>.
+                </li>
+                <li>
+                  Next to <strong>“When I close the lid:”</strong> pick{' '}
+                  <strong>“Do nothing”</strong> — at least for{' '}
+                  <strong>Plugged in</strong> (and for <strong>On battery</strong>{' '}
+                  only if you accept a faster drain).
+                </li>
+                <li>
+                  Click <strong>Save changes</strong>.
+                </li>
+              </ol>
+              <p className="settings-status">
+                Careful: with the lid set to “Do nothing”, a closed laptop
+                keeps running — never pack it into a bag while it’s awake.
+              </p>
+            </div>
           </>
         )}
 

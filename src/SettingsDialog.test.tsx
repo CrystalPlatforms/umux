@@ -1065,4 +1065,114 @@ describe('SettingsDialog factory reset (#74)', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledTimes(1)
   })
+
+  // --- The Windows lid caveat (issue #95 follow-up, 2026-10-04) ------------
+  //
+  // Assumptions (state-before-RED): on Windows the HELD instruction IS the
+  // lid caveat — a long how-to that drowns the Settings screen — so the
+  // screen renders a SHORT note plus a help button, and the full step list
+  // lives one level deeper. Every OTHER instruction still renders in full:
+  // Windows refusals (held:false) and non-Windows caveats (the macOS
+  // battery note) hide nothing.
+
+  const setPlatform = (value: string) => {
+    Object.defineProperty(window.navigator, 'platform', { value, configurable: true })
+  }
+  const restorePlatform = () => {
+    // The jsdom value is a prototype getter; deleting the own property
+    // restores it.
+    delete (window.navigator as { platform?: string }).platform
+  }
+  const LID_INSTRUCTION =
+    'umux Core is keeping this machine awake while idle. If this device has a closing lid: the lid-close action still follows your Windows power plan — to stay awake with the lid closed, set it to "Do nothing" in Power Options (Control Panel → "Choose what closing the lid does").'
+
+  // On Windows the held instruction is the lid caveat: SHORT note + button,
+  // never the raw paragraph; the button opens the step-by-step view.
+  it('on Windows, a held lid caveat renders short with a help view, not the raw string', () => {
+    setPlatform('Win32')
+    try {
+      const { getByTestId, queryByTestId } = render(
+        <SettingsDialog
+          settings={defaultSettings}
+          onChange={() => {}}
+          onClose={() => {}}
+          onCoreToggle={() => {}}
+          coreStatus={{ enabled: true, held: true, instruction: LID_INSTRUCTION, error: null }}
+        />,
+      )
+      fireEvent.click(getByTestId('core-open'))
+
+      // The raw how-to paragraph is GONE from the screen; a short note and
+      // the button take its place.
+      expect(queryByTestId('core-instruction')).toBeNull()
+      expect(getByTestId('core-lid-note').textContent).toMatch(/power plan/i)
+      expect(getByTestId('core-lid-note').textContent).not.toContain('Control Panel')
+
+      // The help view: one level deeper, with the actual steps; Back
+      // returns to the Core view (the switch is there again).
+      fireEvent.click(getByTestId('core-lid-help'))
+      const help = getByTestId('core-lid-help-view')
+      expect(help.textContent).toContain('Choose what closing the lid does')
+      expect(help.textContent).toContain('Do nothing')
+      fireEvent.click(getByTestId('settings-back'))
+      expect(queryByTestId('core-lid-help-view')).toBeNull()
+      expect(queryByTestId('toggle-core')).not.toBeNull()
+    } finally {
+      restorePlatform()
+    }
+  })
+
+  // A Windows refusal (held:false) is an error, not a how-to — it still
+  // renders in full, with no help button to dilute it.
+  it('on Windows, a not-held instruction still renders in full (refusals hide nothing)', () => {
+    setPlatform('Win32')
+    try {
+      const { getByTestId, queryByTestId } = render(
+        <SettingsDialog
+          settings={defaultSettings}
+          onChange={() => {}}
+          onClose={() => {}}
+          onCoreToggle={() => {}}
+          coreStatus={{
+            enabled: true,
+            held: false,
+            instruction: 'Windows refused the Always-On hold (SetThreadExecutionState failed).',
+            error: null,
+          }}
+        />,
+      )
+      fireEvent.click(getByTestId('core-open'))
+      expect(getByTestId('core-instruction').textContent).toContain('refused')
+      expect(queryByTestId('core-lid-help')).toBeNull()
+    } finally {
+      restorePlatform()
+    }
+  })
+
+  // Off Windows (the macOS battery caveat in this test) the instruction
+  // renders in full as before — the Windows help flow is Windows-only.
+  it('off Windows, the instruction renders in full with no help button', () => {
+    setPlatform('MacIntel')
+    try {
+      const { getByTestId, queryByTestId } = render(
+        <SettingsDialog
+          settings={defaultSettings}
+          onChange={() => {}}
+          onClose={() => {}}
+          onCoreToggle={() => {}}
+          coreStatus={{
+            enabled: true,
+            held: true,
+            instruction: 'Running on battery power: macOS can still force sleep.',
+            error: null,
+          }}
+        />,
+      )
+      fireEvent.click(getByTestId('core-open'))
+      expect(getByTestId('core-instruction').textContent).toContain('Running on battery power')
+      expect(queryByTestId('core-lid-help')).toBeNull()
+    } finally {
+      restorePlatform()
+    }
+  })
 })

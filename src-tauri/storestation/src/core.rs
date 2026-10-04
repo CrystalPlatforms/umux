@@ -9,14 +9,19 @@
 //!
 //! - Persistence: `<config_dir>/storestation.core.json`, `{"enabled": bool}`.
 //!   A missing or corrupt file reads as OFF (additive-safe, hand-editable).
-//! - Backend (macOS, this phase): an IOKit power assertion —
+//! - Backend (macOS): an IOKit power assertion —
 //!   `PreventSystemSleep` named "umux Core", the `caffeinate -s` hold: no
 //!   admin, the SCREEN may sleep/turn off, the machine may not — including
 //!   lid close on AC power. macOS honors this assertion only on AC: on
 //!   battery the block is not guaranteed, and the state carries the
 //!   instruction string instead of pretending (story 142).
-//! - Other platforms (plan phases 3–4): honest `held: false` + instruction,
-//!   never a silent lie.
+//! - Backend (Windows, phase 3 / issue #95): a dedicated daemon thread
+//!   holding `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`
+//!   — no admin, the SCREEN may sleep; the lid-close action is a power-plan
+//!   setting the daemon cannot touch, so while ON the honest state carries
+//!   the lid instruction (story 142).
+//! - Linux (plan phase 4): honest `held: false` + instruction, never a
+//!   silent lie.
 //!
 //! Unit tests below cover the pure parts (flag persistence, view shape);
 //! the wire behavior is exercised in `storestation/tests/core.rs`.
@@ -33,12 +38,21 @@ use serde_json::{json, Value};
 const BATTERY_INSTRUCTION: &str = "Running on battery power: macOS honors the Always-On block only on AC power — plug the Mac in to keep it awake (including with the lid closed).";
 
 /// The instruction for platforms whose backend ships in a later phase
-/// (Windows `SetThreadExecutionState`, Linux session inhibit) — the op
-/// answers truthfully instead of pretending. Only the non-macOS stub
-/// reaches for it (macOS has the real backend in this phase).
-#[cfg(not(target_os = "macos"))]
+/// (Linux session inhibit) — the op answers truthfully instead of
+/// pretending. Only the Linux-bound stub reaches for it (macOS and
+/// Windows carry real backends).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const BACKEND_MISSING_INSTRUCTION: &str =
     "umux Core has no Always-On backend on this platform yet — support ships in a later v1.7.5 phase.";
+
+/// The Windows lid caveat (story 142): the `SetThreadExecutionState` hold
+/// stops IDLE sleep — but the lid-close action is a power-plan setting no
+/// daemon can touch, so closing the lid may still sleep the machine per
+/// the user's plan. While Core is ON this caveat IS the honest state (PO
+/// decision 2026-10-04: always shown while ON; worded to stay true on
+/// lidless desktops), never silence.
+#[cfg(target_os = "windows")]
+const LID_INSTRUCTION: &str = "umux Core is keeping this machine awake while idle. If this device has a closing lid: the lid-close action still follows your Windows power plan — to stay awake with the lid closed, set it to \"Do nothing\" in Power Options (Control Panel → \"Choose what closing the lid does\").";
 
 /// The flag file: `<config_dir>/storestation.core.json`. Daemon-owned state
 /// (the plan's durable decision) — deliberately NOT part of the socket/pid
@@ -131,6 +145,14 @@ impl CoreState {
                 // the honest state, never silence.
                 if power_source_is_battery() == Some(true) {
                     self.instruction = Some(BATTERY_INSTRUCTION.to_string());
+                }
+                // Windows: the hold works (idle sleep, battery included),
+                // but the lid-close action is a power-plan setting this
+                // call cannot touch — while ON the lid caveat IS the
+                // honest state (PO decision 2026-10-04), never silence.
+                #[cfg(target_os = "windows")]
+                {
+                    self.instruction = Some(LID_INSTRUCTION.to_string());
                 }
             }
             Err(message) => {
@@ -289,9 +311,93 @@ mod power {
     }
 }
 
-/// Platforms without a backend yet (Windows/Linux phases 3–4): refuse
-/// honestly — `held: false` + the instruction string, never a fake OK.
-#[cfg(not(target_os = "macos"))]
+/// Windows (v1.7.5 phase 3 / issue #95): a dedicated daemon thread holding
+/// `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` — the hold
+/// `powercfg /requests` shows: no admin, the SCREEN may sleep, the machine
+/// may not drift into idle sleep. The hold is THREAD-LOCAL on Windows: it
+/// lives until the thread clears it (the explicit clear below is hygiene)
+/// or DIES — which is why the assertion owns its own thread whose lifetime
+/// is the daemon's: daemon stop/crash kills the thread and Windows drops a
+/// dead thread's execution state by itself.
+#[cfg(target_os = "windows")]
+mod power {
+    use std::sync::mpsc;
+
+    type ExecutionState = u32;
+
+    // Stable Win32 constants (winuser.h): continuous mode + "the system is
+    // required" — idle sleep is stopped, the display is NOT held awake.
+    const ES_CONTINUOUS: ExecutionState = 0x8000_0000;
+    const ES_SYSTEM_REQUIRED: ExecutionState = 0x0000_0001;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetThreadExecutionState(es_flags: ExecutionState) -> ExecutionState;
+    }
+
+    /// A held system-execution request. Dropping it ends the hold: the
+    /// parked thread unblocks, clears its state and exits (the join in
+    /// [`Drop`] is what a stuck hold thread would trip over). If the whole
+    /// process dies first, the thread dies with it and Windows releases
+    /// the hold anyway — the explicit clear is hygiene, not the guarantee.
+    pub struct PowerAssertion {
+        release: Option<mpsc::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    /// Take the hold on a dedicated thread and CONFIRM it before reporting
+    /// success — a zero return is the documented failure value, so `held`
+    /// is the OS's answer, never an assumption.
+    pub fn assert_system_sleep() -> Result<PowerAssertion, String> {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("umux-core-always-on".to_string())
+            .spawn(move || {
+                // SAFETY: SetThreadExecutionState takes no pointers and is
+                // documented thread-local; the hold dies with this thread,
+                // whichever way the thread ends.
+                let previous =
+                    unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+                if previous == 0 {
+                    let _ = ack_tx.send(Err(
+                        "Windows refused the Always-On hold (SetThreadExecutionState failed)."
+                            .to_string(),
+                    ));
+                    return;
+                }
+                let _ = ack_tx.send(Ok(()));
+                // Park until the assertion is dropped (the sender goes away,
+                // recv errors) — or until the process dies, which Windows
+                // treats the same for the hold.
+                let _ = release_rx.recv();
+                // SAFETY: as above — clears THIS thread's continuous state.
+                unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+            })
+            .map_err(|e| format!("could not spawn the Core hold thread: {e}"))?;
+        match ack_rx.recv() {
+            Ok(Ok(())) => Ok(PowerAssertion {
+                release: Some(release_tx),
+                thread: Some(thread),
+            }),
+            Ok(Err(message)) => Err(message),
+            Err(_) => Err("the Core hold thread died before confirming the hold.".to_string()),
+        }
+    }
+
+    impl Drop for PowerAssertion {
+        fn drop(&mut self) {
+            self.release = None; // unblocks the parked hold thread
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+/// Platforms without a backend yet (Linux, phase 4): refuse honestly —
+/// `held: false` + the instruction string, never a fake OK.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod power {
     pub struct PowerAssertion {
         _private: (),
@@ -405,5 +511,93 @@ mod tests {
         state.apply(false);
         assert!(!state.held());
         assert_eq!(state.view()["instruction"], Value::Null);
+    }
+
+    // ---- Windows (v1.7.5 phase 3 / issue #95) ----
+    //
+    // State-before-RED assumptions (#95):
+    // - `SetThreadExecutionState` is THREAD-LOCAL on Windows: the hold
+    //   lives until the thread clears it or dies, so the backend runs a
+    //   dedicated daemon thread; the thread dying with the process
+    //   releases the hold ("the assertion thread's lifetime is the
+    //   daemon's" — daemon stop/crash releases by construction).
+    // - A zero return = the OS refused the hold; nonzero = the previous
+    //   state (success). `held` becomes true only AFTER that confirmation
+    //   — the honest state, never an assumption.
+    // - Windows honors the hold on battery too (it only drains the
+    //   battery); the PRD bans battery intelligence, so the battery caveat
+    //   stays macOS-only.
+    // - While Core is ON the LID caveat is the honest Windows state (PO
+    //   decision 2026-10-04: always shown when ON — the lid-close action
+    //   is a power-plan setting no daemon can touch), so the instruction
+    //   is non-empty even when held — never silent (story 142).
+    // - Tests assert the contract (non-empty instruction), not the exact
+    //   UX wording. The wire shape is platform-agnostic (`CoreState::view`);
+    //   the unix-gated wire tests cover it on macOS, these cover the
+    //   Windows backend itself.
+
+    // The real backend, live: Core ON holds the idle-sleep block (no
+    // admin) and the lid caveat travels with it. A hang in `release()`
+    // (the join in Drop never unblocking) fails this test by timing out —
+    // which is the observable for "the release path completes".
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_core_on_holds_sleep_and_carries_the_lid_caveat() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        state.apply(true);
+        assert!(
+            state.held(),
+            "Windows holds the idle-sleep block: {:?}",
+            state.instruction
+        );
+        let view = state.view();
+        assert_eq!(view["held"], true);
+        let instruction = view["instruction"]
+            .as_str()
+            .expect("the lid caveat is the honest Windows state, never silence");
+        assert!(!instruction.is_empty(), "an instruction is never empty");
+        state.release();
+        assert!(!state.held(), "release drops the hold");
+        // Re-assert after a release: the previous hold's thread really
+        // finished (a leaked or stuck thread would show up here).
+        state.apply(true);
+        assert!(state.held(), "re-asserting after a release works");
+        state.release();
+    }
+
+    // OFF lands clean: hold dropped, no stale instruction (story 143 —
+    // and the guard against a leaked hold thread outliving the toggle).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_toggling_off_releases_and_clears_the_instruction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        state.apply(true);
+        state.apply(false);
+        assert!(!state.held());
+        assert_eq!(state.view()["instruction"], Value::Null);
+    }
+
+    // Daemon-start re-assert on Windows: a persisted ON flag comes back
+    // held with NO client call — the "every umux window closed" contract,
+    // live on the Windows backend.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_restore_re_asserts_from_the_persisted_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        save_flag(dir.path(), true).unwrap();
+        let state = CoreState::restore(dir.path());
+        assert!(state.enabled());
+        assert!(
+            state.held(),
+            "the fresh daemon re-asserted by itself: {:?}",
+            state.instruction
+        );
+        assert!(
+            state.view()["instruction"].as_str().is_some(),
+            "the lid caveat still travels while ON: {}",
+            state.view()
+        );
     }
 }

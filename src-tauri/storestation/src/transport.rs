@@ -23,6 +23,7 @@ use crate::socketpath;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Request/read budget (protocol design doc: request 10 s) — unix stream
 /// timeouts; the blocking wrappers bound their waits per call on Windows.
+#[cfg(unix)]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// One accept tick — the serve loop polls its stop conditions between ticks.
 pub const ACCEPT_TICK: Duration = Duration::from_millis(25);

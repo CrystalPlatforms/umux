@@ -91,7 +91,10 @@ pub fn systemd_unit_path(home: &std::path::Path) -> PathBuf {
 // --- Runtime plumbing --------------------------------------------------------
 
 /// The user's home directory (USERPROFILE on Windows, HOME elsewhere) — the
-/// base for the LaunchAgents and systemd paths.
+/// base for the LaunchAgents and systemd paths. Only the macOS/Linux
+/// autostart paths need it (Windows writes the registry directly), so the
+/// Windows build does not even compile it.
+#[cfg(not(target_os = "windows"))]
 fn home_dir() -> Result<PathBuf, String> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var)
