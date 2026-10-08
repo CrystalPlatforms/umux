@@ -5,7 +5,8 @@
 //! start with NO client call — the whole point is "every umux window closed".
 //! Daemon stop (graceful or crash) releases the block by construction: on
 //! macOS the assertion lives inside this process, and the kernel releases
-//! every power assertion of a dying process.
+//! every power assertion of a dying process. On Linux, closing the last
+//! inhibitor fd releases the logind block, including on SIGKILL.
 //!
 //! - Persistence: `<config_dir>/storestation.core.json`, `{"enabled": bool}`.
 //!   A missing or corrupt file reads as OFF (additive-safe, hand-editable).
@@ -20,8 +21,9 @@
 //!   — no admin, the SCREEN may sleep; the lid-close action is a power-plan
 //!   setting the daemon cannot touch, so while ON the honest state carries
 //!   the lid instruction (story 142).
-//! - Linux (plan phase 4): honest `held: false` + instruction, never a
-//!   silent lie.
+//! - Backend (Linux, phase 4 / issue #96): a logind sleep inhibitor fd
+//!   owned by the daemon; no display/idle or lid-switch inhibition. The
+//!   lid action remains a system setting and is explained in status.
 //!
 //! Unit tests below cover the pure parts (flag persistence, view shape);
 //! the wire behavior is exercised in `storestation/tests/core.rs`.
@@ -37,11 +39,8 @@ use serde_json::{json, Value};
 /// know, never silently).
 const BATTERY_INSTRUCTION: &str = "Running on battery power: macOS honors the Always-On block only on AC power — plug the Mac in to keep it awake (including with the lid closed).";
 
-/// The instruction for platforms whose backend ships in a later phase
-/// (Linux session inhibit) — the op answers truthfully instead of
-/// pretending. Only the Linux-bound stub reaches for it (macOS and
-/// Windows carry real backends).
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Unsupported platforms refuse honestly instead of claiming a hold.
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 const BACKEND_MISSING_INSTRUCTION: &str =
     "umux Core has no Always-On backend on this platform yet — support ships in a later v1.7.5 phase.";
 
@@ -53,6 +52,11 @@ const BACKEND_MISSING_INSTRUCTION: &str =
 /// lidless desktops), never silence.
 #[cfg(target_os = "windows")]
 const LID_INSTRUCTION: &str = "umux Core is keeping this machine awake while idle. If this device has a closing lid: the lid-close action still follows your Windows power plan — to stay awake with the lid closed, set it to \"Do nothing\" in Power Options (Control Panel → \"Choose what closing the lid does\").";
+
+/// logind owns lid handling; a sleep inhibitor does not override the
+/// lid-close policy (and umux never changes system configuration).
+#[cfg(target_os = "linux")]
+const LID_INSTRUCTION: &str = "umux Core is keeping this machine awake while idle. If this device has a closing lid: closing it may still suspend the machine under the system's logind lid policy. To stay awake with the lid closed, ask your administrator to configure that policy; umux does not change it.";
 
 /// The flag file: `<config_dir>/storestation.core.json`. Daemon-owned state
 /// (the plan's durable decision) — deliberately NOT part of the socket/pid
@@ -146,11 +150,9 @@ impl CoreState {
                 if power_source_is_battery() == Some(true) {
                     self.instruction = Some(BATTERY_INSTRUCTION.to_string());
                 }
-                // Windows: the hold works (idle sleep, battery included),
-                // but the lid-close action is a power-plan setting this
-                // call cannot touch — while ON the lid caveat IS the
-                // honest state (PO decision 2026-10-04), never silence.
-                #[cfg(target_os = "windows")]
+                // Windows/Linux: idle sleep is held, but the lid-close
+                // policy remains outside the daemon. Always show its caveat.
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
                 {
                     self.instruction = Some(LID_INSTRUCTION.to_string());
                 }
@@ -220,7 +222,6 @@ fn power_source_is_battery() -> Option<bool> {
 
 /// The per-platform assertion backend. macOS (this phase) talks IOKit
 /// directly — two C functions and CFString construction, no new dependency.
-/// Everywhere else: a stub that refuses honestly.
 #[cfg(target_os = "macos")]
 mod power {
     use std::ffi::{c_char, c_void, CString};
@@ -395,9 +396,97 @@ mod power {
     }
 }
 
-/// Platforms without a backend yet (Linux, phase 4): refuse honestly —
+/// Linux (issue #96): logind's Inhibit returns a Unix fd. Its lifetime,
+/// not the D-Bus connection's, owns the hold: OFF, graceful shutdown and
+/// process death (including SIGKILL) close it. No helper process can outlive
+/// the daemon and retain the inhibitor.
+///
+/// Only "sleep" is blocked: the display may blank/lock, and logind's lid
+/// policy remains untouched. "idle" would affect the system idle action;
+/// "handle-lid-switch" would take over the lid, both outside this backend.
+/// See https://www.freedesktop.org/wiki/Software/systemd/inhibit/
+#[cfg(target_os = "linux")]
+mod power {
+    use dbus::blocking::Connection;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::time::Duration;
+
+    pub struct PowerAssertion {
+        // OwnedFd's Drop closes the inhibitor; the kernel does so on crash.
+        _inhibitor: OwnedFd,
+    }
+
+    pub fn assert_system_sleep() -> Result<PowerAssertion, String> {
+        let connection = Connection::new_system().map_err(|e| {
+            format!("Cannot connect to the Linux system bus: {e}. Run umux in your desktop user session with logind available.")
+        })?;
+        let proxy = connection.with_proxy(
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            Duration::from_secs(2),
+        );
+        let (inhibitor,): (OwnedFd,) = proxy.method_call(
+            "org.freedesktop.login1.Manager",
+            "Inhibit",
+            ("sleep", "umux Core", "Always-On device", "block"),
+        ).map_err(|e| {
+            format!("logind refused the Always-On sleep inhibitor: {e}. Check that your desktop session permits sleep inhibition; the system lid-close policy remains unchanged.")
+        })?;
+        // The daemon launches terminal children. Never let an exec inherit
+        // this fd and keep the block alive after the daemon dies.
+        // SAFETY: inhibitor owns a live fd throughout both fcntl calls.
+        let flags = unsafe { libc::fcntl(inhibitor.as_raw_fd(), libc::F_GETFD) };
+        if flags < 0
+            || unsafe {
+                libc::fcntl(
+                    inhibitor.as_raw_fd(),
+                    libc::F_SETFD,
+                    flags | libc::FD_CLOEXEC,
+                )
+            } < 0
+        {
+            return Err(format!(
+                "Cannot protect the logind inhibitor fd from inheritance: {}.",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(PowerAssertion {
+            _inhibitor: inhibitor,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+
+        #[test]
+        fn explicit_release_closes_the_fd_while_the_daemon_state_still_lives() {
+            let (mut observer, inhibitor) = UnixStream::pair().unwrap();
+            let mut state = super::super::CoreState {
+                enabled: true,
+                assertion: Some(PowerAssertion {
+                    _inhibitor: inhibitor.into(),
+                }),
+                instruction: Some(super::super::LID_INSTRUCTION.to_owned()),
+            };
+            observer.set_nonblocking(true).unwrap();
+            assert_eq!(
+                observer.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            state.release();
+            assert_eq!(observer.read(&mut [0]).unwrap(), 0, "release closed the fd");
+            assert!(!state.held());
+            assert!(state.enabled(), "shutdown must preserve the user's choice");
+        }
+    }
+}
+
+/// Platforms without a backend: refuse honestly —
 /// `held: false` + the instruction string, never a fake OK.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod power {
     pub struct PowerAssertion {
         _private: (),

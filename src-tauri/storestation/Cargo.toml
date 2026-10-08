@@ -48,5 +48,9 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Linux Core owns the logind inhibitor fd directly (no helper process).
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9", features = ["stdfd"] }
+
 [dev-dependencies]
 tempfile = "3"

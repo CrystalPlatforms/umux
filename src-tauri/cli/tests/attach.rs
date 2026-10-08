@@ -169,6 +169,9 @@ impl Drop for Daemon {
 // catalog error object on stderr, naming the next steps.
 #[test]
 fn attach_offline_exits_3_with_the_catalog_error() {
+    // App resolution precedes the daemon check. Own the shared fixture
+    // for both calls instead of racing another test that removes it.
+    let _stub = StubApp::with_script("true");
     let dir = tempfile::tempdir().unwrap();
     let (stdout, stderr, code) = run_umux(dir.path(), &["attach", "--json"]);
     assert_eq!(code, Some(3), "offline attach must exit 3; stdout: {stdout}");
