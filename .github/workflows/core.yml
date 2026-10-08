@@ -31,6 +31,16 @@ jobs:
       - name: Build daemon and CLI
         working-directory: src-tauri
         run: cargo build --locked -p umux-storestation -p umux
-      - name: Test daemon, CLI and shared engines
+      - name: Test daemon, CLI and shared engines (Unix)
+        if: runner.os != 'Windows'
         working-directory: src-tauri
-        run: cargo test --locked -p umux-storestation -p umux -p store_core -p session_core
+        # PTY tests compete for the host's terminal limit when run in parallel.
+        run: cargo test --locked -p umux-storestation -p umux -p store_core -p session_core -- --test-threads=1
+      - name: Test Windows Core backend
+        if: runner.os == 'Windows'
+        working-directory: src-tauri
+        # The shared PTY suites use /bin/sh; Core itself is platform-native.
+        run: |
+          cargo test --locked -p umux-storestation --lib core::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p umux --test core_lifecycle
