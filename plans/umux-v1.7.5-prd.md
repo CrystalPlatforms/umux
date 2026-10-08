@@ -48,8 +48,10 @@ Agents and long jobs outlive attention: the user closes the lid or walks away, t
 
 ## Validation list (HITL, after implementation)
 
-- [ ] macOS: Core ON on AC → close the lid → machine stays awake (`pmset -g assertions` shows the umux assertion); Core OFF / daemon stop → assertion gone.
-- [ ] macOS on battery: the documented limit is visible (`sleepPrevented` state / instruction), no silent failure.
-- [ ] Windows: Core ON keeps the machine awake with the lid open; lid-close shows the instruction path; toggle-off releases.
-- [ ] Ubuntu: idle-sleep inhibit works in GNOME; lid instruction path shown.
-- [ ] `umux status --json` reports the Always-On state in every case above.
+Walked on real hardware 2026-10-08 (Adam) — passed.
+
+- [x] macOS: Core ON on AC → close the lid → machine stays awake (`pmset -g assertions` shows the umux assertion); Core OFF / daemon stop → assertion gone.
+- [x] macOS on battery: the documented limit is visible (`sleepPrevented` state / instruction), no silent failure.
+- [x] Windows: Core ON keeps the machine awake with the lid open; lid-close shows the instruction path; toggle-off releases.
+- [x] Ubuntu: idle-sleep inhibit works in GNOME; lid instruction path shown.
+- [x] `umux status --json` reports the Always-On state in every case above.
