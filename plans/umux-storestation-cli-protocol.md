@@ -75,7 +75,7 @@ Existing v1.6.x commands unchanged (`list export notify import new rm rename spl
 
 `umux status --json` (Storestation off): `{ "cliVersion": "1.7.0", "protocol": 1, "storestation": { "running": false, "staleSocket": false, "core": { "enabled": false, "held": false, "instruction": null }, "sleepPrevented": false, "sleepInstruction": null } }` — **exit 0**.
 
-The `core`/`sleepPrevented`/`sleepInstruction` keys (v1.7.5, umux Core — issue #93): `core` is the daemon's live view `{enabled, held, instruction}` — `enabled` is the persisted user choice, `held` the platform's live assertion truth, `instruction` the honest limit string when the OS limits the guarantee (macOS on battery) or the backend is missing (Windows/Linux before their phases). `sleepPrevented` flattens `held`; `sleepInstruction` mirrors `instruction`. A daemon older than the field reads as off (additive rule); a client older than the field ignores the keys.
+The `core`/`sleepPrevented`/`sleepInstruction` keys (v1.7.5, umux Core — issues #93/#95/#96; one schema on every platform, issue #97): `core` is the daemon's live view `{enabled, held, instruction}` — `enabled` is the persisted user choice, `held` the platform's live assertion truth, `instruction` the honest limit string when the OS limits the guarantee, else null: macOS on battery (the assertion is honored on AC power only), the lid-close caveat on Windows and Linux while Core is ON (the lid-close action stays a system setting the daemon does not touch), or a platform with no Always-On backend. `sleepPrevented` flattens `held`; `sleepInstruction` mirrors `instruction`. A daemon older than the field reads as off (additive rule); a client older than the field ignores the keys.
 
 `umux sessions list --json`:
 

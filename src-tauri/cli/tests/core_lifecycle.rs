@@ -254,3 +254,101 @@ fn status_offline_doc_carries_the_core_schema_without_a_flag_file() {
     assert_eq!(value["storestation"]["core"]["held"], false);
     assert_eq!(value["storestation"]["core"]["instruction"], Value::Null);
 }
+
+// v1.7.5 phase 5 / issue #97 — the "one schema everywhere" gate: the
+// Core-related field names must be IDENTICAL in the running and the
+// offline status document. The shape is platform-independent by
+// construction (one code path builds both documents in cli/src/main.rs)
+// and CI runs this test on all three platforms, so a drift in any gated
+// build fails here.
+//
+// Assumptions encoded here (state-before-RED, #97):
+// - `core` is exactly `{enabled: bool, held: bool, instruction: string|null}`.
+// - The Core-related top-level keys of `storestation` are exactly
+//   `core` + `{sleepPrevented: bool, sleepInstruction: string|null}`;
+//   other keys (running, pid, …) belong to other features, and
+//   `staleSocket` exists only offline and is NOT a Core key.
+// - Only the VALUES may differ (macOS battery, Windows/Linux lid
+//   caveats while ON) — never the names or types, so both documents are
+//   diffed on the key sets too.
+#[test]
+fn core_schema_field_names_are_identical_in_both_status_documents() {
+    let store = tempfile::tempdir().unwrap();
+
+    // The offline document first: no daemon, no flag file.
+    let offline = json(&run_umux(store.path(), &["status", "--json"]).0);
+
+    // Then the running document with Core ON, so the instruction
+    // semantics are exercised on every platform's honest state.
+    let mut daemon = Daemon::start(store.path());
+    wait_until_running(store.path());
+    let (_, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
+    assert_eq!(code, Some(0), "`core on` exits 0; stderr: {stderr}");
+    let running = json(&run_umux(store.path(), &["status", "--json"]).0);
+
+    let core_keys = |svc: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = svc["core"]
+            .as_object()
+            .expect("the core object exists")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    let core_related_top_keys = |svc: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = svc
+            .as_object()
+            .expect("the storestation object exists")
+            .keys()
+            .filter(|key| *key == "core" || key.starts_with("sleep"))
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+
+    for (name, svc) in [
+        ("running", &running["storestation"]),
+        ("offline", &offline["storestation"]),
+    ] {
+        assert_eq!(
+            core_keys(svc),
+            vec!["enabled".to_string(), "held".to_string(), "instruction".to_string()],
+            "{name}: the core object's exact key set"
+        );
+        assert_eq!(
+            core_related_top_keys(svc),
+            vec![
+                "core".to_string(),
+                "sleepInstruction".to_string(),
+                "sleepPrevented".to_string()
+            ],
+            "{name}: the Core-related top-level key set"
+        );
+        assert!(svc["core"]["enabled"].is_boolean(), "{name}: core.enabled is a bool");
+        assert!(svc["core"]["held"].is_boolean(), "{name}: core.held is a bool");
+        assert!(
+            svc["core"]["instruction"].is_null() || svc["core"]["instruction"].is_string(),
+            "{name}: core.instruction is a string or null"
+        );
+        assert!(svc["sleepPrevented"].is_boolean(), "{name}: sleepPrevented is a bool");
+        assert!(
+            svc["sleepInstruction"].is_null() || svc["sleepInstruction"].is_string(),
+            "{name}: sleepInstruction is a string or null"
+        );
+    }
+
+    // The two documents expose the SAME names — the one-schema rule.
+    assert_eq!(
+        core_keys(&running["storestation"]),
+        core_keys(&offline["storestation"])
+    );
+    assert_eq!(
+        core_related_top_keys(&running["storestation"]),
+        core_related_top_keys(&offline["storestation"])
+    );
+
+    // The daemon dies on drop; the kernel releases its assertion with it.
+    drop(daemon);
+}
