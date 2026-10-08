@@ -24,6 +24,8 @@ Media żyją w `landing/assets/` pod własnymi nazwami.
 | `assets/umux-workspaces.png` | karta „Workspaces & panels" (sidebar: grupy, taby, panele) |
 | `assets/umux-terminal.png` | karta „Embedded terminal" (vim/htop w panelu) |
 | `assets/umux-agent.png` | karta „Agent status & notifications" |
+| `assets/umux-storestation.png` | karta „Sessions that outlive the window" (Storestation: przełącznik + status) |
+| `assets/umux-core.png` | karta „Always-On (umux Core)" (przełącznik Core w Settings) |
 | `assets/umux-updates.png` | karta „In-app updates" (Settings → App updates) |
 | `assets/umux-session.png` | karta „Session restore" |
 | `assets/umux-cmux.png` | karta „Import from cmux" (kreator importu) |

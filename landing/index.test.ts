@@ -29,8 +29,8 @@ import { JSDOM } from "jsdom";
 //    teaser sections proposed in the same phase were REMOVED at Adam's
 //    direction (2026-09-30) — they cluttered the page. The roadmap carries
 //    every released version and every planned one, one short line each
-//    (mirroring the 2026-09-12 renumbered master-PRD roadmap: Storestation
-//    v1.7.0 is current; Core Always-On v1.7.5, live CLI v1.8.0, TUI v1.9.0,
+//    (mirroring the 2026-09-12 renumbered master-PRD roadmap: Core
+//    Always-On v1.7.5 is current; live CLI v1.8.0, TUI v1.9.0,
 //    Agents View v2.0.0, …, Ecosystem v3.0.0 planned). Internal anchors
 //    must resolve to real ids; "no dead external links" is asserted as a
 //    destination WHITELIST (we can't fetch the network from a unit test —
@@ -210,11 +210,11 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
     it("shows the real product screenshots with a placeholder fallback", () => {
         // Every shipped-feature tile carries its own screenshot (Adam,
         // 2026-09-16): umux-first is the big hero image, and the tiles use
-        // umux-workspaces / umux-terminal / umux-agent / umux-ssh /
-        // umux-updates / umux-session / umux-cmux. Only the herdr tile stays
-        // imageless — that feature isn't built yet, there is nothing to shoot.
-        // A broken image must still degrade to the inline placeholder, never
-        // a broken-icon.
+        // umux-workspaces / umux-terminal / umux-agent / umux-storestation /
+        // umux-core / umux-updates / umux-session / umux-cmux. Only the
+        // herdr tile stays imageless — that feature isn't built yet, there
+        // is nothing to shoot. A broken image must still degrade to the
+        // inline placeholder, never a broken-icon.
         const doc = parse();
         const hero = doc.querySelector(".demo-frame img");
         expect(hero?.getAttribute("src")).toBe("assets/umux-first.png");
@@ -230,6 +230,8 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expectTileImg(/workspaces/i, "umux-workspaces.png");
         expectTileImg(/embedded terminal/i, "umux-terminal.png");
         expectTileImg(/agent status/i, "umux-agent.png");
+        expectTileImg(/sessions that outlive/i, "umux-storestation.png");
+        expectTileImg(/always-on/i, "umux-core.png");
         expectTileImg(/in-app updates/i, "umux-updates.png");
         expectTileImg(/session restore/i, "umux-session.png");
         expectTileImg(/import from cmux/i, "umux-cmux.png");
@@ -255,17 +257,18 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(html).not.toMatch(/demo\.gif|screenshot-(linux|macos|windows)\.png/);
     });
 
-    it("leads with the one-line pitch and the eight feature tiles", () => {
-        // Hero pitch + eight tiles (2026-09-16 refresh to the v1.6.2 state):
-        // workspaces & panels, embedded terminal (shipped since v0.1 — its
-        // old "coming soon" badge was wrong), agent status & notifications,
-        // SSH panels, in-app updates, session restore, import from cmux
-        // (shipped) and import from herdr (the only still-unbuilt one).
+    it("leads with the one-line pitch and the ten feature tiles", () => {
+        // Hero pitch + ten tiles (2026-10-08, v1.7.5 state): workspaces &
+        // panels, embedded terminal (shipped since v0.1 — its old "coming
+        // soon" badge was wrong), agent status & notifications, sessions
+        // that outlive the window (Storestation), Always-On (umux Core),
+        // in-app updates, session restore, import from cmux (shipped),
+        // SSH panels and import from herdr (the only still-unbuilt one).
         const doc = parse();
         expect(doc.querySelector("h1")?.textContent ?? "").toMatch(/terminal workspace/i);
 
         const features = [...doc.querySelectorAll(".feature")];
-        expect(features, "expected eight feature tiles").toHaveLength(8);
+        expect(features, "expected ten feature tiles").toHaveLength(10);
         const text = features
             .map((f) => f.textContent?.toLowerCase() ?? "")
             .join("\n");
@@ -279,6 +282,8 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(text).toMatch(/embedded terminal/);
         expect(text).toMatch(/ssh/);
         expect(text).toMatch(/in-app updates/);
+        expect(text).toMatch(/storestation/);
+        expect(text).toMatch(/always-on/);
         // Unbuilt features must say so up front on their tiles.
         const byHeading = (re: RegExp) =>
             features.find((f) => re.test(f.querySelector("h2")?.textContent ?? ""));
@@ -513,7 +518,7 @@ describe("umux landing page — roadmap (Issue #91, Phase 9)", () => {
     it("lists every shipped release up to the current one", () => {
         // The full release history in one short line per version — from the
         // first feature release to the current one. Exactly ONE entry may
-        // be marked current, and it must be v1.7.0 (Storestation).
+        // be marked current, and it must be v1.7.5 (umux Core).
         const doc = parse();
         const roadmap = doc.querySelector("section.roadmap#roadmap");
         expect(roadmap, "roadmap section missing").toBeTruthy();
@@ -526,19 +531,21 @@ describe("umux landing page — roadmap (Issue #91, Phase 9)", () => {
             "v1.6.0",
             "v1.6.1",
             "v1.7.0",
+            "v1.7.5",
         ]) {
             expect(text, `shipped version ${version} missing`).toContain(version);
         }
         expect(text).toMatch(/storestation/);
+        expect(text).toMatch(/always-on/);
 
         const items = [...roadmap!.querySelectorAll(".timeline-item")];
         const current = items.filter((i) => i.classList.contains("now"));
         expect(current, "exactly one roadmap entry may be current").toHaveLength(1);
-        expect(current[0]?.textContent ?? "").toMatch(/v1\.7\.0/);
+        expect(current[0]?.textContent ?? "").toMatch(/v1\.7\.5/);
     });
 
     it("lists every planned release without drowning in detail", () => {
-        // The planned ladder, one short line each — v1.7.5 through v2.6.0
+        // The planned ladder, one short line each — v1.8.0 through v2.6.0
         // plus the v3.0.0 ecosystem finale (development branch). Each line
         // stays a headline: no dates, no scope essays.
         const doc = parse();
@@ -546,7 +553,6 @@ describe("umux landing page — roadmap (Issue #91, Phase 9)", () => {
         expect(roadmap, "roadmap section missing").toBeTruthy();
         const text = (roadmap?.textContent ?? "").toLowerCase();
         for (const [version, topic] of [
-            ["v1.7.5", "always-on"],
             ["v1.8.0", "live cli"],
             ["v1.9.0", "terminal"],
             ["v2.0.0", "agents view"],

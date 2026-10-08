@@ -441,6 +441,18 @@
       <p>umux reads the standard OSC signals emitted by AI CLIs (Claude Code, Codex, Gemini CLI, Aider…) and pings you when a task finishes — or when it's waiting for your input. Each panel shows a live status — working, needs-attention, idle — and the notification drops you onto the exact panel that raised it. Detection is from escape sequences and process names, never from your terminal content.</p>
     </div>
     <div class="feature reveal">
+      <img class="feature-img" loading="lazy" src="assets/umux-storestation.png" alt="umux Storestation settings — the daemon switch and live status"
+           onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+      <h2>Sessions that outlive the window</h2>
+      <p>umux Storestation — an optional daemon, off by default — owns your sessions: close every window and the shells keep running, so an agent halfway through a task keeps going. <code>umux attach</code> opens a view back into the live sessions, minutes or hours later.</p>
+    </div>
+    <div class="feature reveal">
+      <img class="feature-img" loading="lazy" src="assets/umux-core.png" alt="umux Core (Always-On device) switch in Settings"
+           onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
+      <h2>Always-On (umux Core)</h2>
+      <p>One switch and the machine itself stays awake for as long as Core holds it — even with the lid closed and every window shut. The screen may still sleep, and where the OS limits the promise (battery, the lid) umux says so in plain words instead of pretending. Off by default.</p>
+    </div>
+    <div class="feature reveal">
       <img class="feature-img" loading="lazy" src="assets/umux-updates.png" alt="umux Settings — App updates section with the check-for-updates button"
            onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
       <div class="feature-head">
@@ -536,13 +548,13 @@
         <span class="version">v1.6.1</span>
         <span class="what">Sidebar drag-resize fix with persisted width.</span>
       </div>
-      <div class="timeline-item now">
+      <div class="timeline-item">
         <span class="version">v1.7.0</span>
         <span class="what"><strong>umux Storestation</strong> — sessions outlive the window; <code>umux attach</code>, autostart; ships in every installer.</span>
       </div>
-      <div class="timeline-item">
+      <div class="timeline-item now">
         <span class="version">v1.7.5</span>
-        <span class="what">umux Core (Always-On) — keep the machine awake while sessions run.</span>
+        <span class="what">umux Core (Always-On) — keep the machine awake while sessions run, even with every window closed; off by default.</span>
       </div>
       <div class="timeline-item">
         <span class="version">v1.8.0</span>
