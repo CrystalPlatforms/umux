@@ -1,6 +1,6 @@
 [package]
 name = "session_core"
-version = "1.7.1"
+version = "1.7.5"
 edition = "2021"
 rust-version = "1.77.2"
 description = "The shared umux session engine: PTY/session lifecycle linked by the desktop app in-process and by the umux-storestation daemon (v1.7.0 phase 2, issue #84)"
