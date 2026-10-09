@@ -3,7 +3,7 @@
 > Extract of the master PRD ([`umux-prd.md`](./umux-prd.md) wins on conflict); stories #141–#143.
 > Discovered 2026-09-20 in an /ask session with the PO. Same day, the v1.7.0 daemon was **rebranded umux Storestation** and the name **umux Core** was assigned to this feature.
 
-**Status:** planned — slot after v1.7.0 ships, before v1.8.0 (PO decision 2026-09-20).
+**Status:** shipped — released from `main` on 2026-10-09 (tag `v1.7.5`; phases #93–#96 merged, validation issue #97 closed; HITL walked on real hardware 2026-10-08).
 
 ## What it is
 
