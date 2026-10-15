@@ -285,6 +285,29 @@ mod imp {
     /// documented client behavior for local RPC pipes.
     const ERROR_PIPE_BUSY: i32 = 231;
 
+    /// Drive one pipe-I/O future to completion on the shared runtime.
+    ///
+    /// A bare `block_on` PANICS when the calling thread already belongs to a
+    /// runtime ("Cannot start a runtime from within a runtime") — and umux's
+    /// session ops legitimately run there: the desktop app's async invoke
+    /// commands (`panel_processes`, `pty_is_busy`, …) execute on Tauri's
+    /// tokio workers, and every daemon-routed call ends in this module's
+    /// pipe I/O. That panic aborts the whole app with a fail-fast (issue
+    /// #100: daemon alive → the app dies seconds after launch, Event Log
+    /// 0xc0000409). Inside a runtime context the task parks off the worker
+    /// first (`block_in_place`), then blocks on the shared runtime; plain
+    /// threads (the CLI, the daemon's serve loop, the app's sync commands
+    /// and the persistent reader) keep the plain `block_on`.
+    fn drive<F: std::future::Future>(fut: F) -> F::Output {
+        let rt = shared();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let handle = rt.handle().clone();
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        } else {
+            rt.block_on(fut)
+        }
+    }
+
     /// The ONE process-wide runtime for all pipe I/O. Tokio named pipes
     /// register with the reactor of the runtime they were created under —
     /// an operation from a DIFFERENT runtime would park forever waiting on
@@ -313,7 +336,7 @@ mod imp {
     impl Listener {
         pub fn bind(config_dir: &Path) -> io::Result<Listener> {
             let name = socketpath::pipe_name(config_dir);
-            let server = shared().block_on(async {
+            let server = drive(async {
                 ServerOptions::new()
                     .first_pipe_instance(true)
                     .create(&name)
@@ -335,14 +358,14 @@ mod imp {
                 return Ok(None);
             }
             let server = self.server.as_mut().expect("listener is bound");
-            let connected = shared().block_on(async {
+            let connected = drive(async {
                 tokio::time::timeout(ACCEPT_TICK, server.connect()).await
             });
             match connected {
                 Ok(Ok(())) => {
                     let used = self.server.take().expect("just used");
                     self.server =
-                        Some(shared().block_on(async { ServerOptions::new().create(&self.name) })?);
+                        Some(drive(async { ServerOptions::new().create(&self.name) })?);
                     Ok(Some(super::Stream::new(used)))
                 }
                 Ok(Err(e)) => Err(e),
@@ -362,16 +385,16 @@ mod imp {
 
     impl io::Read for Stream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            shared().block_on(async { self.0.read(buf).await })
+            drive(async { self.0.read(buf).await })
         }
     }
 
     impl io::Write for Stream {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            shared().block_on(async { self.0.write(buf).await })
+            drive(async { self.0.write(buf).await })
         }
         fn flush(&mut self) -> io::Result<()> {
-            shared().block_on(async { self.0.flush().await })
+            drive(async { self.0.flush().await })
         }
     }
 
@@ -380,16 +403,16 @@ mod imp {
 
     impl io::Read for ClientStream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            shared().block_on(async { self.0.read(buf).await })
+            drive(async { self.0.read(buf).await })
         }
     }
 
     impl io::Write for ClientStream {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            shared().block_on(async { self.0.write(buf).await })
+            drive(async { self.0.write(buf).await })
         }
         fn flush(&mut self) -> io::Result<()> {
-            shared().block_on(async { self.0.flush().await })
+            drive(async { self.0.flush().await })
         }
     }
 
@@ -401,7 +424,7 @@ mod imp {
         let name = socketpath::pipe_name(config_dir);
         let deadline = Instant::now() + CONNECT_TIMEOUT;
         loop {
-            match shared().block_on(async { ClientOptions::new().open(&name) }) {
+            match drive(async { ClientOptions::new().open(&name) }) {
                 Ok(pipe) => return Ok(ClientStream(pipe)),
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {}
                 Err(e) => return Err(e),
@@ -464,31 +487,31 @@ mod imp {
 
     impl io::Read for BlockingHalf<ServerReadHalf> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            shared().block_on(async { self.half.read(buf).await })
+            drive(async { self.half.read(buf).await })
         }
     }
 
     impl io::Read for BlockingHalf<ClientReadHalf> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            shared().block_on(async { self.half.read(buf).await })
+            drive(async { self.half.read(buf).await })
         }
     }
 
     impl io::Write for BlockingHalf<ServerWriteHalf> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            shared().block_on(async { self.half.write(buf).await })
+            drive(async { self.half.write(buf).await })
         }
         fn flush(&mut self) -> io::Result<()> {
-            shared().block_on(async { self.half.flush().await })
+            drive(async { self.half.flush().await })
         }
     }
 
     impl io::Write for BlockingHalf<ClientWriteHalf> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            shared().block_on(async { self.half.write(buf).await })
+            drive(async { self.half.write(buf).await })
         }
         fn flush(&mut self) -> io::Result<()> {
-            shared().block_on(async { self.half.flush().await })
+            drive(async { self.half.flush().await })
         }
     }
 }
@@ -515,3 +538,80 @@ pub use imp::{
     connect, endpoint_display, remove_socket_file, split_client, split_stream, ClientStream,
     Listener, Stream,
 };
+
+// Issue #100 (v1.7.6 phase 1) — the Windows transport must survive a caller
+// that already runs INSIDE another tokio runtime. The desktop app's async
+// invoke commands (panel_processes, pty_is_busy, …) execute on Tauri's tokio
+// workers, and every daemon-routed session op ends in this module's pipe
+// I/O; a bare `block_on` there panics ("Cannot start a runtime from within
+// a runtime") and the panic aborts the whole app (fail-fast, Event Log
+// 0xc0000409, "daemon alive → app dies ~7 s after launch").
+#[cfg(all(test, windows))]
+mod nested_runtime_caller_tests {
+    use super::*;
+    use crate::protocol::{read_frame, write_control, Frame};
+
+    #[test]
+    fn client_io_survives_a_caller_inside_another_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut listener = Listener::bind(dir.path()).unwrap();
+
+        // The daemon side: accept one connection, answer one control frame
+        // (plain OS thread — the daemon's own shape).
+        let server = std::thread::spawn(move || {
+            let mut stream = loop {
+                match listener.next_client(&|| false).unwrap() {
+                    Some(stream) => break stream,
+                    None => continue,
+                }
+            };
+            let StreamHalves { read: mut from_client, write: mut to_client } =
+                split_stream(stream).expect("split the server side");
+            let request = match read_frame(&mut from_client) {
+                Ok(Frame::Control(value)) => value,
+                other => panic!("server expected a control frame, got {other:?}"),
+            };
+            let id = request.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let mut reply = to_client;
+            write_control(
+                &mut reply,
+                &serde_json::json!({ "id": id, "ok": true, "result": {} }),
+            )
+            .unwrap();
+        });
+
+        // The client side, driven from INSIDE a second multi-thread runtime
+        // — the exact thread context a Tauri async command runs on.
+        let client = connect(dir.path()).expect("client connect");
+        let mut halves = split_client(client).expect("split the client side");
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::task::spawn(async move {
+                write_control(
+                    &mut halves.write,
+                    &serde_json::json!({ "id": 7, "op": "storestation.status", "params": {} }),
+                )
+                .expect("write from inside a runtime");
+                match read_frame(&mut halves.read).expect("read from inside a runtime") {
+                    Frame::Control(value) => {
+                        assert_eq!(
+                            value.get("ok").and_then(serde_json::Value::as_bool),
+                            Some(true),
+                            "the daemon's reply should round-trip: {value}"
+                        );
+                    }
+                    other => panic!("client expected a control frame, got {other:?}"),
+                }
+            })
+            .await
+            .expect("the spawned task must not panic");
+        });
+
+        server.join().expect("the server thread must not panic");
+    }
+}
