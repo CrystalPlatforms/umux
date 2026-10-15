@@ -26,8 +26,12 @@
 //!   killed first — story 110's clean stop).
 //! - [`client`] — the client side the `umux` CLI uses today and the desktop
 //!   app's daemon-client driver will use in phase 4.
+//! - [`console`] — Windows output routing for console-less launches of the
+//!   daemon binary (#101): pure decision (direct / attach parent console /
+//!   silent) with thin OS calls around it.
 
 pub mod client;
+pub mod console;
 pub mod core;
 pub mod protocol;
 pub mod registry;

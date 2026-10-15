@@ -41,9 +41,11 @@ struct StorestationCli {
 enum Command {
     /// Serve the per-user socket in the foreground until stopped
     Run {
-        /// Launch with the console window hidden (Windows autostart, #89:
-        /// a Run-key launch of a console binary would otherwise flash one
-        /// at every login). Accepted and inert on macOS/Linux.
+        /// Accepted for compatibility with existing autostart artifacts
+        /// (the Windows Run key still carries it). Inert since #101
+        /// (v1.7.6 P3): windowless autostart comes from the conhost
+        /// --headless artifact (phase 4) — the old in-process SW_HIDE
+        /// missed the Windows Terminal default-host case and is gone.
         #[arg(long)]
         hidden: bool,
     },
@@ -73,6 +75,15 @@ enum CoreStateArg {
 }
 
 fn main() {
+    // First statement on purpose: the std handles are cached by Rust at
+    // first print, so the route must be applied before anything prints.
+    // #101 (v1.7.6 P3, PO decision): the binary stays console-subsystem so
+    // a terminal `run` keeps the v1.7.5 UX (the shell waits on it, Ctrl+C
+    // reaches the handler). Launches WITHOUT a console — the app-side
+    // CREATE_NO_WINDOW spawn and the conhost --headless Run-key host (both
+    // phase 4) — are kept panic-free by the routing below (direct / attach
+    // parent console / silent).
+    umux_storestation::console::apply_route();
     // Bare `umux-storestation` is the "what can this do?" entry, same as `umux`.
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 1 {
@@ -88,7 +99,10 @@ fn main() {
     }
 
     let code = match cli.command {
-        Some(Command::Run { hidden }) => cmd_run(hidden),
+        // `hidden` is inert since #101 — windowless autostart is delivered
+        // by the phase-4 conhost --headless artifact, and hiding here could
+        // only ever target the USER'S OWN terminal console.
+        Some(Command::Run { hidden: _ }) => cmd_run(),
         Some(Command::Stop { json }) => cmd_stop(json),
         Some(Command::Core { state, json }) => cmd_core(state, json),
         None => 0,
@@ -96,32 +110,7 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Hide this process's console window (Windows `run --hidden`). Best
-/// effort: a missing console (GUI parent) or a failed call just means the
-/// window question is moot — the daemon serves either way.
-#[cfg(windows)]
-fn hide_console() {
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::System::Console::GetConsoleWindow;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
-    // SAFETY: parameterless window query + a standard show-state change on
-    // whatever handle the OS returns; both calls are documented no-ops on a
-    // null console.
-    unsafe {
-        let console: HWND = GetConsoleWindow();
-        if !console.is_null() {
-            ShowWindow(console, SW_HIDE);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn hide_console() {}
-
-fn cmd_run(hidden: bool) -> i32 {
-    if hidden {
-        hide_console();
-    }
+fn cmd_run() -> i32 {
     let dir = store_core::paths::config_dir();
     let prepared = match server::prepare(&dir) {
         Ok(prepared) => prepared,
