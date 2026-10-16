@@ -925,6 +925,42 @@ fn run_sessions_list(as_json: bool, limit: Option<usize>) {
 
 // --- umux attach (#87, v1.7.0 phase 5) ---------------------------------------
 
+/// The shadowing-copy hint (v1.7.6 P5, #104, story 9): every `umux attach`
+/// failure names the PATH lookup command, so a stale copy earlier on PATH
+/// (the cargo-installed CLI 1.0.2 on the PO's machine) is discoverable by
+/// ANY user — not just by whoever knows the war story.
+fn path_lookup_hint() -> String {
+    if cfg!(windows) {
+        "verify which umux this was (a stale copy on PATH shadows the bundled CLI): where umux"
+            .into()
+    } else {
+        "verify which umux this was (a stale copy on PATH shadows the bundled CLI): which -a umux"
+            .into()
+    }
+}
+
+/// The attach failure when the desktop app is unresolvable: enumerated next
+/// steps (the install hint) PLUS the lookup hint (#104). Pure — unit-tested.
+fn attach_app_unresolved_error() -> ErrorObj {
+    ErrorObj::new(
+        codes::IO_ERROR,
+        "could not locate the umux desktop app next to the CLI",
+        vec![
+            "install the desktop app (the CLI and the app ship in one installer)".into(),
+            "or open umux manually, then run: umux attach".into(),
+            path_lookup_hint(),
+        ],
+    )
+}
+
+/// The attach failure when Storestation is unreachable: the catalog's
+/// offline error with the lookup hint (#104) appended. Pure — unit-tested.
+fn attach_offline_error(offline: ErrorObj) -> ErrorObj {
+    let mut err = offline;
+    err.next.push(path_lookup_hint());
+    err
+}
+
 /// The desktop app's binary name (the bundler's `mainBinaryName`): every
 /// installer lays the CLI BESIDE the app binary — NSIS install dir,
 /// .deb /usr/bin, macOS bundle `Contents/MacOS` — so "next to me" is the
@@ -1005,14 +1041,7 @@ fn run_attach(as_json: bool, dry_run: bool) {
         std::process::exit(5);
     });
     let Some(app) = resolve_app_binary_from(&exe) else {
-        let err = ErrorObj::new(
-            codes::IO_ERROR,
-            "could not locate the umux desktop app next to the CLI",
-            vec![
-                "install the desktop app (the CLI and the app ship in one installer)".into(),
-                "or open umux manually, then run: umux attach".into(),
-            ],
-        );
+        let err = attach_app_unresolved_error();
         if as_json {
             eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
         } else {
@@ -1038,11 +1067,13 @@ fn run_attach(as_json: bool, dry_run: bool) {
         return;
     }
 
-    // Storestation must be alive — offline is exit 3 with the catalog error.
+    // Storestation must be alive — offline is exit 3 with the catalog error
+    // (plus the PATH lookup hint, #104: a shadowing CLI copy is the most
+    // common reason attach "does not work").
     let dir = store_core::paths::config_dir();
     if let Err(e) = umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION"))
     {
-        let err = e.to_error_obj();
+        let err = attach_offline_error(e.to_error_obj());
         if as_json {
             eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
         } else {
@@ -1254,5 +1285,53 @@ mod attach_resolution {
         }
 
         assert_eq!(resolved, Some(scratch.path().join("umux-app")));
+    }
+
+    // --- v1.7.6 P5 (#104): attach failures name the PATH lookup command -----
+
+    // AC: "attach failure output (daemon or app unresolvable) includes the
+    // lookup hint" — so ANY user can discover a shadowing copy (the PO's
+    // cargo-installed CLI 1.0.2 winning PATH was invisible to everyone who
+    // did not know the war story).
+    #[test]
+    fn app_unresolved_failure_includes_the_lookup_hint() {
+        let err = attach_app_unresolved_error();
+        let expected = if cfg!(windows) { "where umux" } else { "which -a umux" };
+        assert!(
+            err.next.iter().any(|step| step.contains(expected)),
+            "lookup hint missing from {:?}",
+            err.next
+        );
+    }
+
+    #[test]
+    fn offline_daemon_failure_includes_the_lookup_hint() {
+        let catalog = umux_storestation::client::ConnectError::NotRunning { stale: false }
+            .to_error_obj();
+        let err = attach_offline_error(catalog);
+        let expected = if cfg!(windows) { "where umux" } else { "which -a umux" };
+        assert!(
+            err.next.iter().any(|step| step.contains(expected)),
+            "lookup hint missing from {:?}",
+            err.next
+        );
+        // The catalog's own next steps survive the append.
+        assert!(err
+            .next
+            .iter()
+            .any(|step| step.contains("umux-storestation run")));
+    }
+
+    // The hint names the right command per platform, deterministically.
+    #[test]
+    fn lookup_hint_names_the_platform_lookup_command() {
+        let hint = path_lookup_hint();
+        if cfg!(windows) {
+            assert!(hint.contains("where umux"));
+            assert!(!hint.contains("which -a umux"));
+        } else {
+            assert!(hint.contains("which -a umux"));
+            assert!(!hint.contains("where umux"));
+        }
     }
 }

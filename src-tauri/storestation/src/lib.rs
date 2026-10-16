@@ -26,6 +26,9 @@
 //!   killed first — story 110's clean stop).
 //! - [`client`] — the client side the `umux` CLI uses today and the desktop
 //!   app's daemon-client driver will use in phase 4.
+//! - [`gate`] — the daemon version gate (v1.7.6 P2, #102): the pure
+//!   (daemon version, app version) → verdict classification the driver
+//!   applies to the hello handshake at its one choke point.
 //! - [`console`] — Windows output routing for console-less launches of the
 //!   daemon binary (#101): pure decision (direct / attach parent console /
 //!   silent) with thin OS calls around it.
@@ -33,6 +36,7 @@
 pub mod client;
 pub mod console;
 pub mod core;
+pub mod gate;
 pub mod protocol;
 pub mod registry;
 pub mod server;

@@ -232,6 +232,66 @@ struct IdMap {
     by_app: HashMap<u32, (String, u64)>,
 }
 
+/// Why `DaemonDriver::connect` did not produce a usable daemon connection
+/// (v1.7.6 P2, #102). Typed so the router can decide what the user sees:
+/// offline is a STATE (no card), a gate refusal is a Settings error card,
+/// everything else is an ordinary failure the toggle reports.
+#[derive(Debug, Clone)]
+pub enum DaemonConnectError {
+    /// No daemon answered. Normal when Storestation is enabled but the
+    /// daemon is down — never an error card.
+    Offline,
+    /// The version gate refused: an older daemon that could not be replaced,
+    /// a newer-MAJOR daemon (no downgrade attempt), or a malformed handshake.
+    /// The message is what the Settings Storestation section renders.
+    Gate { message: String },
+    /// A protocol or transport failure that is neither offline nor a gate
+    /// refusal.
+    Other { message: String },
+}
+
+impl DaemonConnectError {
+    /// Whether this failure belongs on the Settings error card.
+    fn is_gate(&self) -> bool {
+        matches!(self, DaemonConnectError::Gate { .. })
+    }
+
+    /// The human message (Gate carries its own; the rest are transient).
+    fn message(&self) -> String {
+        match self {
+            DaemonConnectError::Offline => "umux Storestation is not running.".into(),
+            DaemonConnectError::Gate { message } => message.clone(),
+            DaemonConnectError::Other { message } => message.clone(),
+        }
+    }
+}
+
+/// Map the client crate's connect error onto the typed outcome. A protocol
+/// MAJOR mismatch is a gate refusal (protoTooNew = the daemon is newer than
+/// this client, protoTooOld = the daemon cannot serve this client's major).
+fn map_connect_error(e: umux_storestation::client::ConnectError) -> DaemonConnectError {
+    use umux_storestation::client::ConnectError;
+    use umux_storestation::protocol::codes;
+    match e {
+        ConnectError::NotRunning { .. } => DaemonConnectError::Offline,
+        ConnectError::Protocol(err)
+            if err.code == codes::PROTO_TOO_NEW || err.code == codes::PROTO_TOO_OLD =>
+        {
+            DaemonConnectError::Gate {
+                message: format!(
+                    "the running umux Storestation daemon is not compatible with this app: {}. \
+                     Update umux so the app and the daemon come from one build.",
+                    err.message
+                ),
+            }
+        }
+        ConnectError::Protocol(err) => DaemonConnectError::Other {
+            message: err.message,
+        },
+        ConnectError::Io(e) => DaemonConnectError::Other { message: e.to_string() },
+    }
+}
+
 /// One rebinding session's fan-out (macOS HITL 2026-09-22): the client
 /// carries ONE output channel per session (keyed by session id), but
 /// SEVERAL panels can ride that session — React StrictMode's remount
@@ -244,26 +304,140 @@ struct Dispatcher {
 }
 
 impl DaemonDriver {
-    /// Connect to the running daemon (handshake included). Callers probe
-    /// availability first (`storestation_status`), so a failure here is a
-    /// real error the command reports.
-    pub fn connect() -> Result<Self, String> {
-        let client = umux_storestation::client::PersistentClient::connect(
+    /// Connect to the running daemon (handshake included), then apply the
+    /// VERSION GATE (#102, v1.7.6 P2) at this ONE choke point:
+    ///
+    /// - compatible (same version, or newer on the same protocol major) →
+    ///   serve from the running daemon;
+    /// - OLDER daemon → silent replacement: graceful `storestation.shutdown`,
+    ///   wait for the socket to die, spawn the BUNDLED daemon, re-verify —
+    ///   the swap is invisible whenever it succeeds (the 1.7.5-app-meets-
+    ///   1.7.1-daemon crash class becomes self-healing);
+    /// - newer-MAJOR or malformed handshake → typed [`DaemonConnectError::
+    ///   Gate`] — a clear Settings error card, the app process NEVER aborts;
+    ///   the newer daemon is left running (no downgrade attempt).
+    pub fn connect() -> Result<Self, DaemonConnectError> {
+        let client = Self::open_client()?;
+        let verdict = umux_storestation::gate::classify_daemon_version(
+            client.daemon_version(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        match verdict {
+            umux_storestation::gate::GateVerdict::Compatible => Ok(Self::from_client(client)),
+            umux_storestation::gate::GateVerdict::DaemonOlder => Self::replace_daemon(),
+            umux_storestation::gate::GateVerdict::DaemonNewerMajor => {
+                let version = client.daemon_version().unwrap_or("?").to_string();
+                drop(client);
+                Err(DaemonConnectError::Gate {
+                    message: format!(
+                        "the running umux Storestation daemon is v{version} — NEWER than this app \
+                         (v{}). umux will not downgrade it. Update the app so both come from one \
+                         build, or stop the daemon (umux-storestation stop) and let the app start \
+                         its own.",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                })
+            }
+            umux_storestation::gate::GateVerdict::Unparseable => Err(DaemonConnectError::Gate {
+                message: "the running umux Storestation daemon did not report a usable version \
+                          (malformed handshake). Restart it (Settings → Storestation off/on, or \
+                          `umux-storestation stop` then `run`); if this keeps happening, \
+                          reinstall umux."
+                    .into(),
+            }),
+        }
+    }
+
+    /// One handshake'd connection, errors mapped onto the typed outcome.
+    fn open_client() -> Result<umux_storestation::client::PersistentClient, DaemonConnectError> {
+        umux_storestation::client::PersistentClient::connect(
             &store_core::paths::config_dir(),
             "desktop",
             env!("CARGO_PKG_VERSION"),
         )
-        .map_err(|e| match e {
-            umux_storestation::client::ConnectError::Protocol(err) => err.message,
-            other => other.to_error_obj().message,
-        })?;
-        Ok(DaemonDriver {
+        .map_err(map_connect_error)
+    }
+
+    fn from_client(client: umux_storestation::client::PersistentClient) -> Self {
+        DaemonDriver {
             client,
             map: Mutex::new(IdMap::default()),
             open_slots: Mutex::new(HashMap::new()),
             dispatchers: Mutex::new(HashMap::new()),
             ssh: Mutex::new(SshManager::new()),
-        })
+        }
+    }
+
+    /// The DaemonOlder path (#102): stop the older daemon gracefully, wait
+    /// for its socket to disappear, spawn the bundled daemon, and re-verify
+    /// the handshake. Any failure along the way is a typed Gate error — the
+    /// swap is silent ONLY when it succeeds.
+    fn replace_daemon() -> Result<Self, DaemonConnectError> {
+        let dir = store_core::paths::config_dir();
+        let version = env!("CARGO_PKG_VERSION");
+        // 1. Graceful stop — every owned shell dies cleanly (story 110);
+        //    a daemon that is already gone is equally fine.
+        if let Ok(mut client) =
+            umux_storestation::client::Client::connect(&dir, "desktop", version)
+        {
+            let _ = client.call("storestation.shutdown", serde_json::json!({}));
+        }
+        // 2. Wait for the socket to actually go away — STABLY: a single
+        //    failed connect is not proof on Windows (ANY transport failure
+        //    maps onto NotRunning there, including transient pipe errors
+        //    against a listener that is still alive), and spawning against
+        //    a dying daemon races AlreadyRunning. Two consecutive misses
+        //    300 ms apart are the honest "it is gone".
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut misses = 0;
+        loop {
+            let answering =
+                umux_storestation::client::Client::connect(&dir, "desktop", version).is_ok();
+            if !answering {
+                misses += 1;
+                if misses >= 2 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            } else {
+                misses = 0;
+                if std::time::Instant::now() >= deadline {
+                    return Err(DaemonConnectError::Gate {
+                        message: "an older umux Storestation daemon is running and did not stop \
+                                  within 10 s of the shutdown request, so the bundled daemon \
+                                  could not take over. Stop it manually \
+                                  (umux-storestation stop) and toggle Storestation again."
+                            .into(),
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+        // 3. Spawn the bundled daemon (windowless on Windows since #103).
+        crate::spawn_daemon_if_absent().map_err(|e| DaemonConnectError::Gate {
+            message: format!(
+                "the older umux Storestation daemon was stopped, but the bundled daemon could \
+                 not start: {e}"
+            ),
+        })?;
+        // 4. Re-verify: the new daemon's handshake must classify compatible.
+        //    (spawn_daemon_if_absent already waited for the answer; this is
+        //    the gate's own confirmation, still bounded.)
+        let client = Self::open_client()?;
+        match umux_storestation::gate::classify_daemon_version(
+            client.daemon_version(),
+            env!("CARGO_PKG_VERSION"),
+        ) {
+            umux_storestation::gate::GateVerdict::Compatible => Ok(Self::from_client(client)),
+            other => Err(DaemonConnectError::Gate {
+                message: format!(
+                    "the umux Storestation daemon was replaced, but the responding daemon is \
+                     still not compatible with this app (v{}): {other:?}. Reinstall umux so the \
+                     app and the daemon come from one build.",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            }),
+        }
     }
 
     /// Whether this connection is known-dead (the daemon went away). The
@@ -664,6 +838,11 @@ pub struct RouterDriver {
     /// backoff window, not one per panel (on Windows a probe can burn the
     /// full 3 s connect budget).
     connect_failed_at: Mutex<Option<std::time::Instant>>,
+    /// The last GATE refusal's message (v1.7.6 P2, #102) — what the
+    /// Settings Storestation section renders as the error card. Cleared on
+    /// any successful connect and on non-gate failures (offline is a
+    /// state, not a fault; the card must not outlive its cause).
+    gate_error: Mutex<Option<String>>,
 }
 
 /// How long a FAILED lazy connect suppresses further attempts.
@@ -677,6 +856,18 @@ impl RouterDriver {
             routing: Mutex::new(HashMap::new()),
             daemon_enabled: AtomicBool::new(daemon_enabled),
             connect_failed_at: Mutex::new(None),
+            gate_error: Mutex::new(None),
+        }
+    }
+
+    /// Record a connect outcome for the Settings card (#102): a gate
+    /// refusal is stored; success and non-gate failures clear it.
+    fn record_connect_outcome(&self, outcome: Result<(), &DaemonConnectError>) {
+        let mut gate = self.gate_error.lock().expect("router gate lock");
+        match outcome {
+            Ok(()) => *gate = None,
+            Err(e) if e.is_gate() => *gate = Some(e.message()),
+            Err(_) => *gate = None,
         }
     }
 
@@ -700,11 +891,16 @@ impl RouterDriver {
         match DaemonDriver::connect() {
             Ok(driver) => {
                 *self.daemon.lock().expect("router daemon lock") = Some(driver);
+                self.record_connect_outcome(Ok(()));
                 true
             }
-            Err(_) => {
+            Err(e) => {
+                self.record_connect_outcome(Err(&e));
                 *self.connect_failed_at.lock().expect("router backoff lock") =
                     Some(std::time::Instant::now());
+                if e.is_gate() {
+                    log::warn!("Storestation daemon gate refusal: {}", e.message());
+                }
                 false
             }
         }
@@ -722,10 +918,18 @@ impl RouterDriver {
     /// Toggle ON, after the command made sure a daemon is running: install
     /// the daemon driver.
     pub fn connect_daemon(&self) -> Result<(), String> {
-        let driver = DaemonDriver::connect()?;
-        *self.daemon.lock().expect("router daemon lock") = Some(driver);
-        self.set_daemon_enabled(true);
-        Ok(())
+        let outcome = match DaemonDriver::connect() {
+            Ok(driver) => {
+                *self.daemon.lock().expect("router daemon lock") = Some(driver);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
+        self.record_connect_outcome(outcome.as_ref().map(|_| ()));
+        if outcome.is_ok() {
+            self.set_daemon_enabled(true);
+        }
+        outcome.map_err(|e| e.message())
     }
 
     /// Toggle OFF: stop the daemon — its clean stop kills every owned shell
@@ -735,6 +939,9 @@ impl RouterDriver {
     pub fn disable_daemon(&self) -> Result<(), String> {
         self.set_daemon_enabled(false);
         *self.daemon.lock().expect("router daemon lock") = None;
+        // The gate card is moot once the user switched Storestation off
+        // (#102): the refusal described a daemon that is now stopped.
+        *self.gate_error.lock().expect("router gate lock") = None;
         let dir = store_core::paths::config_dir();
         match umux_storestation::client::Client::connect(&dir, "desktop", env!("CARGO_PKG_VERSION"))
         {
@@ -747,6 +954,15 @@ impl RouterDriver {
         }
     }
 
+    /// Drop the daemon connection and the enabled flag WITHOUT stopping the
+    /// daemon — the unverified-toggle rollback (an ON that could not be
+    /// verified must not leave the engine claiming ON while the UI shows a
+    /// failed toggle; the next honest toggle decides again).
+    pub fn reset_daemon_connection(&self) {
+        self.set_daemon_enabled(false);
+        *self.daemon.lock().expect("router daemon lock") = None;
+    }
+
     /// The Storestation status the Settings section shows: the toggle's
     /// live value plus what the daemon itself reports. Offline is a state.
     /// The daemon's `core` object (umux Core, v1.7.5 #93) rides through
@@ -756,6 +972,16 @@ impl RouterDriver {
         let mut doc = serde_json::json!({
             "enabled": self.daemon_enabled(),
             "running": false,
+            // The version gate's last refusal (v1.7.6 P2, #102) — the
+            // Settings Storestation section renders it as the error card.
+            // Null = nothing to report; the frontend treats it as absent.
+            "gateError": self
+                .gate_error
+                .lock()
+                .expect("router gate lock")
+                .clone()
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null),
         });
         let dir = store_core::paths::config_dir();
         if let Ok(mut client) = umux_storestation::client::Client::connect(
@@ -929,6 +1155,51 @@ impl SessionCore for RouterDriver {
 
     fn ssh_exit_code(&self, id: u32) -> io::Result<Option<i32>> {
         self.local.ssh_exit_code(id)
+    }
+}
+
+#[cfg(test)]
+mod connect_error_tests {
+    use super::*;
+
+    // The boot-path audit (#102 AC): every failure shape the handshake and
+    // transport can hand the driver maps to a TYPED outcome — offline stays
+    // a state, protocol MAJOR mismatches are gate refusals, and no shape
+    // panics or hard-crashes a startup path.
+    #[test]
+    fn not_running_is_offline_never_a_gate() {
+        let e = map_connect_error(umux_storestation::client::ConnectError::NotRunning {
+            stale: false,
+        });
+        assert!(matches!(e, DaemonConnectError::Offline));
+        assert!(!e.is_gate());
+    }
+
+    #[test]
+    fn protocol_major_mismatch_is_a_gate_refusal() {
+        use umux_storestation::protocol::{codes, ErrorObj};
+        for code in [codes::PROTO_TOO_NEW, codes::PROTO_TOO_OLD] {
+            let e = map_connect_error(umux_storestation::client::ConnectError::Protocol(
+                ErrorObj::new(code, "major mismatch fixture", vec![]),
+            ));
+            assert!(e.is_gate(), "{code} must refuse at the gate");
+            assert!(e.message().contains("not compatible"));
+        }
+    }
+
+    #[test]
+    fn ordinary_failures_are_other_not_gate() {
+        use umux_storestation::protocol::{codes, ErrorObj};
+        let protocol = map_connect_error(umux_storestation::client::ConnectError::Protocol(
+            ErrorObj::new(codes::BAD_PARAMS, "fixture", vec![]),
+        ));
+        let io = map_connect_error(umux_storestation::client::ConnectError::Io(
+            std::io::Error::other("fixture"),
+        ));
+        for e in [protocol, io] {
+            assert!(matches!(e, DaemonConnectError::Other { .. }));
+            assert!(!e.is_gate());
+        }
     }
 }
 

@@ -1063,7 +1063,11 @@ async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String>
 /// was already running; `Ok(true)` = we spawned it and it answered. The
 /// binary is looked up beside the app executable first (installer layout +
 /// the cargo target dir in dev), then PATH.
-fn spawn_daemon_if_absent() -> Result<bool, String> {
+///
+/// pub(crate) since v1.7.6 P2 (#102): the version gate's replace flow
+/// (stop an older daemon, spawn the bundled one) reuses this spawn — one
+/// spawn path, one place that knows the binary lookup and the launch flags.
+pub(crate) fn spawn_daemon_if_absent() -> Result<bool, String> {
     let dir = config_dir();
     let probe = |dir: &PathBuf| {
         umux_storestation::client::Client::connect(dir, "desktop", env!("CARGO_PKG_VERSION"))
@@ -1089,6 +1093,15 @@ fn spawn_daemon_if_absent() -> Result<bool, String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // v1.7.6 P4 (#103, story 8): enabling Storestation (or umux Core) from
+    // Settings must flash NOTHING. The daemon binary is console-subsystem
+    // (#101's decision), so a GUI app spawning it on Windows would open a
+    // console window — Windows Terminal default host included. CREATE_NO_WINDOW
+    // (through autostart::hidden, the same helper the reg.exe calls use)
+    // silences the launch; the daemon routes its own output per console.rs,
+    // so terminal invocations are untouched. On non-Windows the helper is
+    // an identity pass-through.
+    let mut command = autostart::hidden(command);
     command
         .spawn()
         .map_err(|e| {
@@ -1121,6 +1134,43 @@ async fn storestation_status(app: AppHandle) -> Result<serde_json::Value, String
     .map_err(|e| e.to_string())
 }
 
+/// The VERIFIED ON flow (HITL 2026-10-16, PO report): the switch once showed
+/// ON while the status line said "Daemon stopped" — the toggle raced a dying
+/// daemon, the connect succeeded against a listener that went away moments
+/// later, and the persisted switch outlived the daemon. Now the toggle only
+/// succeeds when a follow-up probe reports the daemon RUNNING: the
+/// spawn/connect pair is retried inside a short budget (the spawn is a no-op
+/// while any daemon answers, so a retry can never double-spawn), and an
+/// unverified attempt rolls the engine state back and returns Err — the
+/// switch stays OFF and the UI never lies.
+fn enable_and_verify(driver: &RouterDriver) -> Result<serde_json::Value, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut first_pass = true;
+    loop {
+        if first_pass {
+            spawn_daemon_if_absent()?; // a missing binary reports its dev hint once
+            first_pass = false;
+        } else {
+            let _ = spawn_daemon_if_absent();
+        }
+        if driver.connect_daemon().is_ok() {
+            let status = driver.storestation_status();
+            if status.get("running").and_then(serde_json::Value::as_bool) == Some(true) {
+                return Ok(status);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            driver.reset_daemon_connection();
+            return Err(
+                "the umux Storestation daemon did not stay up after being enabled — try the \
+                 toggle again (it may have raced a shutdown that was still in progress)"
+                    .into(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 #[tauri::command]
 async fn storestation_set_enabled(
     app: AppHandle,
@@ -1129,12 +1179,11 @@ async fn storestation_set_enabled(
     tauri::async_runtime::spawn_blocking(move || {
         let driver = app.state::<RouterDriver>();
         if enable {
-            spawn_daemon_if_absent()?;
-            driver.connect_daemon()?;
+            enable_and_verify(&driver)
         } else {
             driver.disable_daemon()?;
+            Ok(driver.storestation_status())
         }
-        Ok(driver.storestation_status())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1581,6 +1630,27 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+            // v1.7.6 P4 (#103, story 7): the RELEASE self-heal. On first
+            // launch of the fixed build, the platform autostart artifact is
+            // reconciled with the persisted intent and the installed daemon:
+            // a wrong-target entry (the PO's poisoned dev-tree Run key) is
+            // rewritten, a leftover with intent OFF is removed, an artifact
+            // missing after an in-app update (the uninstaller half removed
+            // it) is reinstalled when settings still say ON. Dev builds must
+            // never touch the OS artifact — the same rule the toggle's dev
+            // guard enforces — so this is release-only. Silent by contract
+            // (Settings already shows daemon status): background thread, the
+            // outcome is only logged, and boot never waits for it.
+            #[cfg(not(debug_assertions))]
+            {
+                let autostart_intent = initial_settings.storestation.autostart_enabled;
+                let _ = std::thread::Builder::new()
+                    .name("autostart-self-heal".into())
+                    .spawn(move || match autostart::heal_autostart(autostart_intent) {
+                        Ok(outcome) => log::info!("autostart self-heal: {outcome:?}"),
+                        Err(e) => log::warn!("autostart self-heal failed: {e}"),
+                    });
             }
             // v0.2 Phase 6 / #30 — the ONLY event umux reports: one
             // aggregate app_open, so Aptabase can count installs/active

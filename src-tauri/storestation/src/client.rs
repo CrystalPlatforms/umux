@@ -64,6 +64,18 @@ fn hello_io_failure(config_dir: &Path, e: std::io::Error) -> ConnectError {
     }
 }
 
+/// Pure: the daemon version a handshake result carries. The daemon answers
+/// `hello` with `{"proto":…,"daemonVersion":"…","daemonPid":…}`; a reply
+/// missing the field (or carrying a non-string — a malformed/incompatible
+/// responder) yields `None`, which the version gate (crate::gate) treats as
+/// its own typed outcome, never a panic (v1.7.6 P2, #102).
+pub fn hello_daemon_version(handshake_result: &Value) -> Option<String> {
+    handshake_result
+        .get("daemonVersion")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Connect WITHOUT the handshake — the liveness probe `server::prepare`
 /// uses to decide single-instance conflicts.
 pub fn raw_connect(config_dir: &Path) -> std::io::Result<transport::ClientStream> {
@@ -75,6 +87,10 @@ pub fn raw_connect(config_dir: &Path) -> std::io::Result<transport::ClientStream
 pub struct Client {
     stream: transport::ClientStream,
     next_id: u64,
+    /// The `daemonVersion` the handshake result carried (`None` = the
+    /// reply did not carry a usable one). The version gate reads it at the
+    /// driver choke point (#102).
+    daemon_version: Option<String>,
 }
 
 impl Client {
@@ -89,7 +105,11 @@ impl Client {
             Err(e) => return Err(offline_error(config_dir, e)),
         };
         stream.apply_timeouts();
-        let mut client = Client { stream, next_id: 1 };
+        let mut client = Client {
+            stream,
+            next_id: 1,
+            daemon_version: None,
+        };
         // The hello phase is special: a connection that dies before ONE
         // response byte is the offline state, not a mid-session failure
         // (see hello_io_failure) — that is why the handshake is inlined
@@ -124,8 +144,15 @@ impl Client {
                 }
             }
         };
+        client.daemon_version =
+            response.get("result").and_then(hello_daemon_version);
         decode_response(response).map_err(ConnectError::Protocol)?;
         Ok(client)
+    }
+
+    /// The daemon version the handshake reported (`None` = it did not).
+    pub fn daemon_version(&self) -> Option<&str> {
+        self.daemon_version.as_deref()
     }
 
     /// One request → one response. A data frame (not expected before the
@@ -241,6 +268,9 @@ pub struct PersistentClient {
     /// Dropping the client must stop the reader thread: the reader keeps
     /// its own Arcs, so this channel is the shutdown signal.
     reader_shutdown: Option<std::sync::mpsc::Sender<()>>,
+    /// The `daemonVersion` the handshake result carried (`None` = it did
+    /// not). The version gate reads it at the driver choke point (#102).
+    daemon_version: Option<String>,
 }
 
 struct PersistentInner {
@@ -301,6 +331,7 @@ impl PersistentClient {
                 }
             }
         };
+        let daemon_version = response.get("result").and_then(hello_daemon_version);
         decode_response(response).map_err(ConnectError::Protocol)?;
 
         let pending: Arc<PendingMap> = Arc::new(StdMutex::new(HashMap::new()));
@@ -327,7 +358,13 @@ impl PersistentClient {
             outputs,
             dead,
             reader_shutdown: Some(shutdown_tx),
+            daemon_version,
         })
+    }
+
+    /// The daemon version the handshake reported (`None` = it did not).
+    pub fn daemon_version(&self) -> Option<&str> {
+        self.daemon_version.as_deref()
     }
 
     /// Whether the connection is known-dead (the daemon went away). A dead

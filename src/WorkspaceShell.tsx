@@ -1197,6 +1197,9 @@ export function WorkspaceShell() {
     version?: string
     sessions?: number
     attachedClients?: number
+    // The version gate's last refusal (v1.7.6 P2, #102) — rendered as the
+    // Storestation error card. Absent/null = nothing to report.
+    gateError?: string | null
   }
   const [storestationStatus, setStorestationStatus] = useState<StorestationStatus | null>(null)
   // Set when a stop is requested while live sessions exist: the dialog

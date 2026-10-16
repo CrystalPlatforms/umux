@@ -6,9 +6,17 @@
 ; exposing the DIRECTORY on PATH covers both, and the uninstaller removes
 ; every file Tauri installed (both sidecars) plus the PATH entry below.
 ; Tauri runs these macros at the marked points of its NSIS script;
-; everything here is BASE NSIS only — no plugins, no StrFunc.
+; everything here is BASE NSIS plus the bundled nsExec plugin, which ships
+; with NSIS itself (no downloads, no third-party plugins, no StrFunc).
 ; (First attempt used StrStr, which lives in StrFunc.nsh and is NOT part of
 ; the base instruction set — makensis refused to compile the hook.)
+;
+; v1.7.6 P6 (#109): the uninstaller also KILLS Storestation — the reported
+; bug was umux removed while the daemon kept launching at every login,
+; because (a) the HKCU Run entry survived and (b) the still-running daemon
+; exe held its own file lock, so the uninstaller could not fully empty the
+; install directory and the surviving entry kept resolving to a live
+; binary. See NSIS_HOOK_PREUNINSTALL below.
 ;
 ; We write the USER path (HKCU\Environment\Path), not the system one:
 ;   - no admin rights needed (the Tauri NSIS default install is per-user),
@@ -54,6 +62,36 @@ done_install:
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; --- v1.7.6 P6 (#109): Storestation does not survive an uninstall ------
+  ; Order matters, and everything runs BEFORE the uninstaller's file phase:
+  ;
+  ; 1. The login entry goes FIRST — even an uninstall that crashes halfway
+  ;    must leave no autostart behind. The name and key here MUST stay in
+  ;    sync with src/autostart.rs (MECHANISM_NAME / RUN_KEY) — the OS
+  ;    artifact both sides write is the same one.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "umux-storestation"
+  ;
+  ; 2. The daemon stops GRACEFULLY. The socket is user-level (config-dir
+  ;    keyed), so the installed copy's `stop` reaches a daemon launched
+  ;    from ANY path — including a stale dev-tree daemon (the exact case
+  ;    on the PO's machine). A missing binary (partial uninstall) is fine:
+  ;    nsExec reports an error we discard.
+  ; nsExec ships with NSIS itself and captures the child's output through
+  ; pipes — no console window flashes in the GUI uninstaller, which a plain
+  ; ExecWait on a console-subsystem binary would do.
+  nsExec::Exec '"$INSTDIR\umux-storestation.exe" stop'
+  Pop $R9
+  ; 3. Best-effort kill of any surviving daemon image (a daemon whose
+  ;    graceful path failed, or one whose binary is already gone). Without
+  ;    this the running exe locks its own file, the delete phase leaves it
+  ;    in $INSTDIR, and step 1's empty entry is all that stands between the
+  ;    user and the reported bug.
+  nsExec::Exec 'taskkill /F /IM umux-storestation.exe'
+  Pop $R9
+  ; Let the dying daemon release the named pipe and the file locks before
+  ; the delete phase starts.
+  Sleep 500
+  ; --- PATH cleanup (issue #64, unchanged) --------------------------------
   ReadRegStr $R0 HKCU "Environment" "Path"
   StrCmp "$R0" "" done_uninstall
   StrLen $R1 "$INSTDIR"

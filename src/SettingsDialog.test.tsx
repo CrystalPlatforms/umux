@@ -776,6 +776,52 @@ describe('SettingsDialog factory reset (#74)', () => {
     expect(getByTestId('storestation-status').textContent).toMatch(/stopped/i)
   })
 
+  // #102 (v1.7.6 P2): the version gate's refusal renders as the Storestation
+  // error card — a clear message INSTEAD of a crash. The card shows only
+  // while the router carries a non-empty gateError; success or switching
+  // Storestation off clears it (the backend owns the lifecycle).
+  it('shows the version-gate error card when the daemon is incompatible (#102)', () => {
+    const base = {
+      settings: defaultSettings,
+      onChange: () => {},
+      onClose: () => {},
+      onStorestationToggle: () => {},
+    }
+    const { getByTestId, queryByTestId, rerender } = render(
+      <SettingsDialog
+        {...base}
+        storestationStatus={{ enabled: true, running: true, version: '2.0.0' }}
+      />,
+    )
+    fireEvent.click(getByTestId('storestation-open'))
+    // No gate error → no card.
+    expect(queryByTestId('storestation-gate-error')).toBeNull()
+
+    rerender(
+      <SettingsDialog
+        {...base}
+        storestationStatus={{
+          enabled: true,
+          running: true,
+          version: '2.0.0',
+          gateError:
+            'the running umux Storestation daemon is v2.0.0 — NEWER than this app (v1.7.6).',
+        }}
+      />,
+    )
+    const card = getByTestId('storestation-gate-error')
+    expect(card.textContent).toContain('NEWER than this app')
+
+    // An empty-string gateError counts as absent (null semantics).
+    rerender(
+      <SettingsDialog
+        {...base}
+        storestationStatus={{ enabled: true, running: false, gateError: '' }}
+      />,
+    )
+    expect(queryByTestId('storestation-gate-error')).toBeNull()
+  })
+
   // #89 (v1.7.0 phase 7 — story 108 complete): the sub-view shows ALL THREE
   // controls — daemon toggle, autostart toggle, live status. The autostart
   // toggle mirrors its persisted flag and reports flips upward like the

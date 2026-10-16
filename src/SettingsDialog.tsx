@@ -155,13 +155,15 @@ export function SettingsDialog({
   // unit) and persists the setting. Absent = the row is not rendered.
   onStorestationAutostartToggle?: (next: boolean) => void
   // The last probed daemon status (the parent refreshes it when the dialog
-  // opens and after every toggle). null = no status line yet.
+  // opens and after every toggle). null = no status line yet. `gateError`
+  // (#102) carries the version gate's last refusal — the error card.
   storestationStatus?: {
     enabled: boolean
     running: boolean
     version?: string
     sessions?: number
     attachedClients?: number
+    gateError?: string | null
   } | null
   // The Core (Always-On device) section (#94, v1.7.5 phase 2): the toggle
   // reports UPWARD like every other control (this component stays
@@ -651,6 +653,21 @@ export function SettingsDialog({
                   testId="toggle-storestation-autostart"
                   onToggle={onStorestationAutostartToggle}
                 />
+              </div>
+            )}
+            {/* The version-gate error card (v1.7.6 P2, #102): when the
+                daemon-client driver could not make the daemon compatible
+                (newer-major daemon, malformed handshake, failed replace),
+                the router carries the reason here — a clear card INSTEAD of
+                a crash. Cleared on the next successful connect or when the
+                user switches Storestation off. */}
+            {storestationStatus?.gateError != null && storestationStatus.gateError !== '' && (
+              <div
+                className="settings-status settings-status--error"
+                data-testid="storestation-gate-error"
+                role="alert"
+              >
+                {storestationStatus.gateError}
               </div>
             )}
             {storestationStatus != null && (
