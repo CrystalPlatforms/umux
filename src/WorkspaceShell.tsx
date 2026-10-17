@@ -17,6 +17,9 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, ty
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+// #107 / story 16: the app's own version API — the Settings updater row
+// reads the INSTALLED version from here, never a hardcoded string.
+import { getVersion } from '@tauri-apps/api/app'
 // Issue #72: clicking a listening port opens http://localhost:{port} in the
 // system browser (the clipboard copy stays).
 import { openPath, revealItemInDir, openUrl } from '@tauri-apps/plugin-opener'
@@ -53,7 +56,9 @@ import {
   flattenSidebar,
   addTab,
   closeTab,
-  moveTab,
+  moveTabGroup,
+  moveTabsToWorkspace,
+  closeTabs,
   switchTab,
   renameTab,
   setTabPinned,
@@ -96,6 +101,13 @@ import {
   isMacPlatform,
   isMultiSelectModifier,
 } from './selection'
+// Tab multi-select (#106): the pure selection state — the batch ACTIONS over
+// it (moveTabGroup / moveTabsToWorkspace / closeTabs) come from workspaces
+// above.
+import {
+  toggleTabInSelection,
+  rangeTabSelection,
+} from './tabSelection'
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
 import { AgentStatusMachine, WaitingPingGate, type AgentStatus } from './agentStatus'
@@ -341,6 +353,17 @@ type MenuState = {
   // the whole menu renders the eight palette swatches plus the clear entry
   // (the same in-place swap the group picker uses).
   colorPickerFor?: string
+  // Set when the menu was opened from a TERMINAL TAB that belongs to a live
+  // multi-selection (#106): the FROZEN batch tab ids, resolved ONCE at open
+  // time from the then-current selection. Both the menu press AND its
+  // trailing contextmenu event open the menu — freezing the ids on the menu
+  // object itself means the second open can never drop them, and the menu's
+  // batch-ness never depends on render-time selection state.
+  tabBatchIds?: string[]
+  // Set when the "Move to workspace ▸" picker is open for the tab BATCH
+  // (#106): the whole menu renders one button per OTHER workspace; picking
+  // one moves the selected tabs there. Holds the SOURCE workspace id.
+  wsPickerFor?: string
 } | null
 
 /// A mouse press that should open the context menu: the right button, or
@@ -752,6 +775,20 @@ export function WorkspaceShell() {
   const selectedIdsRef = useRef(selectedIds)
   selectedIdsRef.current = selectedIds
 
+  // Tab multi-select (#106, stories 12–15): the tab-bar twin of the sidebar
+  // selection above. ONE workspace at a time (cross-workspace selection is
+  // out of scope) — `wsId` scopes the ids, `anchor` is the Shift+click range
+  // start. RUNTIME-ONLY (never persisted); the pure ops live in
+  // tabSelection.ts, the batch state ops in workspaces.ts. The ref mirrors
+  // for the mount-time drag closures (same discipline as selectedIdsRef).
+  const [tabSelection, setTabSelection] = useState<{
+    wsId: string
+    ids: string[]
+    anchor: string | null
+  } | null>(null)
+  const tabSelectionRef = useRef(tabSelection)
+  tabSelectionRef.current = tabSelection
+
   // --- Live pointer drag & drop (round 3, Adam) -----------------------------
   //
   // HTML5 drag & drop is abandoned here on purpose: WKWebView refuses to
@@ -784,6 +821,9 @@ export function WorkspaceShell() {
         kind: 'tab'
         wsId: string
         id: string
+        // The dragged TAB IDS (#106): one for a solo drag, the whole tab
+        // selection when the pressed tab was part of a multi-selection.
+        ids: string[]
         label: string
         regions: TabRegion[]
         barLeft: number
@@ -826,9 +866,11 @@ export function WorkspaceShell() {
     dragCandidate.current = { kind: 'sidebar', id, x: e.clientX, y: e.clientY }
   }
 
-  /// The tab-bar twin — drags stay inside their own workspace (#45).
+  /// The tab-bar twin — drags stay inside their own workspace (#45). The
+  /// multi-select modifier never starts a drag (#106): Ctrl+click (Cmd on
+  /// macOS) toggles the selection instead.
   const beginTabDrag = (e: React.PointerEvent, wsId: string, tabId: string) => {
-    if (e.button !== 0 || e.ctrlKey) return
+    if (e.button !== 0 || isMultiSelectModifier(e)) return
     if ((e.target as HTMLElement).closest('button, input')) return
     suppressClickRef.current = false
     dragCandidate.current = { kind: 'tab', wsId, id: tabId, x: e.clientX, y: e.clientY }
@@ -982,11 +1024,24 @@ export function WorkspaceShell() {
         : []
       const tabs = stateRef.current.workspaces.find((w) => w.id === wsId)?.tabs ?? []
       const idx = tabs.findIndex((t) => t.id === id)
+      // A drag started on a SELECTED tab moves the WHOLE selection (#106);
+      // anywhere else it is a solo drag. Dead ids are dropped so the group
+      // move never feeds ghosts into moveTabGroup.
+      const sel = tabSelectionRef.current
+      const ids =
+        sel != null && sel.wsId === wsId && sel.ids.includes(id)
+          ? sel.ids.filter((tid) => tabs.some((t) => t.id === tid))
+          : [id]
+      const label =
+        ids.length > 1
+          ? `${ids.length} tabs`
+          : (tabs[idx]?.name ?? `Tab ${idx + 1}`)
       const d: ActiveDrag = {
         kind: 'tab',
         wsId,
         id,
-        label: tabs[idx]?.name ?? `Tab ${idx + 1}`,
+        ids,
+        label,
         regions,
         barLeft: barEl?.getBoundingClientRect().left ?? 0,
         x,
@@ -1075,20 +1130,22 @@ export function WorkspaceShell() {
           const drop = tabDropRef.current
           const ws = stateRef.current.workspaces.find((w) => w.id === d.wsId)
           const tabs = ws?.tabs ?? []
-          const fromIndex = tabs.findIndex((t) => t.id === d.id)
-          const targetIdx =
-            drop == null || drop.beforeId == null
-              ? tabs.length
-              : tabs.findIndex((t) => t.id === drop.beforeId)
-          // moveTab splices AFTER removing the tab, so a forward move aims
-          // one slot earlier than the raw index of the sibling.
-          const newIndex =
-            targetIdx < 0
-              ? tabs.length
-              : fromIndex > -1 && fromIndex < targetIdx
-                ? targetIdx - 1
-                : targetIdx
-          persist(moveTab(stateRef.current, d.wsId, d.id, newIndex))
+          // The insertion index into the POST-REMOVAL list (#106): every
+          // non-dragged tab sitting BEFORE the drop sibling counts. For a
+          // solo drag this reproduces moveTab's old "aim one slot earlier on
+          // a forward move" arithmetic exactly; a landing ON a dragged tab
+          // counts zero siblings past it, so the group settles in place.
+          const dragged = new Set(d.ids)
+          let newIndex = tabs.length - dragged.size
+          if (drop?.beforeId != null) {
+            let count = 0
+            for (const t of tabs) {
+              if (t.id === drop.beforeId) break
+              if (!dragged.has(t.id)) count += 1
+            }
+            newIndex = count
+          }
+          persist(moveTabGroup(stateRef.current, d.wsId, d.ids, newIndex))
         }
       }
       clearDrag()
@@ -1117,17 +1174,38 @@ export function WorkspaceShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Escape clears the multi-selection (#53) — the same key that cancels a
-  // live drag, one level up. Reads through the ref so the listener never
-  // goes stale; a no-op while nothing is selected.
+  // Escape clears BOTH multi-selections (#53 sidebar, #106 tabs) — the same
+  // key that cancels a live drag, one level up. Reads through the refs so
+  // the listener never goes stale; a no-op while nothing is selected.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && selectedIdsRef.current.length > 0) {
+      if (e.key !== 'Escape') return
+      if (tabSelectionRef.current != null) setTabSelection(null)
+      if (selectedIdsRef.current.length > 0) {
         setSelectedIds(clearSelection())
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  // The tab selection clears on ANY plain press (#106, HITL 2026-10-17) —
+  // the sidebar multi-select's convention (#53): one click anywhere drops
+  // the whole selection. Tabs are excluded (their own onClick decides:
+  // toggle / range / activate-and-clear) and so is the open context menu
+  // (its batch items resolve FROM this state), and a press carrying the
+  // multi-select modifier belongs to a pending toggle, not a clear.
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      if (isMultiSelectModifier(e)) return
+      const t = e.target
+      if (!(t instanceof Element)) return
+      if (t.closest('.tab') != null) return
+      if (t.closest('.context-menu') != null) return
+      if (tabSelectionRef.current != null) setTabSelection(null)
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => window.removeEventListener('pointerdown', onDown, true)
   }, [])
   // Native WebKit menu + right-press selection suppression (HITL): with the
   // terminal's hidden textarea now holding keyboard focus (the
@@ -1158,6 +1236,22 @@ export function WorkspaceShell() {
   // session-only mute).
   const [settings, setSettings] = useState<Settings>(defaultSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // The installed app version (#107 / story 16): read ONCE through the
+  // app's own version API and handed to the Settings dialog's updater row.
+  // null = not resolved yet (or the API refused) — the row then renders
+  // without the version, exactly as before.
+  const [appVersion, setAppVersion] = useState<string | null>(null)
+  useEffect(() => {
+    let alive = true
+    getVersion()
+      .then((v) => {
+        if (alive && typeof v === 'string' && v !== '') setAppVersion(v)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
   // The detected-shell list (#77, v1.6.0). #78 extends this beyond the
   // Settings dialog: the tab-bar arrow must know the shell count at RENDER
   // time, so the probe now also runs ONCE at boot (the Settings-open refresh
@@ -1541,7 +1635,13 @@ export function WorkspaceShell() {
   /// backend runtime flag every panel's notification thread reads. The change
   /// is live everywhere with no restart.
   const applySettings = (patch: Partial<Settings>) => {
-    const next = { ...settings, ...patch }
+    // Merge against the EVENT-TIME settings (the ref), never this render's
+    // closure: memoized callers (the Storestation toggles' useCallback)
+    // hold the mount-time applySettings forever, and a closure merge would
+    // silently revert every setting changed since that render (HITL
+    // 2026-10-17: flipping Storestation reset agent-status + tab-folders to
+    // their boot values).
+    const next = { ...settingsRef.current, ...patch }
     setSettings(next)
     invoke('save_settings', { settings: next }).catch((e) =>
       console.error('save_settings failed:', e),
@@ -2204,7 +2304,32 @@ export function WorkspaceShell() {
     portsSeq.current += 1
     setPortsTip(null)
     menuOpenedAtRef.current = Date.now()
-    setMenu({ x: e.clientX, y: e.clientY, header, workspaceId, tabId, groupId })
+    // The tab batch FREEZES at open time (#106): a real right-click opens
+    // the menu TWICE (mousedown, then contextmenu) and the second open
+    // replaces the whole menu state — the ids must ride ON the menu object,
+    // or the second open would drop them and the batch items would vanish.
+    let tabBatchIds: string[] | undefined
+    if (tabId != null && workspaceId != null) {
+      const sel = tabSelectionRef.current
+      if (sel != null && sel.wsId === workspaceId && sel.ids.length > 0) {
+        const live = (sel.ids.includes(tabId) ? sel.ids : [...sel.ids, tabId]).filter(
+          (tid) =>
+            stateRef.current.workspaces
+              .find((w) => w.id === workspaceId)
+              ?.tabs?.some((t) => t.id === tid),
+        )
+        if (live.length > 1) tabBatchIds = live
+      }
+    }
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      header,
+      workspaceId,
+      tabId,
+      groupId,
+      ...(tabBatchIds != null ? { tabBatchIds } : {}),
+    })
   }
 
   const deleteFromMenu = () => {
@@ -2542,6 +2667,11 @@ export function WorkspaceShell() {
             state.workspaces.some((w) => w.id === id),
         )
       : null
+  // The TAB batch rides FROZEN on the menu itself (see MenuState) — decided
+  // once at open time, immune to the double-open and to any selection
+  // change between the press and the render.
+  const menuTabBatchIds = menu?.tabBatchIds ?? null
+  const showTabBatch = menuTabBatchIds != null && menuTabBatchIds.length > 1
   const openGroupPicker = () => {
     const wsId = menu?.workspaceId ?? menu?.groupId
     if (wsId == null) return
@@ -2582,6 +2712,33 @@ export function WorkspaceShell() {
       return
     }
     persist(moveToNewGroup(stateRef.current, wsId, name))
+  }
+
+  // --- Tab batch actions (#106) -----------------------------------------------
+  // The two entries the multi-selection menu offers, resolving through the
+  // same pure ops a solo action uses (moveTabsToWorkspace / closeTabs).
+
+  const openWorkspacePickerFromMenu = () => {
+    const wsId = menu?.workspaceId
+    if (wsId == null) return
+    setMenu((m) => (m == null ? m : { ...m, wsPickerFor: wsId }))
+  }
+
+  const pickMoveTabsToWorkspace = (toId: string) => {
+    const wsId = menu?.wsPickerFor
+    const ids = menuTabBatchIds
+    setMenu(null)
+    if (wsId == null || ids == null || ids.length === 0) return
+    persist(moveTabsToWorkspace(stateRef.current, wsId, ids, toId))
+    setTabSelection(null)
+  }
+
+  const closeSelectedTabsFromMenu = () => {
+    const wsId = menu?.workspaceId
+    const ids = menuTabBatchIds
+    setMenu(null)
+    if (wsId == null || ids == null || ids.length === 0) return
+    requestBatchCloseTabs(wsId, ids)
   }
 
   const minimize = () => { void getCurrentWindow().minimize() }
@@ -2663,6 +2820,9 @@ export function WorkspaceShell() {
     // Batch close of a multi-selection (#53): one confirmation for every
     // selected workspace's live processes.
     | { kind: 'batch-close'; workspaceIds: string[]; busyCount: number }
+    // Batch close of the selected TABS (#106): one confirmation across
+    // every selected tab's live processes.
+    | { kind: 'batch-tab-close'; workspaceId: string; tabIds: string[]; busyCount: number }
     | null
   const [pendingClose, setPendingClose] = useState<PendingClose>(null)
 
@@ -2722,6 +2882,10 @@ export function WorkspaceShell() {
       setState(closeWorkspaces(stateRef.current, pc.workspaceIds))
       setSelectedIds([])
       void snapshotAndPersist()
+    } else if (pc.kind === 'batch-tab-close') {
+      persist(closeTabs(stateRef.current, pc.workspaceId, pc.tabIds))
+      setTabSelection(null)
+      void snapshotAndPersist()
     }
   }
 
@@ -2753,6 +2917,44 @@ export function WorkspaceShell() {
         return
       }
       setPendingClose({ kind: 'tab', workspaceId, tabId, label, busyCount })
+    })
+  }
+
+  /// Ask-or-close for a batch of selected TABS (#106): ONE busy check across
+  /// every local panel of every selected tab, then either a silent close or
+  /// one confirmation naming the total — the same rule the single-tab close
+  /// uses, scaled to the selection. The close applies through closeTabs, so
+  /// every member keeps the single-tab guards (a workspace keeps at least
+  /// one terminal).
+  const requestBatchCloseTabs = (workspaceId: string, tabIds: string[]) => {
+    const ws = stateRef.current.workspaces.find((w) => w.id === workspaceId)
+    if (ws?.tabs == null) return
+    const live = tabIds.filter((tid) => ws.tabs?.some((t) => t.id === tid))
+    if (live.length === 0) return
+    const locals = ws.tabs
+      .filter((t) => live.includes(t.id))
+      .flatMap((t) => leafIds(t.layout))
+      .map((pid) => ptyIdsRef.current.get(pid))
+      .filter((e): e is PtyEntry => e != null && e.kind === 'local')
+    if (locals.length === 0) {
+      persist(closeTabs(stateRef.current, workspaceId, live))
+      setTabSelection(null)
+      void snapshotAndPersist()
+      return
+    }
+    void Promise.all(
+      locals.map((e) =>
+        invoke<boolean>('pty_is_busy', { id: e.id }).catch(() => false),
+      ),
+    ).then((results) => {
+      const busyCount = results.filter(Boolean).length
+      if (busyCount === 0) {
+        persist(closeTabs(stateRef.current, workspaceId, live))
+        setTabSelection(null)
+        void snapshotAndPersist()
+        return
+      }
+      setPendingClose({ kind: 'batch-tab-close', workspaceId, tabIds: live, busyCount })
     })
   }
 
@@ -3769,8 +3971,8 @@ export function WorkspaceShell() {
                         data-testid={`tab-${ws.id}-${tab.id}`}
                         data-tab-id={tab.id}
                         className={`tab ${tabActive ? 'is-active' : ''} ${
-                          drag?.kind === 'tab' && drag.id === tab.id ? 'is-dragged' : ''
-                        }`}
+                          drag?.kind === 'tab' && drag.ids.includes(tab.id) ? 'is-dragged' : ''
+                        } ${tabSelection?.ids.includes(tab.id) ? 'is-selected' : ''}`}
                         // Active tab edge (#70): the accent is the TOP strip
                         // (.tab.is-active::before) — a colored active tab
                         // recolors that strip through --tab-strip-color; an
@@ -3789,12 +3991,68 @@ export function WorkspaceShell() {
                         // would be two competing tooltips over one row.
                         onMouseEnter={(e) => openPortsTip(e, tab.id, [tab])}
                         onMouseLeave={closePortsTip}
-                        onClick={() => {
+                        onClick={(e) => {
                           // A drag's trailing click must not switch tabs.
                           if (suppressClickRef.current) {
                             suppressClickRef.current = false
                             return
                           }
+                          // Multi-select (#106): the platform modifier (Ctrl;
+                          // Cmd on macOS) toggles the tab in the selection
+                          // instead of switching. A modifier click in a
+                          // DIFFERENT workspace than the live selection
+                          // starts a fresh one — cross-workspace selection is
+                          // out of scope.
+                          if (isMultiSelectModifier(e)) {
+                            setTabSelection((prev) => {
+                              const base = prev?.wsId === ws.id ? prev : null
+                              const ids = toggleTabInSelection(base?.ids ?? [], tab.id)
+                              return ids.length === 0
+                                ? null
+                                : { wsId: ws.id, ids, anchor: tab.id }
+                            })
+                            return
+                          }
+                          // Shift+click (#106): the range anchor..clicked
+                          // REPLACES the selection; the anchor stays so the
+                          // next Shift+click extends further. Without a live
+                          // selection the anchor is the active tab.
+                          if (e.shiftKey) {
+                            setTabSelection((prev) => {
+                              const anchor =
+                                prev?.wsId === ws.id
+                                  ? (prev.anchor ?? tab.id)
+                                  : (activeTab?.id ?? tab.id)
+                              const ids = rangeTabSelection(
+                                (ws.tabs ?? []).map((t) => t.id),
+                                anchor,
+                                tab.id,
+                              )
+                              return { wsId: ws.id, ids, anchor }
+                            })
+                            return
+                          }
+                          // Plain click (#106, HITL 2026-10-17): a SELECTED
+                          // tab toggles OFF — the multi-select reflex ("ten
+                          // tab ma się przestać zaznaczać"): the click may
+                          // not yank focus, and the rest of the selection
+                          // stays. An unselected tab activates and clears,
+                          // exactly as before.
+                          const selNow = tabSelectionRef.current
+                          if (
+                            selNow != null &&
+                            selNow.wsId === ws.id &&
+                            selNow.ids.includes(tab.id)
+                          ) {
+                            const ids = toggleTabInSelection(selNow.ids, tab.id)
+                            setTabSelection(
+                              ids.length === 0
+                                ? null
+                                : { wsId: ws.id, ids, anchor: tab.id },
+                            )
+                            return
+                          }
+                          setTabSelection(null)
                           setState(switchTab(state, ws.id, tab.id))
                         }}
                         onDoubleClick={(e) => {
@@ -3808,7 +4066,23 @@ export function WorkspaceShell() {
                           // (HITL: right-click highlighted the label).
                           if (isMenuPress(e)) {
                             e.preventDefault()
-                            setState(switchTab(state, ws.id, tab.id))
+                            // A menu press during a live selection acts ON
+                            // the selection (#106, HITL 2026-10-17): it never
+                            // collapses it, and a press on a tab OUTSIDE the
+                            // selection JOINS it — so every right-click while
+                            // selecting offers the batch actions. Only a
+                            // selection-less press keeps the old semantics:
+                            // activate the tab, single menu.
+                            const sel = tabSelectionRef.current
+                            if (sel != null && sel.wsId === ws.id && sel.ids.length > 0) {
+                              const ids = sel.ids.includes(tab.id)
+                                ? sel.ids
+                                : toggleTabInSelection(sel.ids, tab.id)
+                              setTabSelection({ wsId: ws.id, ids, anchor: tab.id })
+                            } else {
+                              setTabSelection(null)
+                              setState(switchTab(state, ws.id, tab.id))
+                            }
                             openMenu(e, false, ws.id, tab.id)
                           }
                         }}
@@ -4065,6 +4339,7 @@ export function WorkspaceShell() {
             onCheck: checkForUpdates,
             onInstall: installUpdate,
           }}
+          appVersion={appVersion ?? undefined}
           shells={detectedShells}
           onStorestationToggle={handleStorestationToggle}
           onStorestationAutostartToggle={applyStorestationAutostart}
@@ -4200,14 +4475,18 @@ export function WorkspaceShell() {
               ? 'Close this panel?'
               : pendingClose.kind === 'tab'
                 ? 'Close this tab?'
-                : `Close ${pendingClose.workspaceIds.length} workspaces?`
+                : pendingClose.kind === 'batch-tab-close'
+                  ? `Close ${pendingClose.tabIds.length} tabs?`
+                  : `Close ${pendingClose.workspaceIds.length} workspaces?`
           }
           message={
             pendingClose.kind === 'panel'
               ? `Panel ${pendingClose.label} has a running process. Closing it now will terminate that process.`
               : pendingClose.kind === 'tab'
                 ? `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in tab ${pendingClose.label} ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing it now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
-                : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in the selected workspaces ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing them now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+                : pendingClose.kind === 'batch-tab-close'
+                  ? `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in the selected tabs ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing them now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
+                  : `${pendingClose.busyCount} panel${pendingClose.busyCount === 1 ? '' : 's'} in the selected workspaces ha${pendingClose.busyCount === 1 ? 's' : 've'} a running process. Closing them now will terminate ${pendingClose.busyCount === 1 ? 'it' : 'them'}.`
           }
           confirmLabel="Close anyway"
           onConfirm={confirmPendingClose}
@@ -4285,7 +4564,31 @@ export function WorkspaceShell() {
           // time-guarded against the opening gesture.
           onClick={() => setMenu(null)}
         >
-          {menu.groupPickerFor != null ? (
+          {menu.wsPickerFor != null ? (
+            /* "Move to workspace ▸" picker (#106): swaps the menu's contents
+                IN PLACE — one button per OTHER workspace; picking one lands
+                the whole selected tab batch there (moveTabsToWorkspace keeps
+                sessions and cwds). The source workspace is left out — moving
+                there is a no-op. */
+            <div className="menu-picker" onClick={(e) => e.stopPropagation()}>
+              <div className="menu-picker-title">Move to workspace…</div>
+              {state.workspaces
+                .filter((w) => w.id !== menu.wsPickerFor)
+                .map((w) => (
+                  <button
+                    key={w.id}
+                    className="menu-item"
+                    role="menuitem"
+                    onClick={() => pickMoveTabsToWorkspace(w.id)}
+                  >
+                    {w.name}
+                  </button>
+                ))}
+              {state.workspaces.length <= 1 && (
+                <div className="menu-note">No other workspaces yet.</div>
+              )}
+            </div>
+          ) : menu.groupPickerFor != null ? (
             /* "Move to group…" picker (#49): swaps the menu's contents IN
                 PLACE — one button per top-level group (the workspace's
                 current group is left out; moving there is a no-op), plus the
@@ -4417,6 +4720,7 @@ export function WorkspaceShell() {
               workspace-list actions below stay hidden here. */}
           {menu.tabId != null &&
             menu.workspaceId != null &&
+            !showTabBatch &&
             (() => {
               const ws = state.workspaces.find((w) => w.id === menu.workspaceId)
               const index = ws?.tabs?.findIndex((t) => t.id === menu.tabId) ?? -1
@@ -4496,6 +4800,35 @@ export function WorkspaceShell() {
                 </>
               )
             })()}
+          {/* Batch TAB menu (#106): opened from a tab that belongs to a
+              multi-selection. The single-node actions above hide (the
+              !showTabBatch guard) — these two act on the WHOLE selection:
+              Close selected resolves through the shared confirmation, Move
+              to workspace swaps the menu for the workspace picker IN
+              PLACE. Rename stays single-node by design (the #53 rule). */}
+          {showTabBatch && menu.workspaceId != null && (
+            <>
+              <button
+                className="menu-item danger"
+                role="menuitem"
+                onClick={closeSelectedTabsFromMenu}
+              >
+                <CloseIcon />
+                Close selected
+              </button>
+              <button
+                className="menu-item"
+                role="menuitem"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  openWorkspacePickerFromMenu()
+                }}
+              >
+                <FolderIcon />
+                Move to workspace
+              </button>
+            </>
+          )}
           {/* Batch selection menu (#53): opened from a row that belongs to a
               multi-selection. One set of actions for EVERY selected node —
               Move to group…, Pin all/Unpin all, Close all, Delete all (the

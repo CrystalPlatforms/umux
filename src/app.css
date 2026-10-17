@@ -798,6 +798,15 @@ body.is-dragging * {
   overflow: hidden;
 }
 
+/* Selected tab of the multi-selection (issue 106): the same accent wash the
+   sidebar's .is-selected rows wear, so both selections read identically.
+   Sits UNDER the active state — a selected-and-active tab keeps its active
+   look; the wash only marks the inactive members. */
+.tab.is-selected {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 /* The active strip stays on TOP (its #70 home): a straight bar along the
    tab's outer edge, clipped by the tab's rounded outline so the corners
    stay clean. A tab with a palette color recolors the strip via

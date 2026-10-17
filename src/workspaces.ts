@@ -1379,6 +1379,124 @@ export function moveTab(
   }
 }
 
+/// Reorder a GROUP of tabs in one drag (#106): the selected tabs land as a
+/// contiguous block at `newIndex` — an index into the list AFTER the selected
+/// tabs are removed (moveTab's splice-out-then-insert contract, generalized
+/// to N tabs). The block keeps the tabs' current DISPLAY order, so a drag
+/// never scrambles the group's internal order no matter which member was
+/// grabbed. Unknown ids in `tabIds` are dropped; an empty selection is a
+/// no-op. Everything hangs off the tab's ID (name, panels, pinned flag,
+/// shell, the active-tab record), so only ORDER changes — exactly as a
+/// single-tab move. No-op for an unknown workspace id.
+export function moveTabGroup(
+  state: WorkspaceState,
+  id: string,
+  tabIds: readonly string[],
+  newIndex: number,
+): WorkspaceState {
+  const ws = state.workspaces.find((w) => w.id === id)
+  if (ws?.tabs == null) return state
+  const selected = new Set(tabIds)
+  const moving = ws.tabs.filter((t) => selected.has(t.id))
+  if (moving.length === 0) return state
+  const rest = ws.tabs.filter((t) => !selected.has(t.id))
+  const clamped = Math.max(0, Math.min(newIndex, rest.length))
+  const tabs = [...rest.slice(0, clamped), ...moving, ...rest.slice(clamped)]
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) =>
+      w.id === id ? { ...w, tabs } : w,
+    ),
+  }
+}
+
+/// Move a GROUP of tabs to ANOTHER workspace (#106): the tabs land at the END
+/// of the target's bar in their current display order, and every persisted /
+/// runtime record that hangs off a tab id travels with it — the same rule
+/// that keeps a single tab's shell and cwd alive across a move today:
+///   - `panels` entries (working directory / SSH target, keyed by leaf id)
+///     move to the target's `panels` and are dropped from the source, so the
+///     config never accumulates orphans;
+///   - the zoom record is keyed by TAB id and stays valid (ids never change);
+///   - the target's active tab becomes the LAST moved tab (its first panel
+///     focused) — the block is what the user finds when they open the target;
+///   - the source's active tab/panel fall back to the first survivor when
+///     the active tab was among the moved (closeTab's neighbor rule).
+/// Guards: moving to the SAME workspace, unknown workspaces, an empty or
+/// fully-unknown selection, and a selection covering EVERY source tab (a
+/// workspace keeps at least one tab — closeTab's invariant) are all no-ops.
+export function moveTabsToWorkspace(
+  state: WorkspaceState,
+  fromId: string,
+  tabIds: readonly string[],
+  toId: string,
+): WorkspaceState {
+  if (fromId === toId) return state
+  const from = state.workspaces.find((w) => w.id === fromId)
+  const to = state.workspaces.find((w) => w.id === toId)
+  if (from?.tabs == null || to == null) return state
+  const selected = new Set(tabIds)
+  const moving = from.tabs.filter((t) => selected.has(t.id))
+  if (moving.length === 0 || moving.length === from.tabs.length) return state
+  const remaining = from.tabs.filter((t) => !selected.has(t.id))
+  // The persisted cwd/SSH config travels with the moved leaves.
+  const movingLeaves = new Set(moving.flatMap((t) => leafIds(t.layout)))
+  const movedPanels = (from.panels ?? []).filter((p) => movingLeaves.has(p.id))
+  const fromPanels = from.panels?.filter((p) => !movingLeaves.has(p.id))
+  const toPanels =
+    movedPanels.length > 0 ? [...(to.panels ?? []), ...movedPanels] : to.panels
+  // Runtime records: the block's LAST tab leads the target; the source
+  // falls back to its first survivor when its active tab moved away.
+  const lastMoved = moving[moving.length - 1]
+  const fromActive = state.activeTabId[fromId]
+  const activeMoved = fromActive != null && selected.has(fromActive)
+  const activeTabId = { ...state.activeTabId }
+  if (activeMoved) activeTabId[fromId] = remaining[0].id
+  activeTabId[toId] = lastMoved.id
+  const activePanelId = { ...state.activePanelId }
+  if (activeMoved) activePanelId[fromId] = leafIds(remaining[0].layout)[0]
+  activePanelId[toId] = leafIds(lastMoved.layout)[0]
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) => {
+      if (w.id === fromId) {
+        return {
+          ...w,
+          tabs: remaining,
+          // `?.` keeps a panel-less workspace's payload unchanged.
+          panels: fromPanels,
+        }
+      }
+      if (w.id === toId) {
+        return {
+          ...w,
+          tabs: [...(w.tabs ?? []), ...moving],
+          panels: toPanels,
+        }
+      }
+      return w
+    }),
+    activeTabId,
+    activePanelId,
+  }
+}
+
+/// Close a BATCH of tabs (#106): every selected tab goes through the SAME
+/// closeTab a solo close uses (sequentially, in the order given), so each
+/// keeps its guards — including "a workspace keeps at least one tab": a
+/// selection covering every tab leaves exactly the last survivor open.
+/// Activation falls per close, per closeTab's rules. No-op for an unknown
+/// workspace id; unknown tab ids are skipped by closeTab itself.
+export function closeTabs(
+  state: WorkspaceState,
+  id: string,
+  tabIds: readonly string[],
+): WorkspaceState {
+  let next = state
+  for (const tabId of tabIds) next = closeTab(next, id, tabId)
+  return next
+}
+
 /// The panel ids of workspace `id`, in tab-then-tree order — the stable
 /// identity the renderer keys terminal surfaces by. Covers EVERY tab's
 /// panes (#37 rework), with the legacy top-level `layout` as a fallback for

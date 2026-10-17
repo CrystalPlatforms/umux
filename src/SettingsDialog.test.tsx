@@ -18,6 +18,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent, screen } from '@testing-library/react'
 import { SettingsDialog } from './SettingsDialog'
 import { defaultSettings } from './settings'
+import type { UpdateState } from './updater'
 
 describe('SettingsDialog', () => {
   // T1 (AC1 — the screen shows the toggles): one switch per USER-CONTROLLABLE
@@ -1220,5 +1221,54 @@ describe('SettingsDialog factory reset (#74)', () => {
     } finally {
       restorePlatform()
     }
+  })
+})
+
+// App version label (#107 / story 16): the updater row names the INSTALLED
+// version in both settled states — read through the app's own version API by
+// the parent and passed through (never hardcoded here).
+describe('SettingsDialog app version label (#107)', () => {
+  const updatesFor = (state: UpdateState) => ({
+    state,
+    onCheck: () => {},
+    onInstall: () => {},
+  })
+  const renderWith = (props: {
+    appVersion?: string
+    state: UpdateState
+  }) =>
+    render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        appVersion={props.appVersion}
+        updates={updatesFor(props.state)}
+      />,
+    )
+
+  it('renders the installed version beside the up-to-date status', () => {
+    renderWith({ appVersion: '1.7.6', state: { kind: 'up-to-date' } })
+    expect(screen.getByText('umux is up to date (1.7.6).')).toBeTruthy()
+  })
+
+  it('renders the installed version beside the update-available status', () => {
+    renderWith({
+      appVersion: '1.7.6',
+      state: { kind: 'available', version: '1.8.0' },
+    })
+    expect(
+      screen.getByText('umux 1.8.0 is available (installed: 1.7.6).'),
+    ).toBeTruthy()
+  })
+
+  it('renders the old wording when no version resolved yet', () => {
+    renderWith({ state: { kind: 'up-to-date' } })
+    expect(screen.getByText('umux is up to date.')).toBeTruthy()
+  })
+
+  it('renders the available state without the version when none resolved', () => {
+    renderWith({ state: { kind: 'available', version: '1.8.0' } })
+    expect(screen.getByText('umux 1.8.0 is available.')).toBeTruthy()
   })
 })

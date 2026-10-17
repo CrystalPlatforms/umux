@@ -33,6 +33,9 @@ import {
   switchTab,
   renameTab,
   setTabPinned,
+  moveTabGroup,
+  moveTabsToWorkspace,
+  closeTabs,
   activeTabOf,
   moveNode,
   moveNodes,
@@ -2460,5 +2463,210 @@ describe('panelLocationOf', () => {
 
   it('returns null for an unknown panel id', () => {
     expect(panelLocationOf(state, 'ghost')).toBeNull()
+  })
+})
+
+// --- Tab multi-select batch ops (#106) ---------------------------------------
+//
+// Assumptions encoded (stated before the first RED):
+//  - moveTabGroup: the selected tabs land as ONE contiguous block at an index
+//    into the POST-REMOVAL list (moveTab's splice contract, generalized);
+//    the block keeps the tabs' DISPLAY order, so internal order survives any
+//    drag; unknown ids drop; a singleton call matches moveTab exactly.
+//  - moveTabsToWorkspace: definitions land at the END of the target bar in
+//    display order; `panels` entries (cwd / sshTarget) travel and leave no
+//    orphans; the target active tab becomes the LAST moved tab, the source
+//    activation falls back to the first survivor when its active tab moved;
+//    zoom records (keyed by tab id) survive the ride. No-ops: same-workspace
+//    move, unknown workspaces, empty/unknown selection, moving EVERY source
+//    tab (a workspace keeps at least one tab).
+//  - closeTabs: sequential closeTab — each member keeps its guards, so a
+//    selection covering every tab leaves the last survivor open, and
+//    activation/zoom follow the closeTab rules per close.
+
+/// A leaf-layout tab (leaf id = `id + '-leaf'`, the convention these tests
+/// assert against in `panels`).
+function tabOf(id: string): { id: string; layout: LayoutNode; name: string } {
+  return { id, layout: { kind: 'leaf', id: `${id}-leaf` }, name: id }
+}
+
+/// Two workspaces: A with `aNames` tabs, B with `bNames` tabs; A active.
+function twoWorkspaceState(
+  aNames: string[],
+  bNames: string[],
+): WorkspaceState {
+  return {
+    ...emptyState,
+    workspaces: [
+      { id: 'ws-a', name: 'A', tabs: aNames.map(tabOf) },
+      { id: 'ws-b', name: 'B', tabs: bNames.map(tabOf) },
+    ],
+    order: ['ws-a', 'ws-b'],
+    activeId: 'ws-a',
+    openIds: ['ws-a', 'ws-b'],
+    activeTabId: { 'ws-a': aNames[0], 'ws-b': bNames[0] },
+    activePanelId: {
+      'ws-a': `${aNames[0]}-leaf`,
+      'ws-b': `${bNames[0]}-leaf`,
+    },
+  }
+}
+
+function tabOrder(state: WorkspaceState, wsId: string): string[] {
+  return (
+    state.workspaces.find((w) => w.id === wsId)?.tabs?.map((t) => t.id) ?? []
+  )
+}
+
+describe('moveTabGroup (#106 group reorder)', () => {
+  it('lands the selected tabs as one block, keeping their internal order', () => {
+    const s = twoWorkspaceState(['a', 'b', 'c', 'd', 'e'], ['x'])
+    // Grabbed in the reverse order — the DISPLAY order must win.
+    const next = moveTabGroup(s, 'ws-a', ['d', 'b'], 1)
+    expect(tabOrder(next, 'ws-a')).toEqual(['a', 'b', 'd', 'c', 'e'])
+  })
+
+  it('moves a block to the end when the index passes the last survivor', () => {
+    const s = twoWorkspaceState(['a', 'b', 'c', 'd', 'e'], ['x'])
+    const next = moveTabGroup(s, 'ws-a', ['a', 'b'], 99)
+    expect(tabOrder(next, 'ws-a')).toEqual(['c', 'd', 'e', 'a', 'b'])
+  })
+
+  it('matches moveTab exactly for a single-tab selection', () => {
+    const base = twoWorkspaceState(['a', 'b', 'c', 'd', 'e'], ['x'])
+    expect(tabOrder(moveTabGroup(base, 'ws-a', ['d'], 1), 'ws-a')).toEqual(
+      tabOrder(moveTab(base, 'ws-a', 'd', 1), 'ws-a'),
+    )
+  })
+
+  it('drops unknown ids and no-ops on an empty selection', () => {
+    const s = twoWorkspaceState(['a', 'b', 'c'], ['x'])
+    expect(tabOrder(moveTabGroup(s, 'ws-a', ['b', 'ghost'], 0), 'ws-a')).toEqual([
+      'b',
+      'a',
+      'c',
+    ])
+    expect(moveTabGroup(s, 'ws-a', [], 0)).toBe(s)
+    expect(moveTabGroup(s, 'ws-ghost', ['a'], 0)).toBe(s)
+  })
+
+  it('keeps runtime records intact — a group reorder only changes ORDER', () => {
+    const s = twoWorkspaceState(['a', 'b', 'c'], ['x'])
+    const next = moveTabGroup(s, 'ws-a', ['a', 'b'], 1)
+    expect(next.activeTabId['ws-a']).toBe('a')
+    expect(next.activePanelId['ws-a']).toBe('a-leaf')
+  })
+})
+
+describe('moveTabsToWorkspace (#106 move between workspaces)', () => {
+  it('lands the selection at the END of the target bar, display order kept', () => {
+    const s = twoWorkspaceState(['a1', 'a2', 'a3'], ['b1', 'b2'])
+    const next = moveTabsToWorkspace(s, 'ws-a', ['a3', 'a1'], 'ws-b')
+    expect(tabOrder(next, 'ws-b')).toEqual(['b1', 'b2', 'a1', 'a3'])
+    expect(tabOrder(next, 'ws-a')).toEqual(['a2'])
+  })
+
+  it('moves the tabs with their cwd and sshTarget, leaving no orphans', () => {
+    const s: WorkspaceState = twoWorkspaceState(['a1', 'a2', 'a3'], ['b1'])
+    s.workspaces = s.workspaces.map((w) =>
+      w.id === 'ws-a'
+        ? {
+            ...w,
+            panels: [
+              { id: 'a1-leaf', workingDirectory: '/home/dev/api' },
+              { id: 'a2-leaf', workingDirectory: '/home/dev/web' },
+              { id: 'a3-leaf', sshTarget: 'dev@box' },
+            ],
+          }
+        : w,
+    )
+    const next = moveTabsToWorkspace(s, 'ws-a', ['a1', 'a3'], 'ws-b')
+    const a = next.workspaces.find((w) => w.id === 'ws-a')
+    const b = next.workspaces.find((w) => w.id === 'ws-b')
+    expect(a?.panels).toEqual([
+      { id: 'a2-leaf', workingDirectory: '/home/dev/web' },
+    ])
+    // Both persisted fields ride along untouched.
+    expect(b?.panels).toEqual([
+      { id: 'a1-leaf', workingDirectory: '/home/dev/api' },
+      { id: 'a3-leaf', sshTarget: 'dev@box' },
+    ])
+  })
+
+  it('gives the target activation to the LAST moved tab, first panel focused', () => {
+    const s = twoWorkspaceState(['a1', 'a2', 'a3'], ['b1', 'b2'])
+    const next = moveTabsToWorkspace(s, 'ws-a', ['a1', 'a3'], 'ws-b')
+    expect(next.activeTabId['ws-b']).toBe('a3')
+    expect(next.activePanelId['ws-b']).toBe('a3-leaf')
+  })
+
+  it('falls the source activation back to the first survivor when its active tab moved', () => {
+    const s = twoWorkspaceState(['a1', 'a2', 'a3'], ['b1'])
+    const next = moveTabsToWorkspace(s, 'ws-a', ['a1', 'a3'], 'ws-b')
+    expect(next.activeTabId['ws-a']).toBe('a2')
+    expect(next.activePanelId['ws-a']).toBe('a2-leaf')
+  })
+
+  it('leaves the source activation alone when its active tab stayed', () => {
+    const s: WorkspaceState = {
+      ...twoWorkspaceState(['a1', 'a2'], ['b1']),
+      activeTabId: { 'ws-a': 'a2', 'ws-b': 'b1' },
+    }
+    const next = moveTabsToWorkspace(s, 'ws-a', ['a1'], 'ws-b')
+    expect(next.activeTabId['ws-a']).toBe('a2')
+  })
+
+  it('keeps the zoom record alive — it is keyed by TAB id, not workspace', () => {
+    const s: WorkspaceState = {
+      ...twoWorkspaceState(['a1', 'a2'], ['b1']),
+      zoomedPanelId: { a1: 'a1-leaf' },
+    }
+    const next = moveTabsToWorkspace(s, 'ws-a', ['a1'], 'ws-b')
+    expect(next.zoomedPanelId['a1']).toBe('a1-leaf')
+  })
+
+  it('no-ops on a same-workspace move, unknown workspaces, and empty selections', () => {
+    const s = twoWorkspaceState(['a1', 'a2'], ['b1'])
+    expect(moveTabsToWorkspace(s, 'ws-a', ['a1'], 'ws-a')).toBe(s)
+    expect(moveTabsToWorkspace(s, 'ws-a', ['a1'], 'ws-ghost')).toBe(s)
+    expect(moveTabsToWorkspace(s, 'ws-ghost', ['a1'], 'ws-b')).toBe(s)
+    expect(moveTabsToWorkspace(s, 'ws-a', [], 'ws-b')).toBe(s)
+    expect(moveTabsToWorkspace(s, 'ws-a', ['ghost'], 'ws-b')).toBe(s)
+  })
+
+  it('refuses to empty the source — moving EVERY tab is a no-op', () => {
+    const s = twoWorkspaceState(['a1', 'a2'], ['b1'])
+    expect(moveTabsToWorkspace(s, 'ws-a', ['a1', 'a2'], 'ws-b')).toBe(s)
+    expect(tabOrder(s, 'ws-a')).toEqual(['a1', 'a2'])
+  })
+})
+
+describe('closeTabs (#106 close selected)', () => {
+  it('closes exactly the selection and drops their config/zoom records', () => {
+    const s: WorkspaceState = {
+      ...twoWorkspaceState(['a1', 'a2', 'a3'], ['b1']),
+      zoomedPanelId: { a1: 'a1-leaf', a2: 'a2-leaf' },
+    }
+    const next = closeTabs(s, 'ws-a', ['a1', 'a3'])
+    expect(tabOrder(next, 'ws-a')).toEqual(['a2'])
+    expect(next.zoomedPanelId).toEqual({ a2: 'a2-leaf' })
+  })
+
+  it('keeps the last survivor when the selection covers every tab', () => {
+    const s = twoWorkspaceState(['a1', 'a2', 'a3'], ['b1'])
+    const next = closeTabs(s, 'ws-a', ['a1', 'a2', 'a3'])
+    expect(tabOrder(next, 'ws-a')).toEqual(['a3'])
+  })
+
+  it('hands activation to the neighbor of a closed active tab', () => {
+    const s = twoWorkspaceState(['a1', 'a2', 'a3'], ['b1'])
+    const next = closeTabs(s, 'ws-a', ['a1'])
+    expect(next.activeTabId['ws-a']).toBe('a2')
+  })
+
+  it('skips unknown ids without touching the rest', () => {
+    const s = twoWorkspaceState(['a1', 'a2'], ['b1'])
+    expect(closeTabs(s, 'ws-a', ['ghost']).workspaces).toEqual(s.workspaces)
+    expect(closeTabs(s, 'ws-ghost', ['a1'])).toBe(s)
   })
 })

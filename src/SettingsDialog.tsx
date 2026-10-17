@@ -69,14 +69,28 @@ function SettingsToggle({ label, checked, testId, onToggle }: ToggleProps) {
 
 // The one-line status under the "App updates" row (issue #66). Every settled
 // state reads as a human sentence; the idle state renders nothing at all.
-function UpdatesStatus({ state }: { state: UpdateState }) {
+// The installed version rides beside the settled states (#107 / story 16) —
+// read through the app's own version API by the parent and passed through
+// here; absent (not resolved / the API refused) the row renders exactly as
+// before.
+function UpdatesStatus({
+  state,
+  appVersion,
+}: {
+  state: UpdateState
+  appVersion?: string
+}) {
   switch (state.kind) {
     case 'idle':
       return null
     case 'checking':
       return <p className="settings-status">Checking for updates…</p>
     case 'up-to-date':
-      return <p className="settings-status">umux is up to date.</p>
+      return (
+        <p className="settings-status">
+          umux is up to date{appVersion != null ? ` (${appVersion})` : ''}.
+        </p>
+      )
     case 'no-release':
       return (
         <p className="settings-status">
@@ -85,7 +99,12 @@ function UpdatesStatus({ state }: { state: UpdateState }) {
         </p>
       )
     case 'available':
-      return <p className="settings-status">umux {state.version} is available.</p>
+      return (
+        <p className="settings-status">
+          umux {state.version} is available
+          {appVersion != null ? ` (installed: ${appVersion})` : ''}.
+        </p>
+      )
     case 'downloading':
       return (
         <p className="settings-status">
@@ -105,6 +124,7 @@ export function SettingsDialog({
   onImportWizard,
   onResetAll,
   updates,
+  appVersion,
   shells = [],
   onStorestationToggle,
   onStorestationAutostartToggle,
@@ -138,6 +158,12 @@ export function SettingsDialog({
     onCheck: () => void
     onInstall: () => void
   }
+  // The installed app version (#107 / story 16), read through the app's own
+  // version API (`getVersion`) by the parent and passed through — never a
+  // hardcoded string. Rendered beside the updater status in BOTH settled
+  // states (up to date / update available). Absent = the row reads exactly
+  // as before.
+  appVersion?: string
   // The detected-shell list (#77, v1.6.0): raw probes already ranked by the
   // pure ShellDetector (the WorkspaceShell glue runs the `list_shells`
   // invoke). Empty = only "Auto" and the custom entry are offered — no shell
@@ -515,7 +541,7 @@ export function SettingsDialog({
                 </button>
               </div>
             </div>
-            <UpdatesStatus state={updates.state} />
+            <UpdatesStatus state={updates.state} appVersion={appVersion} />
           </>
         )}
 

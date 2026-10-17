@@ -31,6 +31,13 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }))
 
+// Boundary: the app version API (#107). The shell reads the installed
+// version once on mount to feed the Settings updater row; a fixed string
+// keeps every existing invoke-count assertion untouched.
+vi.mock('@tauri-apps/api/app', () => ({
+  getVersion: () => Promise.resolve('0.0.0-test'),
+}))
+
 // Boundary: the opener plugin (#72) — a port click hands the localhost URL
 // to the system browser; #81's folder click opens the folder in the system
 // file explorer. Mocked like invoke: the shell's own logic under test is
