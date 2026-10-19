@@ -243,6 +243,14 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 142. As a developer, I want Always-On to be best-effort per platform — an OS power assertion wherever possible, clear instructions where the OS refuses (Windows/Linux lid-close action, macOS on battery) — with the state visible in `umux status --json` (`sleepPrevented`), so the limits are never silent.
 143. As a user, I want the daemon to keep only the machine awake (the screen may sleep) and to release the block on stop or toggle-off, so enabling Core never changes anything beyond the machine staying awake.
 
+### umux Core Session — timed awake sessions — added 2026-10-19 (proposal #108 + PO decisions, recorded on #108; version slot open — assigned by the PO)
+
+144. As a user, I want to start a timed awake session (`umux core-session start <czas>`) so the machine stays awake for a bounded window (max 24 h per session) instead of indefinitely, with nothing to remember to switch off.
+145. As a user, I want to extend or stop a session mid-flight (`core-session extend` / `stop`) and have expiry auto-release the hold with a desktop notification (same family as the update notification) and a visible end state in Settings, so the machine never stays awake longer than I asked.
+146. As a developer, I want the session to be daemon-owned state persisted with an absolute end time and restored after a daemon restart with the remaining window (never silently converting into an infinite hold), so crashes and restarts can neither extend nor fake the hold.
+147. As a user on macOS, I want Core's persistent switch replaced by Core Session (BETA) with an Insomnia info line, my old Core ON flag cleaned at update, and `umux core on` refused at the daemon with a pointer to `core-session start`, so there is exactly one honest way to keep the machine awake there.
+148. As a user on Windows and Linux, I want Core unchanged and a session start refused while Core is ON with a clear message, so the two holds never fight or stack silently.
+
 ---
 
 ## Implementation Decisions
