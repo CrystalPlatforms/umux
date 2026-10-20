@@ -4739,7 +4739,7 @@ describe('#81 folder lines on workspace rows', () => {
     expect(folder?.getAttribute('title')).toBe(deep)
   })
 
-  it('double-clicking the folder opens it in the system file explorer; a single click does nothing (quickupdate 2026-09-17)', async () => {
+  it('single click on a folder selects the workspace; double-click opens it in the system file explorer (#116)', async () => {
     openPathMock.mockClear()
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'load_settings') return Promise.resolve({ showTabFolders: true })
@@ -4752,6 +4752,12 @@ describe('#81 folder lines on workspace rows', () => {
               panels: [{ id: 'p-1', workingDirectory: '/Users/panad/work' }],
               tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
             },
+            {
+              id: 'ws-2',
+              name: 'beta',
+              panels: [{ id: 'p-2', workingDirectory: '/Users/panad/play' }],
+              tabs: [{ id: 't-2', name: 'two', layout: { kind: 'leaf', id: 'p-2' } }],
+            },
           ],
         })
       return Promise.resolve(undefined)
@@ -4759,19 +4765,24 @@ describe('#81 folder lines on workspace rows', () => {
     render(<WorkspaceShell />)
     await screen.findByTestId('panel-ws-1')
 
-    const folderButton = () =>
-      screen
-        .getByTestId('workspace-row-ws-1')
-        .querySelector<HTMLElement>('.workspace-folder-line__folder')!
+    const row = (id: string) => screen.getByTestId(`workspace-row-${id}`)
+    const folderButton = (id: string) =>
+      row(id).querySelector<HTMLElement>('.workspace-folder-line__folder')!
 
-    // A stray single click must NOT open the explorer.
-    fireEvent.click(folderButton())
+    // The harness seeds activeId with the first workspace.
+    expect(row('ws-1').className).toContain('is-active')
+    expect(row('ws-2').className).not.toContain('is-active')
+
+    // ONE click on the inactive workspace's folder line selects it (#116)
+    // — and never opens the explorer (that stays the double-click's job).
+    fireEvent.click(folderButton('ws-2'))
+    expect(row('ws-2').className).toContain('is-active')
+    expect(row('ws-1').className).not.toContain('is-active')
     expect(openPathMock).not.toHaveBeenCalled()
 
-    // The double-click is the open gesture.
-    fireEvent.doubleClick(folderButton())
-
-    expect(openPathMock).toHaveBeenCalledWith('/Users/panad/work')
+    // The double-click is still the open gesture.
+    fireEvent.doubleClick(folderButton('ws-2'))
+    expect(openPathMock).toHaveBeenCalledWith('/Users/panad/play')
   })
 
   it('falls back to revealing the folder when open_path is unavailable', async () => {
@@ -4951,12 +4962,11 @@ describe('#81 chips are never doubled; folder double-click activates the row', (
         .getByTestId('workspace-row-ws-2')
         .querySelector<HTMLElement>('.workspace-folder-line__folder')!
 
-    // A stray single click does NOTHING (quickupdate 2026-09-17): no
-    // explorer AND no activation — the bubble is stopped, so the row's own
-    // onClick never fires.
+    // A single click now SELECTS the workspace (#116, 2026-10-20); the
+    // explorer stays closed — opening is the double-click's job.
     fireEvent.click(folderButton())
+    expect(screen.getByTestId('workspace-row-ws-2').className).toMatch(/is-active/)
     expect(openPathMock).not.toHaveBeenCalled()
-    expect(screen.getByTestId('workspace-row-ws-2').className).not.toMatch(/is-active/)
 
     // The double-click opens the explorer AND activates the row.
     fireEvent.doubleClick(folderButton())

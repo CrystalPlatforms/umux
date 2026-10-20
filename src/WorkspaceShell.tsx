@@ -3793,10 +3793,13 @@ export function WorkspaceShell() {
                           (parent/target, formatFolderTail) so the row reads
                           "which folder" — the full path lives on the
                           tooltip; double-clicking the folder opens it in the
-                          system file explorer (opener plugin, HITL round;
-                          gesture moved from single click — quickupdate
-                          2026-09-17, Adam: only the folder line needs a
-                          double-click, the row itself stays single-click). */}
+                          system file explorer (opener plugin, HITL round).
+                          Gesture history: quickupdate 2026-09-17 moved the
+                          open to a double-click and left the single click a
+                          no-op; #116 (2026-10-20) brings the single click
+                          back as the row's own gesture — SELECT the
+                          workspace — so the folder line behaves like the
+                          row above it everywhere but the open. */}
                       {settings.showTabFolders &&
                         state.openIds.includes(entry.workspace.id) &&
                         (() => {
@@ -3827,13 +3830,25 @@ export function WorkspaceShell() {
                                   type="button"
                                   className="workspace-folder-line__folder"
                                   title={line.folder}
-                                  // A single click is a full no-op (quickupdate
-                                  // 2026-09-17, Adam: the folder opens on a
-                                  // DOUBLE-click only). The bubble must be
-                                  // stopped — otherwise the click would land
-                                  // on the row's onClick and activate the
-                                  // workspace as a side effect.
-                                  onClick={(e) => e.stopPropagation()}
+                                  // A single click SELECTS the workspace
+                                  // (#116, 2026-10-20) — the same plain-click
+                                  // activation the row performs (empty the
+                                  // multi-selection, open the workspace).
+                                  // stopPropagation stays: the row's onClick
+                                  // must not also fire (it would repeat the
+                                  // activation). The drag guard is mirrored
+                                  // too — a drag's trailing click must not
+                                  // activate, and the row never sees this
+                                  // click to guard it itself.
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    if (suppressClickRef.current) {
+                                      suppressClickRef.current = false
+                                      return
+                                    }
+                                    setSelectedIds([])
+                                    setState(openWorkspace(state, entry.workspace.id))
+                                  }}
                                   onDoubleClick={(e) => {
                                     e.stopPropagation()
                                     // The double-click opens the folder AND
