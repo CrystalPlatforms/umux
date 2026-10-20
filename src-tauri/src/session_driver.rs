@@ -145,10 +145,16 @@ impl SessionCore for InProcessDriver {
     }
 
     fn pty_cwd(&self, id: u32) -> Option<PathBuf> {
-        self.pty
+        // The lock covers only the CHEAP lookups (pid + spawn fallback).
+        // `process_cwd` shells out to `lsof` on macOS — running it under
+        // this mutex stalled every `pty_write` behind it: terminals froze
+        // mid-typing while the UI stayed alive (freeze reports, 2026-10-20).
+        let (pid, fallback) = self
+            .pty
             .lock()
             .ok()?
-            .cwd(&session_core::pty_service::PtyHandle { id })
+            .cwd_parts(&session_core::pty_service::PtyHandle { id });
+        session_core::pty_service::resolve_cwd(pid, fallback)
     }
 
     fn pty_exit_code(&self, id: u32) -> io::Result<Option<i32>> {
@@ -742,13 +748,25 @@ impl SessionCore for DaemonDriver {
     }
 
     fn pty_cwd(&self, id: u32) -> Option<PathBuf> {
-        self.session_id_of(id)
-            .and_then(|s| self.session_status(&s).ok())
-            .and_then(|v| {
-                v.get("cwd")
-                    .and_then(|c| c.as_str())
-                    .map(|c| PathBuf::from(c.to_string()))
-            })
+        let session = self.session_id_of(id)?;
+        let status = self.session_status(&session).ok()?;
+        // The LIVE cwd is resolved HERE, never daemon-side: `process_cwd`
+        // shells out to `lsof` on macOS, and one running under the daemon's
+        // registry lock stalled every `session.write` behind it — terminals
+        // froze while the UI stayed alive (freeze reports, 2026-10-20).
+        // This runs on the app's blocking pool (panel_cwds's
+        // spawn_blocking) with no locks held; the daemon's recorded spawn
+        // directory stays the fallback (the #81 rule, and what its status
+        // answers now).
+        let pid = status
+            .get("childPid")
+            .and_then(|p| p.as_u64())
+            .and_then(|p| u32::try_from(p).ok());
+        let fallback = status
+            .get("cwd")
+            .and_then(|c| c.as_str())
+            .map(PathBuf::from);
+        session_core::pty_service::resolve_cwd(pid, fallback)
     }
 
     fn pty_exit_code(&self, id: u32) -> io::Result<Option<i32>> {

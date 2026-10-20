@@ -368,3 +368,67 @@ fn unknown_op_leaves_the_session_connection_usable() {
         .expect("still open after badParams");
     assert_eq!(result["truncated"], false);
 }
+
+// Freeze fix (2026-10-20): `session.status` is the agent-status poll's op
+// (~every 2 s per panel, over the ONE shared connection) — it must answer
+// FAST, never behind an OS read. The old implementation resolved the live
+// cwd with `process_cwd` (lsof on macOS) while the dispatcher held the
+// registry lock, so every `session.write` — each keystroke — stalled behind
+// the poll's lsof chain: terminals froze while the UI stayed alive. Now the
+// `cwd` field carries the RECORDED spawn directory (the #81 fallback rule,
+// what Windows always reported) and the app resolves the LIVE directory
+// itself from `childPid`. This pins both halves.
+#[test]
+fn status_answers_the_recorded_cwd_and_a_resolvable_child_pid() {
+    let server = TestServer::start();
+    let client = server.client();
+    let sid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    let cwd = server.dir.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let rx = client.subscribe_output(sid);
+    client
+        .call(
+            "sessions.create",
+            json!({
+                "id": sid,
+                "shell": session_shell(),
+                "cwd": cwd.display().to_string(),
+                "cols": 100,
+                "rows": 30,
+            }),
+        )
+        .expect("create a session");
+    client
+        .call("session.subscribe", json!({ "id": sid, "subscriber": "panel-1" }))
+        .expect("subscribe");
+
+    // Let the prompt come up, then `cd` somewhere else.
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = rx.try_recv();
+    let other = server.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&other).unwrap();
+    client
+        .call(
+            "session.write",
+            json!({ "id": sid, "data": b64(&format!("cd {}\n", other.display())) }),
+        )
+        .expect("write cd");
+    std::thread::sleep(Duration::from_millis(800)); // the shell applies it
+
+    let status = client
+        .call("session.status", json!({ "id": sid }))
+        .expect("status");
+    assert!(
+        status["childPid"].as_u64().is_some(),
+        "childPid present — the app resolves the live cwd from it"
+    );
+    assert_eq!(
+        status["cwd"],
+        cwd.display().to_string(),
+        "status reports the RECORDED cwd — the OS read lives app-side"
+    );
+
+    client
+        .call("session.kill", json!({ "id": sid }))
+        .expect("kill");
+}

@@ -229,6 +229,16 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+/// Live cwd of `pid`, falling back to the recorded spawn directory when the
+/// OS cannot read a live one (Windows today — no /proc equivalent; the #81
+/// fix / PO decision 2026-09-08: the snapshot then stores the tab's starting
+/// directory, which is what folder lines and branch labels show there).
+/// Pair with `PtyService::cwd_parts` and call it WITHOUT holding a lock —
+/// on macOS this spawns `lsof` (see `cwd_parts` for the freeze story).
+pub fn resolve_cwd(pid: Option<u32>, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    pid.and_then(process_cwd).or(fallback)
+}
+
 /// Windows live-cwd read (quickupdate 2026-09-13): the target's current
 /// directory lives in its PEB (`ProcessParameters->CurrentDirectory.DosPath`).
 /// Self-contained raw bindings on purpose — the needed functions sit behind
@@ -930,20 +940,27 @@ impl PtyService {
         process_name(self.foreground_pid(handle)?)
     }
 
+    /// The inputs for a live-cwd lookup: which pid to ask (the shell's) and
+    /// the recorded spawn directory as the fallback. Split out of `cwd` so
+    /// CALLERS can drop their lock before resolving — `process_cwd` shells
+    /// out to `lsof` on macOS (tens of ms, sometimes seconds on busy
+    /// mounts), and running it under the PTY mutex stalled every `pty_write`
+    /// behind it: terminals froze mid-typing while the UI stayed alive
+    /// (freeze reports, 2026-10-20).
+    pub fn cwd_parts(&self, handle: &PtyHandle) -> (Option<u32>, Option<PathBuf>) {
+        let pid = self.child_pid(handle);
+        let fallback = self.entries.get(&handle.id).map(|e| e.spawn_cwd.clone());
+        (pid, fallback)
+    }
+
     /// The shell process's CURRENT working directory (v0.2 Phase 5 / #29
     /// session snapshot), read from the OS at call time — it follows `cd`s.
-    /// `None` for an unknown handle or a child without a pid. When the OS
-    /// cannot read a live cwd (Windows today — no /proc equivalent), the
-    /// directory the shell was spawned in is reported instead (#81 fix:
-    /// the snapshot then stores the tab's starting directory, which is what
-    /// folder lines and branch labels show there — PO decision 2026-09-08;
-    /// live cwd on Windows stays a separate future task).
+    /// `None` for an unknown handle. Convenience wrapper over `cwd_parts` +
+    /// `resolve_cwd`; lock-holding callers should use the parts directly and
+    /// resolve AFTER dropping the lock.
     pub fn cwd(&self, handle: &PtyHandle) -> Option<PathBuf> {
-        let pid = self.child_pid(handle)?;
-        match process_cwd(pid) {
-            Some(cwd) => Some(cwd),
-            None => self.entries.get(&handle.id).map(|e| e.spawn_cwd.clone()),
-        }
+        let (pid, fallback) = self.cwd_parts(handle);
+        resolve_cwd(pid, fallback)
     }
 
     /// Non-blocking poll for the child's exit code. Returns `Ok(None)` while the
@@ -1416,6 +1433,69 @@ mod tests {
     fn cwd_unknown_handle_is_none() {
         let svc = PtyService::new();
         assert_eq!(svc.cwd(&PtyHandle { id: 9999 }), None);
+    }
+
+    // Freeze fix (2026-10-20): cwd_parts exposes ONLY the cheap inputs — the
+    // shell's pid and the RECORDED spawn directory. Even after the child has
+    // `cd`-ed somewhere live (proven here via the full cwd() read), the
+    // fallback stays the spawn directory: parts never touch the OS, so a
+    // lock-holding caller can take them and resolve AFTER dropping the lock.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn cwd_parts_keeps_the_spawn_fallback_and_never_reads_the_os() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spawn_dir = std::fs::canonicalize(tmp.path()).expect("canonicalize tempdir");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let live_dir = std::fs::canonicalize(elsewhere.path()).expect("canonicalize tempdir");
+        let mut svc = PtyService::new();
+        let (handle, rx) = svc
+            .open(&default_shell(), spawn_dir.clone(), 80, 24)
+            .expect("open pty");
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = rx.try_recv();
+
+        let cd = format!("cd {}\n", live_dir.display());
+        svc.write(&handle, cd.as_bytes()).expect("write cd");
+        // The shell applies the cd asynchronously; poll for the live read.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if svc.cwd(&handle).as_ref() == Some(&live_dir) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            svc.cwd(&handle).as_ref(),
+            Some(&live_dir),
+            "setup: the live read should follow the cd"
+        );
+
+        // The parts stay cheap: pid present, fallback = the SPAWN directory.
+        let (pid, fallback) = svc.cwd_parts(&handle);
+        assert!(pid.is_some(), "the shell's pid is the pid to resolve");
+        assert_eq!(
+            fallback.as_ref(),
+            Some(&spawn_dir),
+            "the fallback is the recorded spawn directory, never an OS read"
+        );
+
+        svc.close(&handle);
+    }
+
+    // resolve_cwd's contract: a live read wins; a failed/absent read falls
+    // back to the recorded directory; nothing anywhere -> None. The dead-pid
+    // case exercises every platform's no-such-process path (lsof error,
+    // missing /proc link, failed OpenProcess) without asserting on it.
+    #[test]
+    fn resolve_cwd_prefers_the_live_read_then_the_fallback() {
+        let fallback = PathBuf::from("/spawn/dir");
+        assert_eq!(resolve_cwd(None, Some(fallback.clone())), Some(fallback.clone()));
+        assert_eq!(resolve_cwd(None, None), None);
+        assert_eq!(
+            resolve_cwd(Some(u32::MAX - 1), Some(fallback.clone())),
+            Some(fallback),
+            "an unreadable pid falls back to the recorded directory"
+        );
     }
 
     // A shell that actually exists on the host OS: the Unix-oriented

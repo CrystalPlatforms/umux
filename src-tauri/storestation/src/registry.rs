@@ -32,6 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
+use session_core::escape_boundary;
 use session_core::pty_service::{PtyHandle, PtyService};
 use session_core::{ring, title};
 
@@ -351,13 +352,15 @@ impl Registry {
         // bytes first, exactly as they were captured (verbatim; the byte
         // policy forbids rewriting anything). Only the newest REPLAY_BUDGET
         // bytes go out — the oldest tail beyond xterm's scrollback is
-        // undisplayable and the full-ring burst blacks WebKit's renderer.
+        // undisplayable and the full-ring burst blacks WebKit's renderer
+        // (the #75 failure signature; macOS HITL 2026-09-21). The window's
+        // START is realigned to the next escape-sequence boundary
+        // (escape_boundary, #115): a budget cut landing inside a sequence
+        // (e.g. the echoed DA1 answer `\x1b[?1;2c`) would replay the
+        // sequence's headless tail — `1;2c1;2c…` rendered as literal text
+        // on every reattach, the macOS restart garbage.
         let snapshot = ring.snapshot();
-        let replay = if snapshot.len() > REPLAY_BUDGET {
-            &snapshot[snapshot.len() - REPLAY_BUDGET..]
-        } else {
-            &snapshot[..]
-        };
+        let replay = escape_boundary::replay_slice(&snapshot, REPLAY_BUDGET);
         for chunk in replay.chunks(replay_chunk_len(id.len())) {
             let _ = outbound.send(Outbound::Data {
                 session: id.to_string(),
@@ -390,19 +393,26 @@ impl Registry {
     /// dropped at exit) — the driver learns of an exit by its output
     /// channel closing, exactly like an in-process panel.
     pub fn status(&mut self, id: &str) -> Result<Value, ErrorObj> {
-        let handle = self
+        let record = self
             .sessions
             .get(id)
-            .ok_or_else(|| session_not_found(id))?
-            .handle;
+            .ok_or_else(|| session_not_found(id))?;
+        let handle = record.handle;
         let busy = self.pty.is_busy(&handle);
         let child_pid = self.pty.child_pid(&handle);
         let foreground_pid = self.pty.foreground_pid(&handle);
-        let cwd = self
-            .pty
-            .cwd(&handle)
-            .map(|p| p.display().to_string());
         let exit_code = self.pty.child_exit_code(&handle).ok().flatten();
+        // The RECORDED spawn directory, never a live read: `process_cwd`
+        // shells out to `lsof` on macOS, and it used to run HERE — under
+        // the registry lock the dispatcher holds — so every `session.write`
+        // (each keystroke) stalled behind the status poll's lsof chain:
+        // terminals froze while the UI stayed alive (2026-10-20 reports,
+        // macOS + Windows). The app resolves the LIVE cwd itself from
+        // `childPid` (session_driver::pty_cwd, on its blocking pool) — on
+        // Windows this recorded value was already what status reported
+        // (no /proc equivalent; the #81 fallback), so all platforms now
+        // behave the same. Everything above stays a fast in-memory read.
+        let cwd = record.cwd.display().to_string();
         Ok(json!({
             "busy": busy,
             "childPid": child_pid,

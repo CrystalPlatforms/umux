@@ -12,6 +12,8 @@
 //!   cwd and foreground-name lookups, shell-argv shaping.
 //! - [`ring`] — the bounded per-session scrollback ring. Captures from
 //!   birth; replay is consumed by phase 5.
+//! - [`escape_boundary`] — where a replay window may start so it never
+//!   begins inside an escape sequence (#115). Pure companion to `ring`.
 //! - [`title`] — the passive OSC 0/2 terminal-title scanner. Reads bytes
 //!   to NOTICE a title change, never mutates anything — the byte-identical
 //!   rule (normal output passes through untouched) holds everywhere.
@@ -21,6 +23,7 @@
 //! title scanner below is a READ-only side channel for the registry's
 //! title field — it strips nothing and alters nothing.
 
+pub mod escape_boundary;
 pub mod pty_service;
 pub mod ring;
 pub mod title;
