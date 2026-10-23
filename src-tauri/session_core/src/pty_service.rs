@@ -157,20 +157,136 @@ unsafe impl Send for SendMaster {}
 /// The PTY's foreground process-group leader (who owns the terminal right
 /// now), or `None` when the OS cannot say. Unix: portable-pty's
 /// `process_group_leader` (a cfg(unix) method on MasterPty — tcgetpgrp
-/// semantics, the technique tmux/wezterm use). Windows (v1.0 Phase 9 /
-/// #33): ConPTY masters expose no such concept, so this returns `None`;
-/// both callers already treat an unreadable answer as "idle" (close never
-/// nags, no presence name) — the direction the safe-closing contract
-/// calls conservative. A Windows-native busy check (a child-process-tree
-/// walk) is v2.0 follow-up material, out of #33's scope.
+/// semantics, the technique tmux/wezterm use). Windows (#117 follow-up):
+/// ConPTY masters expose no process groups, so "who owns the terminal" is
+/// answered from a process snapshot — the shell's DIRECT CHILD is the
+/// program the user is running (`sleep`, `claude`, a shim chain's head).
+/// The old hard `None` made `panel_processes` answer null for every Windows
+/// panel forever, so the known-CLI presence never matched and the waiting
+/// ping (#76) never fired there. Both callers keep treating an unreadable
+/// answer as "idle" — the close contract stays conservative.
 #[cfg(unix)]
 fn fg_group_leader(entry: &PtyEntry) -> Option<i32> {
     entry.master.0.process_group_leader()
 }
 
 #[cfg(windows)]
-fn fg_group_leader(_entry: &PtyEntry) -> Option<i32> {
+fn fg_group_leader(entry: &PtyEntry) -> Option<i32> {
+    let shell = entry.child.process_id()?;
+    let parent_of = windows_parent_map()?;
+    let shell_name = windows_image_basename(shell)?.to_ascii_lowercase();
+    fg_descend_wrappers(&parent_of, shell, &shell_name, &|pid| {
+        windows_image_basename(pid).map(|s| s.to_ascii_lowercase())
+    })
+    .map(|p| p as i32)
+}
+
+/// The shell's "foreground program" from a pid→parent map: its DIRECT child
+/// (a grandchild belongs to the child's own business, not to the word the
+/// user typed). Several children — a shim, job processes — answer with the
+/// lowest pid: snapshot order is system-dependent, so pick deterministically.
+/// Pure — unit-tested on every platform.
+fn pick_fg_child(parent_of: &std::collections::HashMap<u32, u32>, shell: u32) -> Option<u32> {
+    parent_of
+        .iter()
+        .filter(|(_, &parent)| parent == shell)
+        .map(|(&child, _)| child)
+        .min()
+}
+
+/// Follow same-named wrapper shells down to the real program (T-FG5/6):
+/// msys2 login shells spawn a REAL second shell, so an "idle" bash owns a
+/// bash child. While the child carries the SHELL'S OWN image name it is the
+/// shell continuing, not a program — descend. The first different-named
+/// child is the program; a chain that ends inside wrappers is an idle shell
+/// (None). Bounded walk: pid reuse cannot turn it into a cycle. Pure.
+fn fg_descend_wrappers(
+    parent_of: &std::collections::HashMap<u32, u32>,
+    shell: u32,
+    shell_name: &str,
+    name_of: &dyn Fn(u32) -> Option<String>,
+) -> Option<u32> {
+    let shell_name = shell_name.to_ascii_lowercase();
+    let mut cur = shell;
+    for _ in 0..8 {
+        let child = pick_fg_child(parent_of, cur)?;
+        let name = name_of(child)?.to_ascii_lowercase();
+        if name == shell_name {
+            cur = child;
+            continue;
+        }
+        return Some(child);
+    }
     None
+}
+
+/// pid → live image basename, `.exe` stripped case-insensitively (System32
+/// ships PING.EXE, not ping.exe). None when the pid is gone or unnamed.
+#[cfg(windows)]
+fn windows_image_basename(pid: u32) -> Option<String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: the handle is what the OS returns for a pid query and is
+    // released on every path; the wide buffer is only written by the API call.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 || len == 0 {
+            return None;
+        }
+        let path = std::path::PathBuf::from(OsString::from_wide(&buf[..len as usize]));
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        if name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
+            Some(name[..name.len() - 4].to_string())
+        } else {
+            Some(name)
+        }
+    }
+}
+
+/// pid → parent pid, one Toolhelp32 snapshot (Windows). ~1 ms for the whole
+/// process table; runs on the poll thread, never the UI thread.
+#[cfg(windows)]
+fn windows_parent_map() -> Option<std::collections::HashMap<u32, u32>> {
+    use std::collections::HashMap;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: the snapshot handle is released on every path; the entry struct
+    // is sized and written only by the OS walk below.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap.is_null() || snap == -1isize as _ {
+            return None;
+        }
+        let mut map = HashMap::new();
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                map.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+        Some(map)
+    }
 }
 
 pub struct PtyService {
@@ -461,38 +577,127 @@ pub fn process_name(pid: u32) -> Option<String> {
 /// Native `OpenProcess` + `QueryFullProcessImageNameW` — microseconds per
 /// call. This replaced `tasklist /FI "PID eq <pid>"` (perf audit 2026-09-05):
 /// spawning tasklist took 100–500 ms, ran for every local panel every ~2 s,
-/// and ran on the UI thread — the single worst Windows jank source. Like
-/// tasklist (and unlike Linux/macOS argv[0]) this reports the IMAGE name
-/// (`node.exe` for a `claude` script) — unchanged wire semantics, just fast.
+/// and ran on the UI thread — the single worst Windows jank source. The image
+/// name alone reports `node` for a `claude` script (#117 follow-up), so the
+/// command line is consulted first: when it names a known AI CLI, that word
+/// is reported — restoring the argv[0] semantics the other platforms have.
 #[cfg(target_os = "windows")]
 pub fn process_name(pid: u32) -> Option<String> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
+    let image = windows_image_basename(pid)?;
+    // The image name for a `claude` script is "node" — the known-CLI
+    // presence list could never match, so waiting pings never fired on
+    // Windows (#117 follow-up). The command line still names the CLI.
+    if let Some(cmdline) = process_command_line(pid) {
+        if let Some(typed) = known_cli_from_command_line(&cmdline) {
+            return Some(typed);
+        }
+    }
+    Some(image)
+}
+
+/// Scan a process command line for a known AI-CLI marker (#117 follow-up):
+/// on Windows a `claude` script surfaces as `node` (the image name), so the
+/// known-CLI presence list never matched and the waiting ping never fired.
+/// The command line still carries the truth — the npm package path
+/// (`@anthropic-ai\claude-code\cli.js`), the shim or the native exe name.
+/// Tokens split on separators (whitespace, quotes, both slash flavors),
+/// extension suffixes stripped, then an exact or package-dir (`claude-code`)
+/// match decides. Pure — unit-tested. Keep the list in sync with the
+/// frontend's src/aiCli.ts (the other end of this wire contract).
+pub fn known_cli_from_command_line(cmdline: &str) -> Option<String> {
+    const KNOWN: [&str; 4] = ["claude", "codex", "gemini", "aider"];
+    const EXTS: [&str; 8] = [".exe", ".cmd", ".bat", ".ps1", ".js", ".mjs", ".cjs", ".py"];
+    cmdline
+        .split(|c: char| c.is_whitespace() || c == '"' || c == '\\' || c == '/')
+        .filter_map(|token| {
+            let mut t = token.to_ascii_lowercase();
+            if let Some(ext) = EXTS.iter().find(|ext| t.ends_with(*ext)) {
+                t = t[..t.len() - ext.len()].to_string();
+            }
+            KNOWN.iter().find_map(|k| {
+                if t == *k || t.strip_prefix(k).is_some_and(|rest| rest.starts_with('-')) {
+                    Some((*k).to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .next()
+}
+
+/// The raw command line of process `pid` (Windows, #117 follow-up): PEB →
+/// ProcessParameters → RTL_USER_PROCESS_PARAMETERS.CommandLine, read with
+/// NtQueryInformationProcess + ReadProcessMemory — microseconds, no process
+/// spawns. x64 struct offsets (PEB+0x20, parameters+0x70); umux ships
+/// Windows x64-only. Best-effort by contract: ANY failure (access denied,
+/// short-lived process, unexpected layout) yields None and the caller falls
+/// back to the image name — exactly the pre-fix behavior.
+#[cfg(target_os = "windows")]
+fn process_command_line(pid: u32) -> Option<String> {
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
     use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    // SAFETY: handle is what the OS returns for a pid query and is released
-    // on every path below; the wide buffer is only written by the API call.
+    // SAFETY: the handle comes from OpenProcess on a pid query and is closed
+    // on every path; the pointed-to buffers are written only by the OS calls
+    // and read back with plain byte reads of fixed sizes.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            return None; // process gone (or system process): nothing to name
-        }
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
-        CloseHandle(handle);
-        if ok == 0 || len == 0 {
             return None;
         }
-        let path = std::path::PathBuf::from(OsString::from_wide(&buf[..len as usize]));
-        // Image path's file name, `.exe` stripped case-insensitively — the
-        // same shape `parse_tasklist_name` produced for the tasklist path.
-        let name = path.file_name()?.to_string_lossy().into_owned();
-        let stripped = name.strip_suffix(".exe").unwrap_or(&name);
-        Some(stripped.to_string())
+        let read = |addr: u64, buf: &mut [u8]| -> Option<()> {
+            let mut got: usize = 0;
+            let ok = ReadProcessMemory(
+                handle,
+                addr as *const core::ffi::c_void,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len(),
+                &mut got,
+            );
+            (ok != 0 && got == buf.len()).then_some(())
+        };
+        let cmdline = (|| -> Option<String> {
+            let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
+            let mut ret_len: u32 = 0;
+            let status = NtQueryInformationProcess(
+                handle,
+                0 as PROCESSINFOCLASS, // ProcessBasicInformation
+                &mut pbi as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                &mut ret_len,
+            );
+            if status != 0 || pbi.PebBaseAddress.is_null() {
+                return None;
+            }
+            let mut params_buf = [0u8; 8];
+            read(pbi.PebBaseAddress as u64 + 0x20, &mut params_buf)?;
+            let params = u64::from_le_bytes(params_buf);
+            if params == 0 {
+                return None;
+            }
+            // UNICODE_STRING at parameters+0x70 (x64): u16 Length (bytes),
+            // u16 MaximumLength, u32 padding, pointer Buffer.
+            let mut uni = [0u8; 16];
+            read(params + 0x70, &mut uni)?;
+            let len_bytes = u16::from_le_bytes([uni[0], uni[1]]) as usize;
+            let buffer = u64::from_le_bytes(uni[8..16].try_into().ok()?);
+            if len_bytes == 0 || len_bytes > 8192 || buffer == 0 {
+                return None;
+            }
+            let mut raw = vec![0u8; len_bytes];
+            read(buffer, &mut raw)?;
+            let wide: Vec<u16> = raw
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            Some(String::from_utf16_lossy(&wide))
+        })();
+        CloseHandle(handle);
+        cmdline
     }
 }
 
@@ -501,6 +706,7 @@ pub fn process_name(pid: u32) -> Option<String> {
 pub fn process_name(_pid: u32) -> Option<String> {
     None
 }
+
 
 /// Image-name column of `tasklist /FO CSV /NH` output (Windows foreground
 /// lookup). Pure — unit-testable with fixed fixtures. The image name carries
@@ -1355,6 +1561,189 @@ mod tests {
         svc.close(&handle);
 
         assert_eq!(svc.foreground_process_name(&handle), None);
+    }
+
+    // T-FG4 (Windows, real PTY): a program the shell launches IS the
+    // foreground answer — the old hard `None` reported null for every panel
+    // forever, so presence and the waiting ping never worked there. cmd is
+    // the panel child; ping becomes cmd's direct child within a moment.
+    #[cfg(windows)]
+    #[test]
+    fn foreground_name_reports_running_program_windows() {
+        let mut svc = PtyService::new();
+        let (handle, _rx) = svc
+            .spawn_argv(
+                vec![
+                    "cmd.exe".to_string(),
+                    "/c".to_string(),
+                    "ping -n 30 127.0.0.1".to_string(),
+                ],
+                std::env::temp_dir(),
+                80,
+                24,
+            )
+            .expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
+        while Instant::now() < deadline {
+            if svc.is_busy(&handle) {
+                if let Some(fg) = svc.foreground_pid(&handle) {
+                    assert_ne!(
+                        Some(fg),
+                        svc.child_pid(&handle),
+                        "the foreground answer is the child program, not the shell"
+                    );
+                    assert_eq!(
+                        svc.foreground_process_name(&handle)
+                            .as_deref()
+                            .map(|n| n.to_ascii_lowercase())
+                            .as_deref(),
+                        Some("ping"),
+                        "cmd's ping child must be reported by name"
+                    );
+                    seen = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        svc.close(&handle);
+        assert!(seen, "a running child program must appear as foreground");
+    }
+
+    // T-FG5: msys2 login shells spawn a REAL second shell (wrapper chain) —
+    // the descend rule skips same-named shells so an idle wrapper chain reads
+    // idle, and the first DIFFERENT program in the chain is the answer.
+    #[test]
+    fn fg_descends_through_wrapper_shells() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(100u32, 1u32);
+        map.insert(200u32, 100u32);
+        map.insert(300u32, 200u32);
+        let names: std::collections::HashMap<u32, String> = [
+            (100u32, "bash".to_string()),
+            (200u32, "bash".to_string()),
+            (300u32, "claude".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let name_of = |pid: u32| names.get(&pid).cloned();
+        assert_eq!(
+            fg_descend_wrappers(&map, 100, "bash", &name_of),
+            Some(300),
+            "the claude behind the wrapper bash is the foreground program"
+        );
+    }
+
+    // T-FG6: a wrapper chain with NOTHING behind it is an idle shell — None,
+    // never the wrapper itself.
+    #[test]
+    fn fg_wrapper_chain_with_no_program_is_idle() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(100u32, 1u32);
+        map.insert(200u32, 100u32);
+        let names: std::collections::HashMap<u32, String> = [
+            (100u32, "bash".to_string()),
+            (200u32, "bash".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let name_of = |pid: u32| names.get(&pid).cloned();
+        assert_eq!(fg_descend_wrappers(&map, 100, "bash", &name_of), None);
+    }
+
+    // T-CLI (#117 follow-up — the Windows waiting ping never fired): a
+    // `claude` script runs on node, so the Windows IMAGE-name lookup reports
+    // "node" and the known-CLI presence list never matches — no waiting
+    // status, no ping (macOS/Linux use argv[0] and worked). The command line
+    // still carries the truth: known_cli_from_command_line scans its tokens
+    // and returns the canonical CLI name for the presence list.
+
+    // T-CLI1: the real npm-shim command line — node + the claude-code package
+    // path — resolves to "claude".
+    #[test]
+    fn command_line_of_npm_claude_resolves_claude() {
+        assert_eq!(
+            known_cli_from_command_line(
+                "node.exe  C:\\Users\\panad\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js",
+            ),
+            Some("claude".to_string())
+        );
+    }
+
+    // T-CLI2: every known CLI matches — from its package directory
+    // (claude-code, gemini-cli, aider-chat), from its script/shim name, and
+    // case-insensitively (Windows paths arrive in any casing).
+    #[test]
+    fn command_line_matches_every_known_cli() {
+        assert_eq!(
+            known_cli_from_command_line("node C:\\npm\\@openai\\codex\\bin\\codex.js"),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            known_cli_from_command_line("node D:\\tools\\@google\\Gemini-CLI\\cli.js --model flash"),
+            Some("gemini".to_string())
+        );
+        assert_eq!(
+            known_cli_from_command_line("python C:\\py\\Aider-Chat\\aider.py --model x"),
+            Some("aider".to_string())
+        );
+        assert_eq!(
+            known_cli_from_command_line("C:\\Users\\x\\claude.EXE --version"),
+            Some("claude".to_string())
+        );
+    }
+
+    // T-CLI3: lookalikes must NOT match — plain node workloads, a user named
+    // "aiderman", a directory merely containing the word ("claudecode" has no
+    // separator; the prefix rule only accepts the `-package` form).
+    #[test]
+    fn command_line_lookalikes_do_not_match() {
+        assert_eq!(known_cli_from_command_line("node server.js"), None);
+        assert_eq!(
+            known_cli_from_command_line("pwsh -File C:\\Users\\aiderman\\script.ps1"),
+            None
+        );
+        assert_eq!(
+            known_cli_from_command_line("node C:\\dev\\claudecode-tools\\index.js"),
+            None
+        );
+        assert_eq!(known_cli_from_command_line(""), None);
+    }
+
+    // T-FG (#117 follow-up — Windows waiting pings never fired): ConPTY has
+    // no foreground process GROUP, so the Windows fg answer comes from a
+    // pid→parent map: the shell's direct child is "the program the user is
+    // running". The selector is pure and tested on every platform.
+
+    // T-FG1: the shell's direct child is picked...
+    #[test]
+    fn fg_child_picks_shell_direct_child() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(100u32, 1u32); // the shell itself (umux's child)
+        map.insert(200u32, 100u32); // sleep.exe, child of the shell
+        map.insert(300u32, 200u32); // a grandchild
+        assert_eq!(pick_fg_child(&map, 100), Some(200));
+    }
+
+    // T-FG2: no children — idle shell — no foreground answer.
+    #[test]
+    fn fg_child_none_for_childless_shell() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(100u32, 1u32);
+        assert_eq!(pick_fg_child(&map, 100), None);
+    }
+
+    // T-FG3: several children (a shim chain, job processes) — a stable,
+    // deterministic answer (lowest pid), never a grandchild.
+    #[test]
+    fn fg_child_deterministic_among_multiple_children() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(100u32, 1u32);
+        map.insert(400u32, 100u32);
+        map.insert(300u32, 100u32);
+        map.insert(500u32, 400u32); // grandchild — must NOT win
+        assert_eq!(pick_fg_child(&map, 100), Some(300));
     }
 
     // T-F4 (pure parsers: full path -> basename; bare name kept; blank ->

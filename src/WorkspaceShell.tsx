@@ -111,11 +111,7 @@ import {
 import { NotificationMuteButton } from './NotificationMuteButton'
 import { AgentStatusIndicator } from './AgentStatusIndicator'
 import { AgentStatusMachine, WaitingPingGate, type AgentStatus } from './agentStatus'
-import {
-  PendingNotificationTarget,
-  activatesAppOnNotificationClick,
-  type NotificationTarget,
-} from './notificationRouting'
+import { type NotificationTarget } from './notificationRouting'
 import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
@@ -3019,12 +3015,6 @@ export function WorkspaceShell() {
   // prompt submits and presence flips only; pure logic lives (and is tested)
   // in agentStatus.ts.
   const waitingPingGate = useRef(new WaitingPingGate())
-  // Click-to-navigate (#76 follow-up): the most recent posted notification's
-  // raw payload. On macOS/Windows a banner click ACTIVATES the app but the OS
-  // never tells us WHICH banner — so window focus shortly after a post reads
-  // as that click (pure bookkeeping + tests in notificationRouting.ts). Linux
-  // banners carry a real "Open" action: the backend reports it directly.
-  const pendingNotifTarget = useRef(new PendingNotificationTarget())
   // Counts 500ms ticks so the presence poll fires every 4th one (~2s).
   const presenceTickCount = useRef(0)
   const [statuses, setStatuses] = useState<Record<string, AgentStatus>>({})
@@ -3210,8 +3200,9 @@ export function WorkspaceShell() {
 
   // Click-to-navigate (#76 follow-up): a notification payload resolves to the
   // panel it came from and the shell dispatches there — activate the
-  // workspace, its tab, then focus the exact pane. Stable: refs + setState
-  // only, so the listeners/focus effects below never re-subscribe.
+  // workspace, its tab, then focus the exact pane. Fired ONLY by the
+  // backend-reported `notification_activated` (#117: never by window focus).
+  // Stable: setState only, so the listener never re-subscribes.
   const navigateToNotification = useCallback((raw: string) => {
     let parsed: {
       kind?: string
@@ -3261,28 +3252,16 @@ export function WorkspaceShell() {
     void getCurrentWindow().setFocus()
   }, [])
 
-  // The backend announces every REAL banner post; on click-activating
-  // platforms the next window focus inside the short window reads as the
-  // click (one shot — the pending entry is consumed).
+  // The ONE navigation trigger (#117): the backend's `notification_activated`
+  // — Linux's "Open" action button, or a Windows toast-activated relaunch
+  // (single-instance argv → the newest posted payload). Window focus alone
+  // NEVER navigates: it cannot tell a banner click from an ordinary alt-tab,
+  // which is exactly the yank this issue removes.
   useEffect(() => {
-    if (!activatesAppOnNotificationClick(navigator.userAgent)) return
-    const onFocus = () => {
-      const raw = pendingNotifTarget.current.take(performance.now())
-      if (raw != null) navigateToNotification(raw)
-    }
-    window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
-  }, [navigateToNotification])
-
-  useEffect(() => {
-    const unlistenPosted = listen<string>('notification_posted', (event) => {
-      pendingNotifTarget.current.set(event.payload, performance.now())
-    })
     const unlistenActivated = listen<string>('notification_activated', (event) => {
       navigateToNotification(event.payload)
     })
     return () => {
-      void unlistenPosted.then((f) => f())
       void unlistenActivated.then((f) => f())
     }
   }, [navigateToNotification])

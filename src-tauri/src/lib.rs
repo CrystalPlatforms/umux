@@ -105,6 +105,7 @@ fn pty_open(
     app: AppHandle,
     driver: State<'_, RouterDriver>,
     mute: State<'_, MuteFlag>,
+    last: State<'_, LastNotificationPayload>,
     shell: Option<String>,
     cwd: Option<String>,
     cols: Option<u16>,
@@ -164,6 +165,9 @@ fn pty_open(
     // `set_notifications_muted` command (which flips the shared flag) is observed
     // live by every panel's notification thread.
     let mute_flag = Arc::clone(&mute);
+    // #117: the thread announces posts by remembering the payload, so a real
+    // Windows banner click (toast-activated relaunch) can navigate to it.
+    let last_posted = last.inner().clone();
     // Opt-in pipeline diagnostics (issue #75 hunt): when the flag file exists,
     // every passthrough chunk leaves one numbers-only line (byte count, running
     // total, hex prefix — never terminal content) in pty-debug.log. The gate is
@@ -197,14 +201,14 @@ fn pty_open(
                 // frontend status machine's grace window expects a TUI's
                 // trailing redraw to land right AFTER its completion signal.
                 let _ = emit_app.emit("pty_completion", PanelSignalPayload { id });
-                // Announce the post for click-to-navigate (#76 follow-up): the
-                // frontend's focus heuristic may only ever consume REAL
-                // banners — a muted ping must not look posted.
+                // Announce the post for click-to-navigate (#76 follow-up): only
+                // REAL banners may ever navigate — a muted ping must not look
+                // posted. (#117: the remembered payload is what a Windows toast
+                // click resolves to.)
                 if !service.is_muted() {
-                    let _ = emit_app.emit(
-                        "notification_posted",
-                        serde_json::json!({ "kind": "completion", "ptyId": id }).to_string(),
-                    );
+                    let payload = serde_json::json!({ "kind": "completion", "ptyId": id }).to_string();
+                    last_posted.set(&payload);
+                    let _ = emit_app.emit("notification_posted", payload);
                 }
             }
             if !result.passthrough.is_empty() {
@@ -514,6 +518,7 @@ fn ssh_open(
     app: AppHandle,
     driver: State<'_, RouterDriver>,
     mute: State<'_, MuteFlag>,
+    last: State<'_, LastNotificationPayload>,
     target: String,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -548,6 +553,8 @@ fn ssh_open(
         panel: label,
     };
     let mute_flag = Arc::clone(&mute);
+    // #117: same post bookkeeping as a local panel's thread.
+    let last_posted = last.inner().clone();
     let host = parsed.host.clone();
     std::thread::spawn(move || {
         let mut parser = OscParser::new();
@@ -569,12 +576,12 @@ fn ssh_open(
                 // Same per-panel completion signal as local panels (see the
                 // pty_open thread) — remote status parity (#26).
                 let _ = emit_app.emit("ssh_completion", PanelSignalPayload { id });
-                // Same post announcement as local panels (click-to-navigate).
+                // Same post announcement as local panels (click-to-navigate;
+                // #117: remembered for the Windows toast-click path too).
                 if !service.is_muted() {
-                    let _ = emit_app.emit(
-                        "notification_posted",
-                        serde_json::json!({ "kind": "completion", "ptyId": id }).to_string(),
-                    );
+                    let payload = serde_json::json!({ "kind": "completion", "ptyId": id }).to_string();
+                    last_posted.set(&payload);
+                    let _ = emit_app.emit("notification_posted", payload);
                 }
             }
             if !result.passthrough.is_empty() {
@@ -783,37 +790,122 @@ fn apple_notification_script(summary: &str, body: &str) -> String {
     )
 }
 
-/// The Windows notifier (v1.0 Phase 9 / #33): a native toast through the
-/// WinRT toast API driven by PowerShell — zero extra crates, the same
-/// shell-out pattern as notify-send (Linux) and osascript (macOS), keeping
-/// the zero-cost policy. ToastText02 renders one bold heading (summary) and
-/// one body line — the same two-line shape the other platforms show.
+/// The Windows toast fallback for the notification banner (#118): posts a
+/// native toast through the WinRT toast API driven by PowerShell — zero
+/// extra crates, the same shell-out pattern as notify-send (Linux) and
+/// osascript (macOS), keeping the zero-cost policy.
+///
+/// Since #118 the toast is NOT the primary Windows notification anymore:
+/// its click is dead at the OS level on the Insider machine (both
+/// -ToastActivated and umux-app:// — issue #118 evidence), so notifications
+/// go to the umux-owned banner window (`AppBanner`) and this spawn runs
+/// only when the banner window is missing or refuses. A seen toast with a
+/// dead click still beats no notification at all.
 #[cfg(target_os = "windows")]
-struct NativeNotifier;
+fn spawn_toast_powershell(script: &str) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let result = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match &result {
+        Ok(out) if out.status.success() => {
+            log::info!("[notify] dispatched")
+        }
+        Ok(out) => log::error!(
+            "[notify] powershell exited {}: stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(e) => log::error!("[notify] failed to spawn powershell.exe: {e}"),
+    }
+}
+
+/// The real banner shower (#118): delivers the notification to the hidden
+/// `notification-banner` window — position it at the work area's
+/// bottom-right, hand it the envelope, show it. Falls back to the native
+/// toast when the window is missing or refuses, so a notification is never
+/// lost. Thin adapter: the routing is unit-tested through `BannerNotifier`
+/// with a recording fake; this struct is verified by HITL.
+#[cfg(target_os = "windows")]
+struct AppBanner {
+    app: AppHandle,
+}
 
 #[cfg(target_os = "windows")]
-impl Notifier for NativeNotifier {
-    fn show(&self, summary: &str, body: &str) {
-        let script = windows_toast_script(summary, body);
-        // CREATE_NO_WINDOW (perf/UX audit 2026-09-05): without it every toast
-        // flashed a console window on the desktop; the toast itself is
-        // rendered by the OS notification service and is unaffected.
-        use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-        let result = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match &result {
-            Ok(out) if out.status.success() => {
-                log::info!("[notify] dispatched: summary={summary:?} body={body:?}")
+impl AppBanner {
+    fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+
+    /// Deliver through the banner window. False = something refused (window
+    /// missing, positioning/eval/show failed) — the caller falls back.
+    fn show_via_window(&self, envelope: &str) -> bool {
+        let Some(win) = self.app.get_webview_window("notification-banner") else {
+            log::warn!("[banner] window missing; falling back to toast");
+            return false;
+        };
+        // Physical pixels end to end: the work area is physical, and the
+        // banner's fixed LOGICAL size is scaled by this monitor's factor.
+        // A hidden window's current monitor can be flaky — fall back to the
+        // primary before giving up (a toast fallback here would defeat the
+        // whole banner).
+        let monitor = match win
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| win.primary_monitor().ok().flatten())
+        {
+            Some(m) => m,
+            None => {
+                log::warn!("[banner] no monitor; falling back to toast");
+                return false;
             }
-            Ok(out) => log::error!(
-                "[notify] powershell exited {}: stderr={}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr)
+        };
+        let wa = monitor.work_area();
+        let scale = win.scale_factor().unwrap_or(1.0);
+        let banner = (
+            (BANNER_LOGICAL_SIZE.0 * scale) as u32,
+            (BANNER_LOGICAL_SIZE.1 * scale) as u32,
+        );
+        let (x, y) = banner_origin(
+            (
+                wa.position.x,
+                wa.position.y,
+                wa.size.width,
+                wa.size.height,
             ),
-            Err(e) => log::error!("[notify] failed to spawn powershell.exe: {e}"),
+            banner,
+            (BANNER_MARGIN_PX * scale) as i32,
+        );
+        // Content FIRST (if the page is already up, the eval paints the new
+        // text while the window is still hidden/off-position), then move,
+        // then show. Nothing here can steal focus: the window is
+        // focusable(false), so showing it never activates it (#118 AC4).
+        let delivered = win
+            .eval(&format!("window.__umuxBannerShow({envelope});"))
+            .is_ok()
+            && win.set_position(tauri::PhysicalPosition::new(x, y)).is_ok()
+            && win.show().is_ok();
+        if !delivered {
+            log::warn!("[banner] deliver failed; falling back to toast");
+        }
+        delivered
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl BannerShow for AppBanner {
+    fn show_banner(&self, summary: &str, body: &str, payload: Option<&str>) {
+        // The pending envelope is stored BEFORE anything else: the page's
+        // on-mount pull (`banner_take_pending`) must see this request even
+        // if the eval below races the page load.
+        let envelope = self.app.state::<PendingBannerRequest>().set(summary, body, payload);
+        if !self.show_via_window(&envelope) {
+            let aumid = self.app.config().identifier.clone();
+            let script = windows_toast_script(summary, body, &aumid, None);
+            spawn_toast_powershell(&script);
         }
     }
 }
@@ -823,22 +915,191 @@ impl Notifier for NativeNotifier {
 /// the XML DOM API escapes content itself — so the ONLY quoting layer is the
 /// PowerShell single-quoted literal (a literal ' doubles up). The script
 /// travels as ONE argv element (`-Command <script>`), never through a
-/// shell. Pure — same testability contract as apple_notification_script.
+/// shell. `aumid` is the app's REGISTERED AppUserModelID (#117 follow-up):
+/// a banner click activates the app only when the toast's AUMID matches the
+/// installed Start Menu shortcut — the old hardcoded 'umux' matched the
+/// installed `com.umux.app` nowhere, so clicks did nothing. Pure — same
+/// testability contract as apple_notification_script.
 #[cfg(target_os = "windows")]
-fn windows_toast_script(summary: &str, body: &str) -> String {
+fn windows_toast_script(summary: &str, body: &str, aumid: &str, launch: Option<&str>) -> String {
     fn ps(s: &str) -> String {
         format!("'{}'", s.replace('\'', "''"))
     }
+    // activationType="protocol" + launch (#117 follow-up): the click makes
+    // the OS open the `umux-app://` URL — the scheme's HKCU handler (self-
+    // registered at startup) launches umux with the URL as an argument, and
+    // single-instance hands it to the running instance. A matching AUMID
+    // alone never launches the exe on click (proven live 2026-10-22).
+    let activate = launch.map(|url| {
+        format!(
+            "$t.DocumentElement.SetAttribute('activationType','protocol'); \
+             $t.DocumentElement.SetAttribute('launch',{}); ",
+            ps(url)
+        )
+    });
     format!(
         "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]> $null; \
          $t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
          $x=$t.GetElementsByTagName('text'); \
+         {}\
          $null=$x.Item(0).AppendChild($t.CreateTextNode({})); \
          $null=$x.Item(1).AppendChild($t.CreateTextNode({})); \
-         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('umux').Show([Windows.UI.Notifications.ToastNotification]::new($t))",
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier({}).Show([Windows.UI.Notifications.ToastNotification]::new($t))",
+        activate.unwrap_or_default(),
         ps(summary),
-        ps(body)
+        ps(body),
+        ps(aumid)
     )
+}
+
+/// --- #118: the umux-owned Windows notification banner ---------------------
+///
+/// The native toast's click is dead at the OS level on Win11 Insider 26300
+/// (both -ToastActivated and umux-app:// — issue #118 evidence), so on
+/// Windows the notifier shows an umux-owned banner WINDOW instead (like
+/// Steam/Discord toasts): borderless, always-on-top, bottom-right of the
+/// work area, focusable(false) so APPEARING never steals focus (a click
+/// still lands — WS_EX_NOACTIVATE windows receive mouse input). macOS and
+/// Linux keep their native notifications untouched.
+///
+/// `BannerShow` is the system boundary (same shape as `Notifier`): the
+/// behaviorally interesting routing is unit-tested with a recording fake;
+/// the real `AppBanner` (window find/position/show + toast fallback) is a
+/// thin adapter, verified by HITL.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) trait BannerShow: Send {
+    /// Show the banner. `payload` is the notification's raw navigation
+    /// payload; None for the payload-less plain show path (nothing to
+    /// navigate to on click).
+    fn show_banner(&self, summary: &str, body: &str, payload: Option<&str>);
+}
+
+/// The Windows `Notifier`: every notification (plain or actionable) becomes
+/// a banner — never a native toast (#118 AC3: no duplicate toast). The
+/// payload rides along when there is one.
+#[cfg(any(target_os = "windows", test))]
+struct BannerNotifier {
+    shower: Box<dyn BannerShow + Send>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl BannerNotifier {
+    fn new(shower: Box<dyn BannerShow + Send>) -> Self {
+        Self { shower }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Notifier for BannerNotifier {
+    fn show(&self, summary: &str, body: &str) {
+        self.shower.show_banner(summary, body, None)
+    }
+
+    fn show_actionable(&self, summary: &str, body: &str, payload: &str) {
+        self.shower.show_banner(summary, body, Some(payload))
+    }
+}
+
+/// The banner's fixed LOGICAL size (px) — the window is built with it and
+/// the shower scales it to physical for the position math. 72 px: one
+/// compact two-line toast row (HITL 2026-10-23: the original 96 px read as
+/// a half-empty black slab once the page didn't fill the window).
+#[cfg(target_os = "windows")]
+const BANNER_LOGICAL_SIZE: (f64, f64) = (360.0, 72.0);
+/// The gap between the banner and the work area's bottom-right corner,
+/// logical px.
+#[cfg(target_os = "windows")]
+const BANNER_MARGIN_PX: f64 = 12.0;
+
+/// The banner request the page takes on mount (the early race: a
+/// notification may fire before the banner page's `listen` is registered —
+/// the emit would be lost, so the page also PULLS whatever is pending when
+/// it boots). Set on every show; the payload-less path carries null.
+// NOT Windows-gated: the `banner_take_pending` command is registered on
+// every platform (the invoke_handler list cannot be cfg-split); on macOS and
+// Linux nothing ever writes the store, so the pull simply answers None.
+#[derive(Default)]
+struct PendingBannerRequest(Arc<std::sync::Mutex<Option<String>>>);
+
+impl PendingBannerRequest {
+    /// Store the show envelope — the exact JSON string the page also
+    /// receives via the eval, so both delivery paths carry the same shape —
+    /// and return it (the caller needs it for the eval).
+    #[cfg_attr(
+        not(any(target_os = "windows", test)),
+        allow(dead_code)
+    )]
+    fn set(&self, summary: &str, body: &str, payload: Option<&str>) -> String {
+        let json = serde_json::json!({
+            "summary": summary,
+            "body": body,
+            "payload": payload,
+        })
+        .to_string();
+        *self.0.lock().unwrap() = Some(json.clone());
+        json
+    }
+
+    /// Take the pending envelope, clearing the store.
+    fn take(&self) -> Option<String> {
+        self.0.lock().unwrap().take()
+    }
+}
+
+/// Where the banner's top-left corner goes: the work area's bottom-right,
+/// pulled in by the banner size plus the margin. Physical pixels end to end
+/// (the caller derives the banner's physical size from its scale factor).
+/// Pure — unit-tested.
+#[cfg(any(target_os = "windows", test))]
+fn banner_origin(work_area: (i32, i32, u32, u32), banner: (u32, u32), margin: i32) -> (i32, i32) {
+    let (wa_x, wa_y, wa_w, wa_h) = work_area;
+    let (bw, bh) = banner;
+    (
+        wa_x + wa_w as i32 - bw as i32 - margin,
+        wa_y + wa_h as i32 - bh as i32 - margin,
+    )
+}
+
+/// The protocol URL carrying an exact notification payload (#117 follow-up):
+/// `umux-app://notification?p=<hex(payload)>`. Hex keeps the JSON opaque to every
+/// URL/quoting layer and needs no new crate; toasts are small, so doubling
+/// the size is free. Pure — unit-tested.
+// Dormant (#117 follow-up): toasts currently use default activation (this
+// machine's shell refuses fresh self-registered schemes on click), so
+// release builds have no caller until the scheme ships via the installer.
+#[allow(dead_code)]
+fn notification_launch_url(payload: &str) -> String {
+    let mut hex = String::with_capacity(payload.len() * 2);
+    for b in payload.as_bytes() {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    format!("umux-app://notification?p={hex}")
+}
+
+/// The payload from a `umux-app://notification?p=<hex>` URL, or None for
+/// anything else (wrong scheme, junk, odd digit count). Pure.
+// Release-only consumer (the single-instance callback) — see
+// argv_has_toast_activation for the dev-build dead-code note.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn payload_from_launch_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("umux-app://notification?p=")?;
+    if rest.is_empty() || rest.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(rest.len() / 2);
+    for i in (0..rest.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&rest[i..i + 2], 16).ok()?);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The notification payload from a duplicate-process argv (#117 follow-up):
+/// the first argument that IS a protocol launch URL. Pure.
+// Release-only consumer (the single-instance callback) — see
+// argv_has_toast_activation for the dev-build dead-code note.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn payload_from_args(args: &[String]) -> Option<String> {
+    args.iter().find_map(|a| payload_from_launch_url(a))
 }
 
 /// The pre-flight the frontend runs BEFORE touching the updater plugin
@@ -871,13 +1132,26 @@ fn platform_notifier(app: &AppHandle) -> Box<dyn Notifier + Send> {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = app;
-        Box::new(NativeNotifier)
+        // #118: the umux-owned banner window is the Windows notification —
+        // the native toast's click is dead on the Insider machine (issue
+        // #118) and the banner carries the EXACT payload, so a click
+        // navigates precisely. The toast survives only as AppBanner's
+        // fallback.
+        Box::new(BannerNotifier::new(Box::new(AppBanner::new(app.clone()))))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Box::new(NativeNotifier { app: app.clone() })
     }
+}
+
+/// The banner page's boot pull (#118): whatever notification arrived before
+/// the page's listener was registered — the eval into a not-yet-loaded page
+/// is lost, so the page PULLS the pending envelope once on mount. Returns
+/// and clears.
+#[tauri::command]
+fn banner_take_pending(pending: State<'_, PendingBannerRequest>) -> Option<String> {
+    pending.take()
 }
 
 /// Payload for the `config_fallback` event (Phase 18 / Issue #19, AC3).
@@ -984,8 +1258,11 @@ async fn notify_panel_needs_input(
     app: AppHandle,
     target: WaitingPingTarget,
     mute: State<'_, MuteFlag>,
+    last: State<'_, LastNotificationPayload>,
 ) -> Result<(), String> {
     let mute = Arc::clone(&*mute);
+    // #117: a delivered waiting ping must be reachable from a banner click.
+    let last_posted = last.inner().clone();
     let origin = PanelOrigin {
         workspace: target.workspace,
         panel: target.panel,
@@ -1006,12 +1283,81 @@ async fn notify_panel_needs_input(
         );
         let delivered = service.notify_waiting_with_payload(&origin, Some(&payload));
         if delivered {
+            last_posted.set(&payload);
             let _ = emit_app.emit("notification_posted", payload);
         }
     })
     .await
     .map_err(|e| e.to_string())
 }
+
+/// Did THIS process get relaunched by a Windows toast click? (#117) Windows
+/// activates an unpackaged app's banner by relaunching its shortcut target
+/// with the standalone `-ToastActivated` argument; single-instance forwards
+/// that argv here. Only the exact standalone flag counts — a lookalike inside
+/// another argument is not a click. Pure — unit-tested.
+// Release-only consumer (the single-instance callback); dev builds skip that
+// plugin, so without this the dev build would flag the helper dead.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn argv_has_toast_activation(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a.eq_ignore_ascii_case("-ToastActivated"))
+}
+
+/// Register the `umux://` protocol handler for THIS exe (#117 follow-up):
+/// `HKCU\Software\Classes\umux-app\shell\open\command` = `"<exe>" "%1"`. This is
+/// what the OS runs when a toast's protocol launch URL is opened — the real
+/// banner-click path (a matching AUMID alone never launches the exe; proven
+/// live 2026-10-22). HKEY_CURRENT_USER needs no elevation (same rule as the
+/// autostart Run key, #103); `reg add /f` overwrites, so the last copy that
+/// RAN owns the scheme — the autostart self-heal's settled semantics.
+/// Release-only call site: a `tauri dev` run must never steal the scheme
+/// from the installed app. Fire-and-forget: a failed write only costs the
+/// click until the next start (banners themselves are unaffected).
+#[cfg(windows)]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn register_notification_scheme(exe: &str) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let command = format!("\"{exe}\" \"%1\"");
+    let _ = std::process::Command::new("reg")
+        .args([
+            "add",
+            r"HKCU\Software\Classes\umux-app\shell\open\command",
+            "/ve",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &command,
+            "/f",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
+/// The raw payload of the most recently POSTED notification (#117). A Windows
+/// toast click relaunches the exe with no banner id in argv — the best the
+/// platform can answer is "the newest banner". Set at every
+/// `notification_posted` emit site, read once by the single-instance callback
+/// to emit a real `notification_activated`. Shared memory (Arc), like
+/// `MuteFlag`, because posters live on PTY reader threads and the reader in
+/// the callback is a different process launch entirely.
+#[derive(Clone, Default)]
+struct LastNotificationPayload(Arc<std::sync::Mutex<Option<String>>>);
+
+impl LastNotificationPayload {
+    fn set(&self, payload: &str) {
+        *self.0.lock().unwrap() = Some(payload.to_string());
+    }
+
+    // Release-only reader (the single-instance callback); see
+    // `argv_has_toast_activation` for the dev-build dead-code note.
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    fn get(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 
 /// Load the persisted feature toggles (v0.2 Phase 3 / #27). A corrupted file
 /// falls back to defaults AND emits the same `config_fallback` warning the
@@ -1497,6 +1843,10 @@ pub fn run() {
     let settings_store = SettingsStore::new(settings_path());
     let initial_settings = settings_store.load();
     let mute: MuteFlag = Arc::new(AtomicBool::new(!initial_settings.notifications_enabled));
+    // #117: what a real Windows banner click resolves to (the newest posted
+    // notification). Posters set it from their threads; the single-instance
+    // callback reads it when the toast-activated relaunch arrives.
+    let last_payload = LastNotificationPayload::default();
     // v0.2 Phase 6 / #30, quickupdate 2026-09-12 (Adam): analytics is ALWAYS
     // on — the old analyticsEnabled kill switch is gone from the schema (the
     // CLI's config get/set entries and the settings field no longer exist),
@@ -1510,6 +1860,12 @@ pub fn run() {
     let router = RouterDriver::new(initial_settings.storestation.daemon_enabled);
 
     let builder = tauri::Builder::default();
+    // #117 follow-up: the toast click launches `umux://…` — own the scheme
+    // before anything else. Release-only (see register_notification_scheme).
+    #[cfg(all(windows, not(debug_assertions)))]
+    if let Ok(exe) = std::env::current_exe() {
+        register_notification_scheme(&exe.to_string_lossy());
+    }
     // #87 (v1.7.0 phase 5): single-instance goes FIRST in release builds —
     // the plugin requires being the first one registered, because it decides
     // BEFORE anything else runs whether this process is the duplicate
@@ -1528,7 +1884,16 @@ pub fn run() {
     // unchanged.
     #[cfg(not(debug_assertions))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(
-        |app, _args, _cwd| {
+        |app, args, _cwd| {
+            // #117 follow-up: a duplicate launch carrying `umux-app://notification?p=…`
+            // IS a banner click (protocol activation) — the URL names the EXACT
+            // notification. Older shape: `-ToastActivated` (never seen in the
+            // wild, kept as a fallback) resolves to the last posted payload.
+            let payload = payload_from_args(&args)
+                .or_else(|| argv_has_toast_activation(&args).then(|| ()).and_then(|_| app.state::<LastNotificationPayload>().get()));
+            if let Some(payload) = payload {
+                let _ = app.emit("notification_activated", payload);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -1545,6 +1910,8 @@ pub fn run() {
         .manage(WorkspaceStore::new(config_path()))
         .manage(settings_store)
         .manage(mute)
+        .manage(last_payload)
+        .manage(PendingBannerRequest::default())
         .invoke_handler(tauri::generate_handler![
             pty_open,
             pty_write,
@@ -1565,6 +1932,7 @@ pub fn run() {
             set_notifications_muted,
             notifications_muted,
             notify_panel_needs_input,
+            banner_take_pending,
             load_settings,
             save_settings,
             storestation_status,
@@ -1618,7 +1986,7 @@ pub fn run() {
                         | tauri_plugin_window_state::StateFlags::MAXIMIZED
                         | tauri_plugin_window_state::StateFlags::FULLSCREEN,
                 )
-                .with_denylist(&["splashscreen"])
+                .with_denylist(&["splashscreen", "notification-banner"])
                 .build(),
         );
 
@@ -1695,6 +2063,46 @@ pub fn run() {
                 });
                 if let Err(e) = result {
                     log::warn!("[accelerators] with_webview failed: {e}");
+                }
+            }
+            // #118: the umux notification banner window (Windows only —
+            // macOS and Linux keep their native notifications). Created
+            // HIDDEN at boot so the first notification paints instantly,
+            // then shown per ping by AppBanner. focusable(false) is the
+            // whole point of the banner: appearing must never steal focus,
+            // while a click still lands (a WS_EX_NOACTIVATE window receives
+            // mouse input without activating). transparent(true) lets the
+            // page paint rounded corners; skip_taskbar keeps it out of the
+            // taskbar/alt-tab. A failed build logs and continues — the
+            // notifier falls back to the native toast.
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::{WebviewUrl, WebviewWindowBuilder};
+                match WebviewWindowBuilder::new(
+                    app,
+                    "notification-banner",
+                    WebviewUrl::App("banner.html".into()),
+                )
+                .title("umux notification")
+                .decorations(false)
+                .resizable(false)
+                .maximizable(false)
+                .minimizable(false)
+                .skip_taskbar(true)
+                .always_on_top(true)
+                .focusable(false)
+                .transparent(true)
+                .visible(false)
+                .inner_size(
+                    BANNER_LOGICAL_SIZE.0,
+                    BANNER_LOGICAL_SIZE.1,
+                )
+                .build()
+                {
+                    Ok(banner) => {
+                        let _ = banner.hide();
+                    }
+                    Err(e) => log::warn!("[banner] window build failed: {e}"),
                 }
             }
             Ok(())
@@ -2054,4 +2462,280 @@ mod tests {
 
     // The per-OS config-directory + migration tests moved with their code to
     // the store_core crate (#58): store_core/src/paths.rs.
+
+    // --- #117: navigation only on a REAL banner click ------------------------
+    //
+    // The old focus heuristic (any window focus within 60 s of a post reads as
+    // a banner click) yanked the view on every alt-tab — the bug this issue
+    // fixes. The real Windows click signal is the OS relaunching the exe with
+    // `-ToastActivated`; single-instance forwards that argv to the running
+    // instance, which turns it into `notification_activated`.
+
+    // T1: the exact argument Windows passes on toast activation is spotted.
+    //   Input:  argv containing "-ToastActivated" among unrelated args
+    //   Output: true
+    #[test]
+    fn argv_with_toast_activated_flag_is_detected() {
+        let args = vec![
+            "umux.exe".to_string(),
+            "-ToastActivated".to_string(),
+            "extra".to_string(),
+        ];
+        assert!(argv_has_toast_activation(&args));
+    }
+
+    // T2: every ordinary launch (double-click, `umux attach`, second window)
+    // must NOT read as a banner click — a false positive here would re-create
+    // the #117 yank through the new path.
+    //   Input:  argv from a normal launch / CLI invocation
+    //   Output: false
+    #[test]
+    fn argv_without_toast_flag_is_not_a_banner_click() {
+        assert!(!argv_has_toast_activation(&[]));
+        assert!(!argv_has_toast_activation(&["umux.exe".to_string()]));
+        assert!(!argv_has_toast_activation(&vec![
+            "umux.exe".to_string(),
+            "attach".to_string(),
+            "ws-1".to_string(),
+        ]));
+    }
+
+    // T3: a lookalike substring inside another argument is not activation —
+    // only the standalone flag counts (an unrelated "-ToastActivatedFoo" arg
+    // or text mentioning it must not navigate).
+    //   Input:  args that merely CONTAIN the flag text
+    //   Output: false
+    #[test]
+    fn argv_toast_flag_must_be_standalone() {
+        assert!(!argv_has_toast_activation(&["-ToastActivatedFoo".to_string()]));
+        assert!(!argv_has_toast_activation(&["note -ToastActivated text".to_string()]));
+    }
+
+    // T4 (AC — the click must navigate to the notification we ANNOUNCED):
+    //   Input:  a payload set after a post, then read on toast activation
+    //   Output: the same raw payload string, verbatim.
+    #[test]
+    fn last_payload_round_trips() {
+        let last = LastNotificationPayload::default();
+        assert!(last.get().is_none(), "fresh state has nothing to navigate to");
+
+        let payload = r#"{"kind":"waiting","workspaceId":"ws-1","tabId":"tab-2","panelId":"p-3"}"#;
+        last.set(payload);
+        assert_eq!(last.get().as_deref(), Some(payload));
+    }
+
+    // T5: the newest post wins — two pings in a row, then a click, must
+    // navigate to the LATEST banner (the click carries no banner id, the
+    // accepted #117 approximation).
+    //   Input:  set(older) then set(newer)
+    //   Output: newer
+    #[test]
+    fn last_payload_newest_post_wins() {
+        let last = LastNotificationPayload::default();
+        last.set(r#"{"kind":"completion","ptyId":1}"#);
+        last.set(r#"{"kind":"waiting","workspaceId":"ws-9"}"#);
+        assert_eq!(last.get().as_deref(), Some(r#"{"kind":"waiting","workspaceId":"ws-9"}"#));
+    }
+
+    // T6: clones share the memory — the emit threads and the single-instance
+    // callback each hold their own clone of the managed state, so a set on
+    // one clone MUST be visible through another.
+    //   Input:  a clone taken BEFORE the post, reading after it
+    //   Output: the posted payload (shared Arc, not a snapshot).
+    #[test]
+    fn last_payload_clones_share_memory() {
+        let last = LastNotificationPayload::default();
+        let thread_side = last.clone();
+        last.set(r#"{"kind":"completion","ptyId":7}"#);
+        assert_eq!(thread_side.get().as_deref(), Some(r#"{"kind":"completion","ptyId":7}"#));
+    }
+
+    // --- #117 follow-up: the toast must carry the app's REGISTERED AUMID -----
+    //
+    // The NSIS shortcut registers `com.umux.app`; a toast click activates the
+    // app only when the toast's AUMID matches a shortcut. The dev-era
+    // hardcoded 'umux' matched nothing — banner clicks did nothing at all.
+
+    // T-AUMID1: the script targets the given AUMID verbatim.
+    #[test]
+    fn toast_script_targets_the_registered_aumid() {
+        let script = windows_toast_script("t", "b", "com.umux.app", None);
+        assert!(
+            script.contains("CreateToastNotifier('com.umux.app')"),
+            "aumid slot: {script}"
+        );
+    }
+
+    // T-AUMID2: the AUMID rides in the same single-quoted PowerShell literal
+    // as every other string — a quote inside doubles up, never breaks out.
+    #[test]
+    fn toast_script_escapes_the_aumid_slot_too() {
+        let script = windows_toast_script("t", "b", "com.um'x", None);
+        assert!(
+            script.contains("CreateToastNotifier('com.um''x')"),
+            "escaped aumid slot: {script}"
+        );
+    }
+
+    // --- #117 follow-up: PROTOCOL activation (real click path on Windows) ----
+    //
+    // A matching AUMID alone does NOT launch the app on click (proven live
+    // 2026-10-22: relaunching with -ToastActivated by hand navigates, a real
+    // banner click never starts a process). The documented alternative for
+    // unpackaged apps: the toast carries activationType="protocol" with a
+    // `umux://` launch URL; the click makes the OS open the URL; the scheme's
+    // registry handler (HKCU, self-registered at startup, no elevation)
+    // launches umux with the URL as an argument, and single-instance hands it
+    // to the running instance. The URL carries the EXACT payload — no more
+    // "last posted" approximation.
+
+    // T-URL1: round trip — the payload rides hex-encoded in the URL and comes
+    // back verbatim.
+    #[test]
+    fn launch_url_round_trips_payload() {
+        let payload = r#"{"kind":"waiting","workspaceId":"ws-1","tabId":"t","panelId":"p"}"#;
+        let url = notification_launch_url(payload);
+        assert!(url.starts_with("umux-app://notification?p="), "{url}");
+        assert_eq!(payload_from_launch_url(&url).as_deref(), Some(payload));
+    }
+
+    // T-URL2: hostile input — the wrong scheme, junk, or an odd digit count
+    // never yields a payload.
+    #[test]
+    fn launch_url_parses_only_its_own_shape() {
+        assert_eq!(payload_from_launch_url("umux-app://notification"), None);
+        assert_eq!(payload_from_launch_url("umux://other?p=ab"), None);
+        assert_eq!(payload_from_launch_url("https://evil?p=4142"), None);
+        assert_eq!(payload_from_launch_url("umux-app://notification?p=4"), None);
+        assert_eq!(payload_from_launch_url("umux-app://notification?p=zz"), None);
+    }
+
+    // T-TOAST-PROTO: a toast with a launch URL activates via the protocol.
+    #[test]
+    fn toast_script_with_launch_activates_protocol() {
+        let script = windows_toast_script("t", "b", "com.umux.app", Some("umux-app://notification?p=4142"));
+        assert!(script.contains("SetAttribute('activationType','protocol')"), "{script}");
+        assert!(script.contains("SetAttribute('launch','umux-app://notification?p=4142')"), "{script}");
+    }
+
+    // T-TOAST-NOPROTO: without a launch URL there is no activation attribute
+    // (the plain toast behaves exactly as before).
+    #[test]
+    fn toast_script_without_launch_has_no_activation() {
+        let script = windows_toast_script("t", "b", "com.umux.app", None);
+        assert!(!script.contains("activationType"), "{script}");
+    }
+
+    // T-ARGV-URL: the running instance recognizes a protocol-launch argument
+    // among its argv and extracts the payload.
+    #[test]
+    fn argv_protocol_url_yields_payload() {
+        let url = notification_launch_url(r#"{"kind":"waiting"}"#);
+        let args = vec!["umux-app.exe".to_string(), url];
+        assert_eq!(
+            payload_from_args(&args).as_deref(),
+            Some(r#"{"kind":"waiting"}"#)
+        );
+        assert_eq!(payload_from_args(&["umux-app.exe".to_string()]), None);
+    }
+
+    // --- #118: the umux-owned Windows notification banner ---------------------
+
+    // Recording fake for BannerShow — counts every call so the tests assert
+    // on what the banner would show, not on any window detail.
+    #[derive(Default, Clone)]
+    struct RecordingBanner(Arc<std::sync::Mutex<Vec<(String, String, Option<String>)>>>);
+
+    impl BannerShow for RecordingBanner {
+        fn show_banner(&self, summary: &str, body: &str, payload: Option<&str>) {
+            self.0.lock().unwrap().push((
+                summary.to_string(),
+                body.to_string(),
+                payload.map(str::to_string),
+            ));
+        }
+    }
+
+    impl RecordingBanner {
+        fn calls(&self) -> Vec<(String, String, Option<String>)> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+
+    // T-B1 (AC: the banner sits at the bottom-right of the WORK area — above
+    // the taskbar, which the work area already excludes): Input: a 1920x1040
+    // work area at (0,0), a 480x144 banner, a 12 px margin. Output: the
+    // banner's top-left corner so its bottom-right edge sits `margin` inside
+    // the work area's bottom-right corner.
+    #[test]
+    fn banner_origin_sits_bottom_right_with_margin() {
+        assert_eq!(banner_origin((0, 0, 1920, 1040), (480, 144), 12), (1428, 884));
+    }
+
+    // T-B2: a monitor LEFT of the primary has a negative work-area origin —
+    // the math must hold, a banner on the secondary lands on the secondary.
+    #[test]
+    fn banner_origin_holds_for_negative_work_area_origin() {
+        assert_eq!(
+            banner_origin((-1920, 0, 1920, 1040), (480, 144), 12),
+            (-492, 884)
+        );
+    }
+
+    // T-B3 (AC3: no native toast on Windows — the banner replaces it):
+    // BannerNotifier routes a plain show into the banner shower with NO
+    // payload (the payload-less path has nothing to navigate to).
+    #[test]
+    fn banner_notifier_plain_show_carries_no_payload() {
+        let rec = RecordingBanner::default();
+        let notifier = BannerNotifier::new(Box::new(rec.clone()));
+        notifier.show("umux", "Agent is waiting for your input");
+        assert_eq!(
+            rec.calls(),
+            vec![(
+                "umux".to_string(),
+                "Agent is waiting for your input".to_string(),
+                None
+            )]
+        );
+    }
+
+    // T-B4 (AC2: the banner carries the EXACT navigation payload): both
+    // notification paths (completion + waiting ping) send their payload
+    // through show_actionable — it must reach the shower untouched.
+    #[test]
+    fn banner_notifier_actionable_show_carries_exact_payload() {
+        let rec = RecordingBanner::default();
+        let notifier = BannerNotifier::new(Box::new(rec.clone()));
+        let payload = r#"{"kind":"waiting","workspaceId":"w","tabId":"t","panelId":"p"}"#;
+        notifier.show_actionable("umux", "Agent is waiting", payload);
+        assert_eq!(
+            rec.calls(),
+            vec![(
+                "umux".to_string(),
+                "Agent is waiting".to_string(),
+                Some(payload.to_string())
+            )]
+        );
+    }
+
+    // T-B5 (the early-race pull: the banner page may finish loading AFTER a
+    // notification already fired — it takes the pending request on mount):
+    // take returns the whole envelope (summary/body/payload) and CLEARS it;
+    // an empty store takes to None.
+    #[test]
+    fn pending_banner_request_take_returns_and_clears() {
+        let pending = PendingBannerRequest::default();
+        assert_eq!(pending.take(), None);
+
+        pending.set("umux", "Agent is waiting", Some(r#"{"kind":"waiting"}"#));
+        let taken = pending.take().expect("pending request after set");
+        let v: serde_json::Value = serde_json::from_str(&taken).unwrap();
+        assert_eq!(v["summary"], "umux");
+        assert_eq!(v["body"], "Agent is waiting");
+        assert_eq!(v["payload"], r#"{"kind":"waiting"}"#);
+
+        assert_eq!(pending.take(), None);
+    }
 }

@@ -17,8 +17,24 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  # The job-object module's CreateJobObjectW takes SECURITY_ATTRIBUTES, so
+  # this feature is required even in ISOLATED builds (`cargo test -p
+  # session_core`) — whole-workspace builds used to paper over it through
+  # feature unification with the app crate.
+  "Win32_Security",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
+  # #117 follow-up: recover the typed word (claude/codex/…) from the
+  # foreground process's command line — the Windows image name is always
+  # "node" for a `claude` script, so known-CLI presence never matched and
+  # waiting pings never fired. NtQueryInformationProcess (Wdk), the PBI
+  # struct (Kernel), ReadProcessMemory (Debug).
+  "Win32_System_Diagnostics_Debug",
+  # #117 follow-up: the Windows "who owns the terminal" answer comes from a
+  # Toolhelp32 process snapshot (pid→parent map), replacing the hard None.
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Kernel",
+  "Wdk_System_Threading",
 ] }
 
 [dev-dependencies]
