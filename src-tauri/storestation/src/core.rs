@@ -25,6 +25,16 @@
 //!   owned by the daemon; no display/idle or lid-switch inhibition. The
 //!   lid action remains a system setting and is explained in status.
 //!
+//! umux Core Session (timed awake sessions, #111) slots into the SAME state
+//! machine: the session is a bounded window (absolute `endsAt`, unix
+//! seconds, max 24 h from `startedAt`) during which the daemon holds the
+//! exact same platform assertion. One hold at a time — the session refuses
+//! to start while Core is ON and `core.set(true)` is refused while a
+//! session is live (the holds never stack, PRD decision); expiry drops the
+//! existing `PowerAssertion` value, inheriting the crash-release guarantee
+//! by construction. The ended record (`lastEndedAt`, `lastEndReason`) is
+//! deliberately NOT persisted — it lives for the daemon's lifetime only.
+//!
 //! Unit tests below cover the pure parts (flag persistence, view shape);
 //! the wire behavior is exercised in `storestation/tests/core.rs`.
 
@@ -53,59 +63,193 @@ const BACKEND_MISSING_INSTRUCTION: &str =
 #[cfg(target_os = "windows")]
 const LID_INSTRUCTION: &str = "umux Core is keeping this machine awake while idle. If this device has a closing lid: the lid-close action still follows your Windows power plan — to stay awake with the lid closed, set it to \"Do nothing\" in Power Options (Control Panel → \"Choose what closing the lid does\").";
 
+/// The same caveat, worded for a live Core Session (the hold belongs to the
+/// session until its end time, not to an indefinite Core).
+#[cfg(target_os = "windows")]
+const SESSION_LID_INSTRUCTION: &str = "umux Core Session is keeping this machine awake until the session's end time. If this device has a closing lid: the lid-close action still follows your Windows power plan — to stay awake with the lid closed, set it to \"Do nothing\" in Power Options (Control Panel → \"Choose what closing the lid does\").";
+
 /// logind owns lid handling; a sleep inhibitor does not override the
 /// lid-close policy (and umux never changes system configuration).
 #[cfg(target_os = "linux")]
 const LID_INSTRUCTION: &str = "umux Core is keeping this machine awake while idle. If this device has a closing lid: closing it may still suspend the machine under the system's logind lid policy. To stay awake with the lid closed, ask your administrator to configure that policy; umux does not change it.";
 
-/// The flag file: `<config_dir>/storestation.core.json`. Daemon-owned state
-/// (the plan's durable decision) — deliberately NOT part of the socket/pid
-/// cleanup, which only removes runtime leftovers: the flag must survive both
-/// a daemon restart AND a crash.
+/// The same caveat, worded for a live Core Session.
+#[cfg(target_os = "linux")]
+const SESSION_LID_INSTRUCTION: &str = "umux Core Session is keeping this machine awake until the session's end time. If this device has a closing lid: closing it may still suspend the machine under the system's logind lid policy. To stay awake with the lid closed, ask your administrator to configure that policy; umux does not change it.";
+
+/// The flag document: `<config_dir>/storestation.core.json`,
+/// `{"enabled": bool, "session": {"startedAt": <unix s>, "endsAt": <unix s>} | null}`.
+/// Daemon-owned state (the plan's durable decision) — deliberately NOT part
+/// of the socket/pid cleanup, which only removes runtime leftovers: the
+/// document must survive both a daemon restart AND a crash. Additive by
+/// contract: a v1.7.5 reader takes only `enabled` from a new-format file; a
+/// new reader sees "no session" in an old-format file; a corrupt file still
+/// reads as OFF with no session.
 fn flag_path(config_dir: &Path) -> PathBuf {
     config_dir.join("storestation.core.json")
 }
 
-/// Read the persisted flag. Tolerant by design: no file (first run, old
-/// daemon's dir) and unparseable content (a hand-mangled file) both read as
-/// OFF — a broken byte can never turn the machine's sleep block on.
-fn load_flag(config_dir: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(flag_path(config_dir)) else {
-        return false;
-    };
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|v| v.get("enabled").and_then(Value::as_bool))
-        .unwrap_or(false)
+/// A live session's absolute window (unix seconds — the durable decision:
+/// never remaining time, so downtime degenerates honestly into "expired").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionWindow {
+    pub started_at: u64,
+    pub ends_at: u64,
 }
 
-fn save_flag(config_dir: &Path, enabled: bool) -> std::io::Result<()> {
-    let body = serde_json::to_vec_pretty(&json!({ "enabled": enabled }))
-        .expect("the flag document is always serializable");
+/// The 24 h cap: a session's TOTAL span (`endsAt − startedAt`), start and
+/// every extend alike (PRD technical pin).
+pub const MAX_SESSION_SPAN_SECS: u64 = 24 * 60 * 60;
+
+/// The pinned `lastEndReason` vocabulary (the status contract).
+pub const END_REASON_EXPIRED: &str = "expired";
+pub const END_REASON_STOPPED: &str = "stopped";
+
+/// Why the daemon refused a Core Session op. The dispatch (server.rs) maps
+/// these to the enumerated wire codes — one gate, no scattered refusals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRefusal {
+    /// Start while Core is ON: Core already keeps the machine awake without
+    /// a limit; the holds never stack (story 148).
+    CoreOn,
+    /// Start/extend would push the span past 24 h from `startedAt`.
+    CapExceeded,
+    /// Extend/stop with no live session.
+    NoActiveSession,
+    /// The flag document could not be persisted.
+    Persist(String),
+}
+
+/// Why `core.set(true)` was refused: a live session owns the hold until it
+/// ends (the exact mirror of the start refusal — one hold at a time).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreSetError {
+    SessionActive,
+    Persist(String),
+}
+
+/// Read the persisted document. Tolerant by design: no file (first run, old
+/// daemon's dir) and unparseable content (a hand-mangled file) both read as
+/// OFF with no session — a broken byte can never turn the machine's sleep
+/// block on. An old-format file (v1.7.5, `{"enabled": …}` only) reads with
+/// no session; a new-format file read by a v1.7.5 daemon yields `enabled`
+/// only (that reader ignores unknown keys by construction).
+fn load_doc(config_dir: &Path) -> (bool, Option<SessionWindow>) {
+    let Ok(text) = std::fs::read_to_string(flag_path(config_dir)) else {
+        return (false, None);
+    };
+    let Some(value) = serde_json::from_str::<Value>(&text).ok() else {
+        return (false, None);
+    };
+    let enabled = value.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let session = value.get("session").and_then(|s| {
+        let started_at = s.get("startedAt").and_then(Value::as_u64)?;
+        let ends_at = s.get("endsAt").and_then(Value::as_u64)?;
+        Some(SessionWindow { started_at, ends_at })
+    });
+    (enabled, session)
+}
+
+fn save_doc(
+    config_dir: &Path,
+    enabled: bool,
+    session: Option<SessionWindow>,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec_pretty(&json!({
+        "enabled": enabled,
+        "session": session.map(|s| json!({
+            "startedAt": s.started_at,
+            "endsAt": s.ends_at,
+        })),
+    }))
+    .expect("the flag document is always serializable");
     std::fs::write(flag_path(config_dir), body)
+}
+
+/// Wall-clock unix seconds. The only clock read in this module's runtime
+/// paths — every state transition takes `now` as a parameter so tests (and
+/// the restore path) drive time explicitly.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs()
 }
 
 /// The daemon-side Core state: the user's choice (`enabled`, persisted) and
 /// the platform's live truth (`held`, best effort) plus, when the guarantee
 /// is limited or refused, the instruction string — never silent (story 142).
+/// The session (when live) owns the SAME single assertion slot: one hold at
+/// a time, by construction.
 pub struct CoreState {
     enabled: bool,
     assertion: Option<power::PowerAssertion>,
     instruction: Option<String>,
+    session: Option<SessionWindow>,
+    // The ended record — in-memory only, daemon-lifetime (the plan pins it
+    // non-persisted; a fresh daemon starts with a clean end state).
+    last_ended_at: Option<u64>,
+    last_end_reason: Option<&'static str>,
 }
 
 impl CoreState {
-    /// Daemon-start restore: read the flag and, when Core is ON, take the
-    /// assertion BEFORE the serve loop starts — a fresh daemon (login
-    /// autostart included) re-asserts with no client call (AC: Core ON
-    /// survives a daemon restart).
+    /// Daemon-start restore: read the document and re-assert whatever the
+    /// user left running — Core ON, a live session, or nothing — BEFORE the
+    /// serve loop starts, with NO client call. A session past its deadline
+    /// is expired, never an infinite hold: the hold is not taken and the
+    /// expiry is recorded (story 146).
     pub fn restore(config_dir: &Path) -> CoreState {
+        CoreState::restore_with_clock(config_dir, unix_now())
+    }
+
+    /// [`restore`](Self::restore) with the clock driven by the caller —
+    /// every state transition in this module takes `now` explicitly, and
+    /// restore is no exception (the unit tests pin the expiry arithmetic).
+    pub fn restore_with_clock(config_dir: &Path, now: u64) -> CoreState {
+        let (enabled, session) = load_doc(config_dir);
+        // A document claiming BOTH holds at once is unreachable through the
+        // daemon (each side refuses the other); if a hand-edit produced it,
+        // Core — the primary v1.7.5 state — wins and the session record is
+        // discarded without an end record (it never ran).
+        let session = if enabled { None } else { session };
         let mut state = CoreState {
             enabled: false,
             assertion: None,
             instruction: None,
+            session: None,
+            last_ended_at: None,
+            last_end_reason: None,
         };
-        if load_flag(config_dir) {
+        if let Some(window) = session {
+            if window.ends_at > now {
+                state.session = Some(window);
+                state.take_hold();
+                if state.held() {
+                    eprintln!(
+                        "umux-storestation: Core Session resumed — system sleep is prevented for the remaining {}s.",
+                        window.ends_at - now
+                    );
+                } else {
+                    eprintln!(
+                        "umux-storestation: Core Session resumed but the sleep block is NOT held: {}",
+                        state.instruction.as_deref().unwrap_or("unknown reason")
+                    );
+                }
+            } else {
+                // Past deadline: expired during downtime. Record the end at
+                // the deadline itself (deterministic across restarts) and
+                // settle the document so the next reader sees it too.
+                state.last_ended_at = Some(window.ends_at);
+                state.last_end_reason = Some(END_REASON_EXPIRED);
+                if let Err(e) = save_doc(config_dir, enabled, None) {
+                    eprintln!("umux-storestation: could not persist the expired session: {e}");
+                }
+                eprintln!(
+                    "umux-storestation: Core Session had already ended (deadline passed) — nothing asserted."
+                );
+            }
+        }
+        if enabled {
             state.apply(true);
             if state.held() {
                 eprintln!(
@@ -123,24 +267,42 @@ impl CoreState {
 
     /// Flip Core. The user's choice persists FIRST (an assertion hiccup must
     /// not undo it — the next daemon start retries), then the assertion is
-    /// taken or dropped. The returned error (persistence failure) is the
-    /// only case the op answers as a failure; the held truth travels in the
-    /// view, never as a silent success.
-    pub fn set_enabled(&mut self, config_dir: &Path, on: bool) -> Result<(), String> {
-        save_flag(config_dir, on).map_err(|e| format!("could not persist the Core flag: {e}"))?;
+    /// taken or dropped. Refused while a session is live (the mirror of the
+    /// session-start refusal): the flip would otherwise clobber the
+    /// session's assertion slot. `on = false` is allowed everywhere and —
+    /// while a session is live — touches ONLY the Core choice, never the
+    /// session's hold.
+    pub fn set_enabled(&mut self, config_dir: &Path, on: bool) -> Result<(), CoreSetError> {
+        if on && self.session.is_some() {
+            return Err(CoreSetError::SessionActive);
+        }
+        save_doc(config_dir, on, self.session)
+            .map_err(|e| CoreSetError::Persist(e.to_string()))?;
         self.apply(on);
         Ok(())
     }
 
-    /// (Re)apply the choice: drop whatever assertion is held, then — when
-    /// ON — take a fresh one and evaluate the battery caveat.
+    /// (Re)apply the choice. With a live session the hold is NOT touched:
+    /// the session owns it until its own end (see [`Self::set_enabled`]).
     fn apply(&mut self, on: bool) {
         self.enabled = on;
-        self.assertion = None; // Drop releases the previous assertion
-        self.instruction = None;
-        if !on {
+        if self.session.is_some() {
             return;
         }
+        if !on {
+            self.assertion = None; // Drop releases the previous assertion
+            self.instruction = None;
+            return;
+        }
+        self.take_hold();
+    }
+
+    /// Take the platform hold for whoever owns it right now (Core or a
+    /// live session). Drops any previous assertion first, then takes a
+    /// fresh one and evaluates the honest caveats.
+    fn take_hold(&mut self) {
+        self.assertion = None;
+        self.instruction = None;
         match power::assert_system_sleep() {
             Ok(assertion) => {
                 self.assertion = Some(assertion);
@@ -151,10 +313,15 @@ impl CoreState {
                     self.instruction = Some(BATTERY_INSTRUCTION.to_string());
                 }
                 // Windows/Linux: idle sleep is held, but the lid-close
-                // policy remains outside the daemon. Always show its caveat.
+                // policy remains outside the daemon. Always show its caveat,
+                // worded for the hold's owner.
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 {
-                    self.instruction = Some(LID_INSTRUCTION.to_string());
+                    self.instruction = Some(if self.session.is_some() {
+                        SESSION_LID_INSTRUCTION.to_string()
+                    } else {
+                        LID_INSTRUCTION.to_string()
+                    });
                 }
             }
             Err(message) => {
@@ -186,13 +353,163 @@ impl CoreState {
         self.assertion.is_some()
     }
 
-    /// The status-view shape shared by `core.set` results and the
-    /// `storestation.status` `core` object: `{enabled, held, instruction}`.
+    /// Is a Core Session live right now? (Not whether its hold succeeded —
+    /// the held/instruction truth carries that.)
+    pub fn session_active(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// Start a timed session: persist the absolute window FIRST (an
+    /// assertion hiccup must not undo it — the next daemon start retries,
+    /// exactly like the Core flag), then take the hold. `now` is the stamp
+    /// `startedAt` gets; the deadline is `now + duration_secs`.
+    pub fn start_session(
+        &mut self,
+        config_dir: &Path,
+        duration_secs: u64,
+        now: u64,
+    ) -> Result<(), SessionRefusal> {
+        if self.enabled {
+            return Err(SessionRefusal::CoreOn);
+        }
+        if duration_secs > MAX_SESSION_SPAN_SECS {
+            return Err(SessionRefusal::CapExceeded);
+        }
+        let window = SessionWindow {
+            started_at: now,
+            ends_at: now.saturating_add(duration_secs),
+        };
+        save_doc(config_dir, self.enabled, Some(window))
+            .map_err(|e| SessionRefusal::Persist(e.to_string()))?;
+        // A start over a live session RESTARTS the window: the new window's
+        // cap runs from the new startedAt, and the superseded window leaves
+        // no end record — the vocabulary records ends the user can see
+        // (expiry/stop of THE visible session), and a superseded window
+        // never shows up as ended. The hold is continuous: an
+        // already-held assertion is kept, never dropped and retaken.
+        self.session = Some(window);
+        self.last_ended_at = None;
+        self.last_end_reason = None;
+        if self.assertion.is_none() {
+            self.take_hold();
+        }
+        Ok(())
+    }
+
+    /// Extend the live session. The cap is the TOTAL span from `startedAt`
+    /// (the deadline moves, the start never does); a refusal changes
+    /// nothing. If the OS dropped the hold mid-session (a backend hiccup),
+    /// extending re-asserts — never silent.
+    pub fn extend_session(
+        &mut self,
+        config_dir: &Path,
+        duration_secs: u64,
+    ) -> Result<(), SessionRefusal> {
+        let Some(window) = self.session else {
+            return Err(SessionRefusal::NoActiveSession);
+        };
+        let ends_at = window.ends_at.saturating_add(duration_secs);
+        if ends_at - window.started_at > MAX_SESSION_SPAN_SECS {
+            return Err(SessionRefusal::CapExceeded);
+        }
+        // The deadline is absolute, so the extension is pure arithmetic on
+        // the persisted window — `now` plays no part (dispatch has already
+        // settled a due expiry before calling).
+        let extended = SessionWindow {
+            started_at: window.started_at,
+            ends_at,
+        };
+        save_doc(config_dir, self.enabled, Some(extended))
+            .map_err(|e| SessionRefusal::Persist(e.to_string()))?;
+        self.session = Some(extended);
+        if self.assertion.is_none() {
+            self.take_hold();
+        }
+        Ok(())
+    }
+
+    /// End the live session early: drop the hold, record the end at `now`,
+    /// persist the settled document.
+    pub fn stop_session(&mut self, config_dir: &Path, now: u64) -> Result<(), SessionRefusal> {
+        if self.session.is_none() {
+            return Err(SessionRefusal::NoActiveSession);
+        }
+        self.end_session(config_dir, now, END_REASON_STOPPED)
+            .map_err(SessionRefusal::Persist)
+    }
+
+    /// The deadline tick: when the live session's `endsAt` has passed, drop
+    /// the hold with no client call and record the expiry at the deadline
+    /// itself. Returns whether it expired.
+    pub fn expire_if_due(&mut self, config_dir: &Path, now: u64) -> bool {
+        let Some(window) = self.session else {
+            return false;
+        };
+        if window.ends_at > now {
+            return false;
+        }
+        match self.end_session(config_dir, window.ends_at, END_REASON_EXPIRED) {
+            Ok(()) => true,
+            Err(e) => {
+                // The tick has no caller to answer: the state IS settled
+                // (session gone, hold dropped) — only the document could
+                // not be written. Say so on the daemon's stderr.
+                eprintln!("umux-storestation: could not persist the session expiry: {e}");
+                true
+            }
+        }
+    }
+
+    /// The shared ending: drop the hold, record the end, settle the
+    /// document. Dropping the `PowerAssertion` value releases it on every
+    /// platform (macOS Drop → IOPMAssertionRelease; Windows unblocks the
+    /// hold thread; Linux closes the inhibitor fd) — the crash-release
+    /// guarantee is inherited, never re-implemented.
+    fn end_session(
+        &mut self,
+        config_dir: &Path,
+        ended_at: u64,
+        reason: &'static str,
+    ) -> Result<(), String> {
+        self.session = None;
+        self.assertion = None;
+        self.instruction = None;
+        self.last_ended_at = Some(ended_at);
+        self.last_end_reason = Some(reason);
+        save_doc(config_dir, self.enabled, None).map_err(|e| e.to_string())
+    }
+
+    /// The status-view shape shared by `core.set`/`core.session.*` results
+    /// and the `storestation.status` `core` object:
+    /// `{enabled, held, instruction, session}` — the first three keys are
+    /// the unchanged v1.7.5 contract, `session` joins additively (#111).
     pub fn view(&self) -> Value {
         json!({
             "enabled": self.enabled,
             "held": self.held(),
             "instruction": self.instruction,
+            "session": self.session_view(),
+        })
+    }
+
+    /// The pinned `core.session` shape: `{active, endsAt, remainingSecs,
+    /// lastEndedAt, lastEndReason}`. Times are unix seconds; when no
+    /// session is live `endsAt`/`remainingSecs` are null while the ended
+    /// record (this daemon's lifetime) still travels.
+    fn session_view(&self) -> Value {
+        let (ends_at, remaining_secs) = match self.session {
+            Some(window) => (
+                json!(window.ends_at),
+                json!(window.ends_at.saturating_sub(unix_now())),
+            ),
+            None => (Value::Null, Value::Null),
+        };
+        json!({
+            "active": self.session.is_some(),
+            "endsAt": ends_at,
+            "remainingSecs": remaining_secs,
+            "lastEndedAt": self.last_ended_at,
+            "lastEndReason": self.last_end_reason,
         })
     }
 }
@@ -470,6 +787,9 @@ mod power {
                     _inhibitor: inhibitor.into(),
                 }),
                 instruction: Some(super::super::LID_INSTRUCTION.to_owned()),
+                session: None,
+                last_ended_at: None,
+                last_end_reason: None,
             };
             observer.set_nonblocking(true).unwrap();
             assert_eq!(
@@ -480,6 +800,87 @@ mod power {
             assert_eq!(observer.read(&mut [0]).unwrap(), 0, "release closed the fd");
             assert!(!state.held());
             assert!(state.enabled(), "shutdown must preserve the user's choice");
+        }
+
+        // Core Session (#112): the SAME state machine over the SAME fd
+        // lifetime. A Core flip during a live session must NOT close the
+        // inhibitor; the session's own end (stop or expiry) closes it.
+        #[test]
+        fn session_end_closes_the_fd_and_a_core_flip_does_not() {
+            let (mut observer, inhibitor) = UnixStream::pair().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let now = super::super::unix_now();
+            let mut state = super::super::CoreState {
+                enabled: false,
+                assertion: Some(PowerAssertion {
+                    _inhibitor: inhibitor.into(),
+                }),
+                instruction: Some(super::super::SESSION_LID_INSTRUCTION.to_owned()),
+                session: Some(super::super::SessionWindow {
+                    started_at: now,
+                    ends_at: now + 3600,
+                }),
+                last_ended_at: None,
+                last_end_reason: None,
+            };
+            observer.set_nonblocking(true).unwrap();
+            assert_eq!(
+                observer.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the session's inhibitor is live"
+            );
+
+            // The mirror refusal keeps the hold: Core ON is refused, the
+            // fd stays open.
+            assert_eq!(
+                state.set_enabled(dir.path(), true),
+                Err(super::super::CoreSetError::SessionActive)
+            );
+            assert_eq!(
+                observer.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the refused Core flip did not touch the session's fd"
+            );
+
+            // Core OFF during a session is allowed — and still must not
+            // close the session's inhibitor.
+            state.set_enabled(dir.path(), false).unwrap();
+            assert_eq!(
+                observer.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the Core flip did not touch the session's fd"
+            );
+
+            // The session's own end closes the fd — by dropping the SAME
+            // PowerAssertion value (the crash-release guarantee inherited).
+            state.stop_session(dir.path(), now + 10).unwrap();
+            assert_eq!(observer.read(&mut [0]).unwrap(), 0, "stop closed the fd");
+            assert_eq!(state.last_end_reason, Some(super::super::END_REASON_STOPPED));
+        }
+
+        // Expiry over a due session closes the fd with no client call.
+        #[test]
+        fn expiry_closes_the_fd() {
+            let (mut observer, inhibitor) = UnixStream::pair().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let now = super::super::unix_now();
+            let mut state = super::super::CoreState {
+                enabled: false,
+                assertion: Some(PowerAssertion {
+                    _inhibitor: inhibitor.into(),
+                }),
+                instruction: Some(super::super::SESSION_LID_INSTRUCTION.to_owned()),
+                session: Some(super::super::SessionWindow {
+                    started_at: now,
+                    ends_at: now.saturating_sub(1),
+                }),
+                last_ended_at: None,
+                last_end_reason: None,
+            };
+            observer.set_nonblocking(true).unwrap();
+            assert!(state.expire_if_due(dir.path(), now));
+            assert_eq!(observer.read(&mut [0]).unwrap(), 0, "expiry closed the fd");
+            assert_eq!(state.last_end_reason, Some(super::super::END_REASON_EXPIRED));
         }
     }
 }
@@ -540,7 +941,7 @@ mod tests {
     #[test]
     fn explicit_off_persists() {
         let dir = tempfile::tempdir().unwrap();
-        save_flag(dir.path(), false).unwrap();
+        save_doc(dir.path(), false, None).unwrap();
         let state = CoreState::restore(dir.path());
         assert!(!state.enabled());
     }
@@ -586,6 +987,33 @@ mod tests {
         }
         state.release();
         assert!(!state.held(), "release drops the assertion");
+    }
+
+    // macOS: a restore over a LIVE session window re-asserts with no
+    // client call — the backend-level half of the restart AC (#111/#146);
+    // the wire level runs in tests/core_session.rs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_restore_re_asserts_a_live_session_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = unix_now();
+        save_doc(
+            dir.path(),
+            false,
+            Some(SessionWindow { started_at: now, ends_at: now + 3600 }),
+        )
+        .unwrap();
+        let state = CoreState::restore_with_clock(dir.path(), now);
+        assert!(state.session_active(), "the window is live: {:?}", state.last_end_reason);
+        if power_source_is_battery() == Some(true) {
+            assert!(
+                state.view()["instruction"].as_str().is_some(),
+                "the battery limit is surfaced, never silent: {:?}",
+                state.instruction
+            );
+        } else {
+            assert!(state.held(), "on AC the fresh daemon re-asserted: {:?}", state.instruction);
+        }
     }
 
     // OFF clears a held state: no assertion, no stale instruction. (On
@@ -671,11 +1099,328 @@ mod tests {
     // Daemon-start re-assert on Windows: a persisted ON flag comes back
     // held with NO client call — the "every umux window closed" contract,
     // live on the Windows backend.
+
+    // ---- umux Core Session (#111) — unit tests over the pure machine ----
+    //
+    // Assumptions (state-before-RED, #111): times are DRIVEN (explicit
+    // `now`), the doc is the only side effect, and the hold paths run the
+    // real backend where one exists (harmless in a test process — the
+    // existing Core tests do the same). The held/instruction side is
+    // asserted only in the platform-gated tests below.
+
+    fn doc_of(dir: &Path) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(flag_path(dir)).expect("the flag doc exists"),
+        )
+        .expect("the flag doc is JSON")
+    }
+
+    fn state_with_session(started_at: u64, ends_at: u64) -> CoreState {
+        CoreState {
+            enabled: false,
+            assertion: None,
+            instruction: None,
+            session: Some(SessionWindow { started_at, ends_at }),
+            last_ended_at: None,
+            last_end_reason: None,
+        }
+    }
+
+    // The doc round-trips both fields; an OLD-format doc (v1.7.5) reads as
+    // "no session"; the v1.7.5 reader expression applied to a NEW-format
+    // doc still yields `enabled` only (the additive contract, both ways).
+    #[test]
+    fn the_session_doc_round_trips_and_degrades_honestly_both_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let window = SessionWindow { started_at: 1000, ends_at: 4600 };
+        save_doc(dir.path(), false, Some(window)).unwrap();
+        assert_eq!(load_doc(dir.path()), (false, Some(window)));
+
+        // Old daemon wrote only `enabled`: the new reader sees no session.
+        std::fs::write(flag_path(dir.path()), b"{\"enabled\": true}").unwrap();
+        assert_eq!(load_doc(dir.path()), (true, None));
+
+        // The v1.7.5 reader expression over a NEW-format doc: `enabled`
+        // only — the session key is ignored by construction.
+        save_doc(dir.path(), true, Some(window)).unwrap();
+        let text = std::fs::read_to_string(flag_path(dir.path())).unwrap();
+        let enabled = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("enabled").and_then(Value::as_bool))
+            .unwrap_or(false);
+        assert!(enabled, "the old reader still finds enabled: {text}");
+    }
+
+    // A corrupt doc reads OFF with NO session — a broken byte can never
+    // turn a hold on (the v1.7.5 rule, extended to the session).
+    #[test]
+    fn a_corrupt_doc_reads_off_with_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(flag_path(dir.path()), b"{\"enabled\": true, \"session\":").unwrap();
+        assert_eq!(load_doc(dir.path()), (false, None));
+    }
+
+    // story 148: start while Core is ON is refused before anything is
+    // touched — no window, no doc write.
+    #[test]
+    fn start_refuses_while_core_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        save_doc(dir.path(), true, None).unwrap();
+        state.enabled = true;
+        assert_eq!(
+            state.start_session(dir.path(), 60, 1000),
+            Err(SessionRefusal::CoreOn)
+        );
+        assert!(!state.session_active());
+        assert_eq!(load_doc(dir.path()), (true, None), "the doc is untouched");
+    }
+
+    // A successful start persists the absolute window FIRST and clears a
+    // stale end record (the end state belongs to the session the user
+    // sees; story 145).
+    #[test]
+    fn start_persists_the_window_and_clears_stale_end_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        state.last_ended_at = Some(500);
+        state.last_end_reason = Some(END_REASON_STOPPED);
+        state.start_session(dir.path(), 60, 1000).unwrap();
+        assert_eq!(
+            state.session,
+            Some(SessionWindow { started_at: 1000, ends_at: 1060 })
+        );
+        assert_eq!(state.last_ended_at, None, "the stale end record is gone");
+        assert_eq!(state.last_end_reason, None);
+        assert_eq!(
+            load_doc(dir.path()).1,
+            Some(SessionWindow { started_at: 1000, ends_at: 1060 })
+        );
+    }
+
+    // The 24 h cap is the TOTAL span from startedAt: a refused extend (or
+    // start) changes nothing — neither the state nor the doc.
+    #[test]
+    fn extend_refuses_past_the_cap_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_session(0, 3600);
+        save_doc(dir.path(), false, state.session).unwrap();
+        assert_eq!(
+            state.extend_session(dir.path(), 86400),
+            Err(SessionRefusal::CapExceeded)
+        );
+        assert_eq!(
+            state.session,
+            Some(SessionWindow { started_at: 0, ends_at: 3600 }),
+            "the window is untouched"
+        );
+        assert_eq!(
+            load_doc(dir.path()).1,
+            Some(SessionWindow { started_at: 0, ends_at: 3600 }),
+            "the doc is untouched"
+        );
+
+        // Exactly 24 h is the cap, inclusive.
+        let mut state = state_with_session(0, 3600);
+        state.extend_session(dir.path(), 86400 - 3600).unwrap();
+        assert_eq!(
+            state.session,
+            Some(SessionWindow { started_at: 0, ends_at: 86400 })
+        );
+    }
+
+    // Extend moves ONLY the deadline; startedAt is the cap's anchor.
+    #[test]
+    fn extend_moves_only_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_session(100, 3600);
+        state.extend_session(dir.path(), 1800).unwrap();
+        assert_eq!(
+            state.session,
+            Some(SessionWindow { started_at: 100, ends_at: 5400 })
+        );
+    }
+
+    // Stop records the end at the stop moment and settles the doc.
+    #[test]
+    fn stop_records_the_end_and_settles_the_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_session(1000, 4600);
+        state.stop_session(dir.path(), 2000).unwrap();
+        assert!(!state.session_active());
+        assert!(!state.held(), "the hold is dropped");
+        assert_eq!(state.last_ended_at, Some(2000));
+        assert_eq!(state.last_end_reason, Some(END_REASON_STOPPED));
+        assert_eq!(load_doc(dir.path()), (false, None), "the doc is settled");
+    }
+
+    // Extend/stop with nothing live are refused, not silently ignored.
+    #[test]
+    fn extend_and_stop_without_a_session_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        assert_eq!(
+            state.extend_session(dir.path(), 60),
+            Err(SessionRefusal::NoActiveSession)
+        );
+        assert_eq!(
+            state.stop_session(dir.path(), 1000),
+            Err(SessionRefusal::NoActiveSession)
+        );
+    }
+
+    // The deadline tick expires AT the deadline (deterministic across
+    // restarts), and a settled session never expires twice.
+    #[test]
+    fn expire_records_at_the_deadline_and_never_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_session(0, 900);
+        assert!(!state.expire_if_due(dir.path(), 899), "not yet due");
+        assert!(state.session_active());
+        assert!(state.expire_if_due(dir.path(), 900), "due at the deadline");
+        assert_eq!(state.last_ended_at, Some(900), "recorded at the deadline");
+        assert_eq!(state.last_end_reason, Some(END_REASON_EXPIRED));
+        assert_eq!(load_doc(dir.path()), (false, None));
+        assert!(!state.expire_if_due(dir.path(), 901), "nothing left to expire");
+    }
+
+    // Restore with a past deadline: expired at the deadline, doc settled,
+    // nothing held — never an infinite hold (story 146).
+    #[test]
+    fn restore_records_an_expired_deadline_and_settles_the_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        save_doc(dir.path(), false, Some(SessionWindow { started_at: 100, ends_at: 200 }))
+            .unwrap();
+        let state = CoreState::restore_with_clock(dir.path(), 300);
+        assert!(!state.session_active());
+        assert!(!state.held());
+        assert_eq!(state.last_ended_at, Some(200));
+        assert_eq!(state.last_end_reason, Some(END_REASON_EXPIRED));
+        assert_eq!(load_doc(dir.path()), (false, None), "the doc is settled");
+    }
+
+    // A doc claiming BOTH holds is unreachable through the daemon; if a
+    // hand-edit produces one, Core wins and the session record is dropped
+    // without an end record (it never ran).
+    #[test]
+    fn restore_prefers_core_when_the_doc_claims_both_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        save_doc(dir.path(), true, Some(SessionWindow { started_at: 100, ends_at: 100_000 }))
+            .unwrap();
+        let state = CoreState::restore_with_clock(dir.path(), 200);
+        assert!(state.enabled(), "Core wins");
+        assert!(!state.session_active(), "the session record is discarded");
+        assert_eq!(state.last_ended_at, None, "no end record for a session that never ran");
+        assert_eq!(state.last_end_reason, None);
+    }
+
+    // The mirror refusal: core.set(true) while a session is live is
+    // refused before anything is persisted; core.set(false) during a
+    // session flips ONLY the choice — the session's window survives in
+    // both the state and the doc.
+    #[test]
+    fn core_set_refusals_and_off_during_a_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_with_session(1000, 100_000);
+        save_doc(dir.path(), false, state.session).unwrap();
+        assert_eq!(
+            state.set_enabled(dir.path(), true),
+            Err(CoreSetError::SessionActive)
+        );
+        assert!(!state.enabled(), "the choice is unchanged");
+        assert!(state.session_active(), "the session is unchanged");
+        assert_eq!(load_doc(dir.path()).1.is_some(), true, "the doc is unchanged");
+
+        state.set_enabled(dir.path(), false).unwrap();
+        assert!(!state.enabled());
+        assert!(state.session_active(), "the session survived the Core off");
+        // (The hold itself is untouched by construction — apply returns
+        // early with a live session; the fd/assertion proof is pinned by
+        // the platform-gated backend tests, which can hold real values.)
+        assert_eq!(load_doc(dir.path()).1.is_some(), true, "the window persisted");
+    }
+
+    // The status view: the pinned session key set rides beside the
+    // unchanged v1.7.5 core contract keys, with the right null semantics.
+    #[test]
+    fn the_view_carries_the_pinned_session_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore_with_clock(dir.path(), 1000);
+        let inactive = state.view()["session"].clone();
+        assert_eq!(inactive["active"], false);
+        assert_eq!(inactive["endsAt"], Value::Null);
+        assert_eq!(inactive["remainingSecs"], Value::Null);
+        assert_eq!(inactive["lastEndedAt"], Value::Null);
+        assert_eq!(inactive["lastEndReason"], Value::Null);
+
+        let now = unix_now();
+        state.session = Some(SessionWindow { started_at: now, ends_at: now + 600 });
+        let active = state.view()["session"].clone();
+        assert_eq!(active["active"], true);
+        assert_eq!(active["endsAt"], now + 600);
+        assert_eq!(active["remainingSecs"], 600, "counting down from the clock");
+    }
+
+
+    // ---- Windows session backend (#112): the SAME state machine, the
+    // SetThreadExecutionState hold. The session owns WHEN the untouched
+    // v1.7.5 backend is taken and dropped — nothing else.
+    //
+    // State-before-RED assumptions (#112): the hold is thread-local, the
+    // session's stop/expiry ends the hold thread cleanly (a stuck join
+    // would hang this test), and the honest caveat is worded for the
+    // session ("Core Session"), not for Core.
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_session_holds_stops_and_carries_the_session_lid_caveat() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore_with_clock(dir.path(), unix_now());
+        state.start_session(dir.path(), 3600, unix_now()).unwrap();
+        assert!(
+            state.held(),
+            "the session holds the idle-sleep block: {:?}",
+            state.instruction
+        );
+        let caveat = state
+            .view()["instruction"]
+            .as_str()
+            .expect("the session caveat is the honest Windows state, never silence")
+            .to_string();
+        assert!(!caveat.is_empty());
+        assert!(
+            caveat.contains("Core Session"),
+            "the caveat is worded for the session: {caveat}"
+        );
+
+        state.stop_session(dir.path(), unix_now()).unwrap();
+        assert!(!state.held(), "stop releases the hold");
+        assert_eq!(state.view()["instruction"], Value::Null);
+
+        // The previous hold's thread really finished — re-asserting works.
+        state.start_session(dir.path(), 60, unix_now()).unwrap();
+        assert!(state.held(), "a session after a stop holds again");
+        state.stop_session(dir.path(), unix_now()).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_session_expiry_releases_the_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = unix_now();
+        let mut state = state_with_session(now, now.saturating_sub(1)); // already due
+        state.take_hold();
+        assert!(state.held(), "the hold is taken: {:?}", state.instruction);
+        assert!(state.expire_if_due(dir.path(), now), "the tick expires it");
+        assert!(!state.held(), "expiry released the hold");
+        assert_eq!(state.last_end_reason, Some(END_REASON_EXPIRED));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_restore_re_asserts_from_the_persisted_flag() {
         let dir = tempfile::tempdir().unwrap();
-        save_flag(dir.path(), true).unwrap();
+        save_doc(dir.path(), true, None).unwrap();
         let state = CoreState::restore(dir.path());
         assert!(state.enabled());
         assert!(

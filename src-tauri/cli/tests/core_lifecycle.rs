@@ -24,6 +24,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use umux_storestation::core::unix_now;
 
 /// Absolute path of the `umux-storestation` binary — the `umux` binary's
 /// sibling in the cargo target dir (one workspace, one profile, one dir).
@@ -262,8 +263,13 @@ fn status_offline_doc_carries_the_core_schema_without_a_flag_file() {
 // and CI runs this test on all three platforms, so a drift in any gated
 // build fails here.
 //
-// Assumptions encoded here (state-before-RED, #97):
-// - `core` is exactly `{enabled: bool, held: bool, instruction: string|null}`.
+// Assumptions encoded here (state-before-RED, #97; grown additively by
+// #111 — the session rides inside `core`, the old keys never move):
+// - `core` is exactly
+//   `{enabled: bool, held: bool, instruction: string|null, session: object}`.
+// - `core.session` is exactly
+//   `{active: bool, endsAt: u64|null, remainingSecs: u64|null,
+//     lastEndedAt: u64|null, lastEndReason: "expired"|"stopped"|null}`.
 // - The Core-related top-level keys of `storestation` are exactly
 //   `core` + `{sleepPrevented: bool, sleepInstruction: string|null}`;
 //   other keys (running, pid, …) belong to other features, and
@@ -296,6 +302,16 @@ fn core_schema_field_names_are_identical_in_both_status_documents() {
         keys.sort();
         keys
     };
+    let session_keys = |svc: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = svc["core"]["session"]
+            .as_object()
+            .expect("the core.session object exists")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
     let core_related_top_keys = |svc: &Value| -> Vec<String> {
         let mut keys: Vec<String> = svc
             .as_object()
@@ -314,8 +330,37 @@ fn core_schema_field_names_are_identical_in_both_status_documents() {
     ] {
         assert_eq!(
             core_keys(svc),
-            vec!["enabled".to_string(), "held".to_string(), "instruction".to_string()],
-            "{name}: the core object's exact key set"
+            vec![
+                "enabled".to_string(),
+                "held".to_string(),
+                "instruction".to_string(),
+                "session".to_string(),
+            ],
+            "{name}: the core object's exact key set (session joined additively, #111)"
+        );
+        assert_eq!(
+            session_keys(svc),
+            vec![
+                "active".to_string(),
+                "endsAt".to_string(),
+                "lastEndReason".to_string(),
+                "lastEndedAt".to_string(),
+                "remainingSecs".to_string(),
+            ],
+            "{name}: the pinned core.session key set"
+        );
+        assert!(svc["core"]["session"]["active"].is_boolean(), "{name}: session.active is a bool");
+        for key in ["endsAt", "remainingSecs", "lastEndedAt"] {
+            assert!(
+                svc["core"]["session"][key].is_u64() || svc["core"]["session"][key].is_null(),
+                "{name}: session.{key} is u64|null"
+            );
+        }
+        assert!(
+            svc["core"]["session"]["lastEndReason"].is_null()
+                || svc["core"]["session"]["lastEndReason"] == "expired"
+                || svc["core"]["session"]["lastEndReason"] == "stopped",
+            "{name}: session.lastEndReason is \"expired\"|\"stopped\"|null"
         );
         assert_eq!(
             core_related_top_keys(svc),
@@ -351,4 +396,251 @@ fn core_schema_field_names_are_identical_in_both_status_documents() {
 
     // The daemon dies on drop; the kernel releases its assertion with it.
     drop(daemon);
+}
+
+// ---- umux Core Session (#111) — end-to-end through the REAL binaries ----
+//
+// Assumptions (state-before-RED, #111/#112): the CLI grammar is
+// `umux core-session start|extend <n>{s|m|h}` / `stop`, `--json` prints the
+// pinned core.session object; the daemon refusals exit 5 with the code on
+// stderr (coreConflict while Core is ON); offline exits 3 promptly; a bad
+// duration is usage (exit 2). These tests are UNGATED — CI runs them on
+// all three platforms, so the session's wire behavior and the status shape
+// are pinned identically everywhere (the #112 parity gate at the CLI
+// level). The HOLD itself is platform-native (pmset / powercfg / logind);
+// its presence is asserted only where the tests can see the daemon's
+// honest `held` truth.
+
+/// The pinned core.session object of one `umux core-session … --json` run.
+fn session_json(stdout: &str) -> Value {
+    let value = json(stdout);
+    let mut keys: Vec<String> = value
+        .as_object()
+        .expect("the --json output is the core.session object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "active".to_string(),
+            "endsAt".to_string(),
+            "lastEndReason".to_string(),
+            "lastEndedAt".to_string(),
+            "remainingSecs".to_string(),
+        ],
+        "the CLI --json mirrors the pinned core.session fields: {value}"
+    );
+    value
+}
+
+// The full CLI lifecycle: start (hold + countdown) → extend (deadline
+// moves by exactly the extension) → stop (released + recorded). The flag
+// doc settles at every step.
+#[test]
+fn core_session_lifecycle_end_to_end() {
+    let store = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::start(store.path());
+    wait_until_running(store.path());
+
+    // start 2m — the window is absolute: endsAt ≈ now + 120.
+    let before = unix_now();
+    let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "2m", "--json"]);
+    let after = unix_now();
+    assert_eq!(code, Some(0), "start exits 0; stderr: {stderr}");
+    let session = session_json(&stdout);
+    assert_eq!(session["active"], true, "{session}");
+    let ends_at = session["endsAt"].as_u64().expect("endsAt is u64");
+    assert!(
+        (before + 119..=after + 121).contains(&ends_at),
+        "endsAt ≈ now+120s: {session}"
+    );
+
+    // The status document carries the same session (and the contract keys
+    // around it are untouched).
+    let status = json(&run_umux(store.path(), &["status", "--json"]).0);
+    let svc = &status["storestation"];
+    assert_eq!(svc["core"]["session"]["active"], true, "{svc}");
+    assert_eq!(svc["core"]["session"]["endsAt"].as_u64(), Some(ends_at));
+    #[cfg(target_os = "macos")]
+    // The held truth on macOS depends on AC/battery; on AC the session
+    // must flatten into sleepPrevented exactly like Core does.
+    if svc["sleepInstruction"].is_null() {
+        assert_eq!(svc["sleepPrevented"], true, "on AC the session holds: {svc}");
+    }
+
+    // The doc persists the live window.
+    let flag: Value = serde_json::from_str(
+        &std::fs::read_to_string(store.path().join("storestation.core.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(flag["enabled"], false);
+    assert_eq!(flag["session"]["endsAt"].as_u64(), Some(ends_at), "{flag}");
+
+    // extend 30m — the deadline moves by EXACTLY 1800s.
+    let (stdout, stderr, code) =
+        run_umux(store.path(), &["core-session", "extend", "30m", "--json"]);
+    assert_eq!(code, Some(0), "extend exits 0; stderr: {stderr}");
+    let session = session_json(&stdout);
+    assert_eq!(session["active"], true);
+    assert_eq!(
+        session["endsAt"].as_u64().unwrap(),
+        ends_at + 1800,
+        "extend is exact arithmetic on the absolute deadline: {session}"
+    );
+
+    // stop — released, recorded, doc settled.
+    let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "stop", "--json"]);
+    assert_eq!(code, Some(0), "stop exits 0; stderr: {stderr}");
+    let session = session_json(&stdout);
+    assert_eq!(session["active"], false);
+    assert_eq!(session["endsAt"], Value::Null);
+    assert_eq!(session["remainingSecs"], Value::Null);
+    assert_eq!(session["lastEndReason"], "stopped", "{session}");
+    assert!(session["lastEndedAt"].is_u64());
+
+    let status = json(&run_umux(store.path(), &["status", "--json"]).0);
+    assert_eq!(status["storestation"]["core"]["session"]["active"], false);
+    assert_eq!(status["storestation"]["sleepPrevented"], false);
+    let flag: Value = serde_json::from_str(
+        &std::fs::read_to_string(store.path().join("storestation.core.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(flag["session"], Value::Null, "the doc settled: {flag}");
+
+    // Stopping again is an honest refusal, not silence.
+    let (_stdout, stderr, code) = run_umux(store.path(), &["core-session", "stop"]);
+    assert_eq!(code, Some(5), "stop without a session is refused");
+    assert!(stderr.contains("noActiveSession"), "the code travels: {stderr}");
+
+    drop(daemon);
+}
+
+// story 146 at the CLI level: the session survives a daemon RESTART with
+// the SAME absolute endsAt — on every platform's real transport (UDS or
+// named pipe). This is the #112 parity proof for the restore semantics.
+#[test]
+fn core_session_survives_a_daemon_restart_with_the_same_deadline() {
+    let store = tempfile::tempdir().unwrap();
+    let ends_at;
+    {
+        let mut daemon = Daemon::start(store.path());
+        wait_until_running(store.path());
+        let (stdout, stderr, code) =
+            run_umux(store.path(), &["core-session", "start", "1h", "--json"]);
+        assert_eq!(code, Some(0), "start exits 0; stderr: {stderr}");
+        ends_at = session_json(&stdout)["endsAt"].as_u64().unwrap();
+        let (_, stderr, stop_code) = run_core_cli(store.path(), &["stop"]);
+        assert_eq!(stop_code, Some(0), "stop exits 0; stderr: {stderr}");
+        assert!(
+            daemon.wait_exit(Duration::from_secs(10)).is_some(),
+            "daemon exits after stop"
+        );
+    }
+
+    // A brand-new daemon on the same dir restores the session with the
+    // SAME absolute deadline — no client call ever touched it.
+    let mut daemon = Daemon::start(store.path());
+    let status = wait_until_running(store.path());
+    let svc = &status["storestation"];
+    assert_eq!(svc["core"]["session"]["active"], true, "restored: {svc}");
+    assert_eq!(
+        svc["core"]["session"]["endsAt"].as_u64(),
+        Some(ends_at),
+        "the restored deadline is the persisted absolute one: {svc}"
+    );
+    drop(daemon);
+}
+
+// story 148 end-to-end: start while Core is ON is refused (exit 5, the
+// code on stderr) and NOTHING changes; the same start succeeds after
+// Core off.
+#[test]
+fn core_session_start_while_core_on_is_refused_end_to_end() {
+    let store = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::start(store.path());
+    wait_until_running(store.path());
+
+    let (_, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
+    assert_eq!(code, Some(0), "`core on` exits 0; stderr: {stderr}");
+
+    let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "1h"]);
+    assert_eq!(code, Some(5), "the refusal exits 5; stdout: {stdout}");
+    assert!(stderr.contains("coreConflict"), "the code travels: {stderr}");
+
+    let status = json(&run_umux(store.path(), &["status", "--json"]).0);
+    let svc = &status["storestation"];
+    assert_eq!(svc["core"]["enabled"], true, "Core unchanged: {svc}");
+    assert_eq!(svc["core"]["session"]["active"], false, "no session: {svc}");
+
+    let (_, stderr, code) = run_core_cli(store.path(), &["core", "off"]);
+    assert_eq!(code, Some(0), "core off; stderr: {stderr}");
+    let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "1h", "--json"]);
+    assert_eq!(code, Some(0), "start after Core off; stderr: {stderr}");
+    assert_eq!(session_json(&stdout)["active"], true);
+
+    drop(daemon);
+}
+
+// A daemon-answered refusal in the OTHER direction too: core on while a
+// session is live is refused with coreConflict naming the way out; core
+// off during a session is allowed and does not end the session.
+#[test]
+fn core_on_while_a_session_is_live_is_refused_end_to_end() {
+    let store = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::start(store.path());
+    wait_until_running(store.path());
+
+    let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "1h", "--json"]);
+    assert_eq!(code, Some(0), "start; stderr: {stderr}");
+    let ends_at = session_json(&stdout)["endsAt"].as_u64().unwrap();
+
+    let (_stdout, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
+    assert_eq!(code, Some(5), "core on during a session is refused");
+    assert!(stderr.contains("coreConflict"), "{stderr}");
+
+    // core off during the session: the choice flips, the session runs on.
+    let (_, stderr, code) = run_core_cli(store.path(), &["core", "off"]);
+    assert_eq!(code, Some(0), "core off during a session; stderr: {stderr}");
+    let status = json(&run_umux(store.path(), &["status", "--json"]).0);
+    assert_eq!(status["storestation"]["core"]["session"]["active"], true);
+    assert_eq!(status["storestation"]["core"]["session"]["endsAt"].as_u64(), Some(ends_at));
+
+    drop(daemon);
+}
+
+// Offline: exit 3 promptly with the catalog code — the session lives in
+// the daemon, never in the CLI process.
+#[test]
+fn core_session_without_a_daemon_is_exit_3_promptly() {
+    let store = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let (_stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "5m"]);
+    let elapsed = started.elapsed();
+    assert_eq!(code, Some(3), "offline start is exit 3");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the offline answer is prompt (took {elapsed:?})"
+    );
+    assert!(
+        stderr.contains("storestationNotRunning"),
+        "stderr names the catalog code: {stderr}"
+    );
+}
+
+// Usage: the duration grammar is <n>{s|m|h}; a bad duration is exit 2
+// before any daemon is contacted.
+#[test]
+fn core_session_usage_errors_are_exit_2() {
+    let store = tempfile::tempdir().unwrap();
+    for bad in ["abc", "0", "90x", "", "m"] {
+        let (_stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", bad]);
+        assert_eq!(code, Some(2), "duration '{bad}' is usage exit 2");
+        assert!(stderr.contains("badParams"), "the code travels: {stderr}");
+    }
+    // A valid duration against an absent daemon is exit 3, not 2 — the
+    // grammar parsed fine.
+    let (_stdout, _stderr, code) = run_umux(store.path(), &["core-session", "start", "45s"]);
+    assert_eq!(code, Some(3));
 }

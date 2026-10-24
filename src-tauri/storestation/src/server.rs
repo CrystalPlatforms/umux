@@ -176,6 +176,15 @@ pub fn serve<F: Fn() -> bool>(prepared: Prepared, stop: F) {
         if stop() || state.shutdown.load(Ordering::SeqCst) {
             break;
         }
+        // Core Session deadline tick (#111): rides the loop's own cadence —
+        // every idle iteration is at most one ACCEPT_TICK, so expiry fires
+        // with no client call and no extra thread. The state is behind the
+        // one core mutex, held briefly.
+        state
+            .core
+            .lock()
+            .expect("core lock")
+            .expire_if_due(&state.config_dir, core::unix_now());
         match listener.next_client(&stop) {
             Ok(Some(stream)) => {
                 let state = Arc::clone(&state);
@@ -339,6 +348,13 @@ pub fn dispatch(
         "storestation.status" => {
             let (sessions, attached_clients) =
                 state.registry.lock().expect("registry lock").counts();
+            // Settle a due session expiry first — the status must report
+            // the truth, never a window that ended seconds ago.
+            state
+                .core
+                .lock()
+                .expect("core lock")
+                .expire_if_due(&state.config_dir, core::unix_now());
             let core_view = state.core.lock().expect("core lock").view();
             Ok(json!({
                 "proto": protocol::PROTOCOL_VERSION,
@@ -382,8 +398,62 @@ pub fn dispatch(
                 .lock()
                 .expect("core lock")
                 .set_enabled(&state.config_dir, enabled)
-                .map_err(|message| ErrorObj::new(codes::IO_ERROR, message, vec![]))?;
+                .map_err(|err| match err {
+                    core::CoreSetError::SessionActive => ErrorObj::new(
+                        codes::CORE_CONFLICT,
+                        "a Core Session is active and owns the sleep hold — stop it before turning Core on (the two holds never stack).",
+                        vec!["run: umux core-session stop".into()],
+                    ),
+                    core::CoreSetError::Persist(message) => {
+                        ErrorObj::new(codes::IO_ERROR, message, vec![])
+                    }
+                })?;
             Ok(state.core.lock().expect("core lock").view())
+        }
+        // umux Core Session (#111): start/extend a timed hold / stop it
+        // early. One gate: every refusal is decided here against the single
+        // CoreState. Params: `{"durationSecs": <integer seconds>}` (start
+        // and extend), `{}` for stop. All three answer the same core view
+        // as `core.set`.
+        op @ ("core.session.start" | "core.session.extend") => {
+            let duration_secs = request
+                .params
+                .get("durationSecs")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    ErrorObj::new(
+                        codes::BAD_PARAMS,
+                        "params need integer \"durationSecs\" (the window/extension in seconds)",
+                        vec![],
+                    )
+                })?;
+            if duration_secs == 0 {
+                return Err(ErrorObj::new(
+                    codes::BAD_PARAMS,
+                    "\"durationSecs\" must be at least 1",
+                    vec![],
+                ));
+            }
+            let now = core::unix_now();
+            let mut core = state.core.lock().expect("core lock");
+            // Settle a due expiry first: an extend/stop must hit the LIVE
+            // session, never a window that just ended.
+            core.expire_if_due(&state.config_dir, now);
+            let outcome = if op == "core.session.start" {
+                core.start_session(&state.config_dir, duration_secs, now)
+            } else {
+                core.extend_session(&state.config_dir, duration_secs)
+            };
+            outcome.map_err(core_session_refusal_error)?;
+            Ok(core.view())
+        }
+        "core.session.stop" => {
+            let now = core::unix_now();
+            let mut core = state.core.lock().expect("core lock");
+            core.expire_if_due(&state.config_dir, now);
+            core.stop_session(&state.config_dir, now)
+                .map_err(core_session_refusal_error)?;
+            Ok(core.view())
         }
         "sessions.list" => {
             let limit = parse_limit(&request.params)?;
@@ -460,6 +530,34 @@ pub fn dispatch(
             format!("unknown op \"{other}\""),
             vec!["see: umux agent-context".into()],
         )),
+    }
+}
+
+/// Map a CoreState session refusal to its enumerated wire error (the ONE
+/// gate — no other place builds these codes).
+fn core_session_refusal_error(refusal: core::SessionRefusal) -> ErrorObj {
+    match refusal {
+        core::SessionRefusal::CoreOn => ErrorObj::new(
+            codes::CORE_CONFLICT,
+            "umux Core is ON and already keeps this machine awake without a limit — a Core Session cannot run alongside it.",
+            vec![
+                "run: umux-storestation core off".into(),
+                "then: umux core-session start <n>{s|m|h}".into(),
+            ],
+        ),
+        core::SessionRefusal::CapExceeded => ErrorObj::new(
+            codes::SESSION_CAP_EXCEEDED,
+            "a Core Session may not span more than 24 hours from its start.",
+            vec!["check the live window: umux status --json (core.session)".into()],
+        ),
+        core::SessionRefusal::NoActiveSession => ErrorObj::new(
+            codes::NO_ACTIVE_SESSION,
+            "no active Core Session.",
+            vec!["start one: umux core-session start <n>{s|m|h}".into()],
+        ),
+        core::SessionRefusal::Persist(message) => {
+            ErrorObj::new(codes::IO_ERROR, message, vec![])
+        }
     }
 }
 

@@ -113,8 +113,41 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Timed awake sessions (umux Core Session, #111): hold the OS sleep
+    /// block for a bounded window (max 24 h per session) — Storestation
+    /// must be running, offline exits 3.
+    CoreSession {
+        #[command(subcommand)]
+        action: CoreSessionAction,
+    },
     /// Print a machine-readable description of this CLI (schema 1, #83)
     AgentContext,
+}
+
+#[derive(clap::Subcommand)]
+enum CoreSessionAction {
+    /// Start a session: hold the sleep block for DURATION (e.g. 90m, 2h, 45s)
+    Start {
+        /// How long the machine stays awake (`<n>{s|m|h}`; no suffix = seconds)
+        duration: String,
+        /// Print the machine-readable result (the core.session view)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Extend the active session by DURATION (cap: 24 h total from its start)
+    Extend {
+        /// How much time to add (`<n>{s|m|h}`; no suffix = seconds)
+        duration: String,
+        /// Print the machine-readable result (the core.session view)
+        #[arg(long)]
+        json: bool,
+    },
+    /// End the active session now and release the sleep block
+    Stop {
+        /// Print the machine-readable result (the core.session view)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -198,6 +231,7 @@ fn needs_store(command: &Command) -> bool {
             | Command::Status { .. }
             | Command::Sessions { .. }
             | Command::Attach { .. }
+            | Command::CoreSession { .. }
             | Command::AgentContext
     )
 }
@@ -712,6 +746,9 @@ fn main() {
         Some(Command::Attach { json: as_json, dry_run }) => {
             run_attach(as_json, dry_run);
         }
+        Some(Command::CoreSession { action }) => {
+            run_core_session(action);
+        }
         Some(Command::AgentContext) => {
             println!(
                 "{}",
@@ -750,6 +787,18 @@ fn run_status(as_json: bool) {
                     .pointer("/core/instruction")
                     .cloned()
                     .unwrap_or(Value::Null);
+                // umux Core Session (#111): the daemon's core.session rides
+                // along unchanged; a daemon older than the field reads as
+                // "no session" (additive rule — one schema everywhere).
+                let core_session = result.pointer("/core/session").cloned().unwrap_or_else(|| {
+                    serde_json::json!({
+                        "active": false,
+                        "endsAt": null,
+                        "remainingSecs": null,
+                        "lastEndedAt": null,
+                        "lastEndReason": null,
+                    })
+                });
                 let svc = serde_json::json!({
                     "running": true,
                     "version": result.get("daemonVersion"),
@@ -762,6 +811,7 @@ fn run_status(as_json: bool) {
                         "enabled": core_enabled,
                         "held": sleep_prevented,
                         "instruction": sleep_instruction,
+                        "session": core_session,
                     },
                     "sleepPrevented": sleep_prevented,
                     "sleepInstruction": sleep_instruction,
@@ -789,6 +839,13 @@ fn run_status(as_json: bool) {
                         "socket: {}",
                         umux_storestation::transport::endpoint_display(&dir)
                     );
+                    if svc["core"]["session"]["active"] == Value::Bool(true) {
+                        println!(
+                            "Core Session active — {} remaining (endsAt {}).",
+                            svc["core"]["session"]["remainingSecs"],
+                            svc["core"]["session"]["endsAt"]
+                        );
+                    }
                 }
             }
             Err(err) => {
@@ -806,7 +863,18 @@ fn run_status(as_json: bool) {
                     "storestation": {
                         "running": false,
                         "staleSocket": stale,
-                        "core": { "enabled": false, "held": false, "instruction": null },
+                        "core": {
+                            "enabled": false,
+                            "held": false,
+                            "instruction": null,
+                            "session": {
+                                "active": false,
+                                "endsAt": null,
+                                "remainingSecs": null,
+                                "lastEndedAt": null,
+                                "lastEndReason": null,
+                            },
+                        },
                         "sleepPrevented": false,
                         "sleepInstruction": null,
                     },
@@ -918,6 +986,194 @@ fn run_sessions_list(as_json: bool, limit: Option<usize>) {
                 "{}",
                 serde_json::to_string(&other.to_error_obj()).expect("error objects serialize")
             );
+            std::process::exit(5);
+        }
+    }
+}
+
+// --- umux Core Session (#111) --------------------------------------------------
+
+/// The Core Session duration grammar: `<n>{s|m|h}` — a positive integer with
+/// an optional unit (no suffix = seconds). Returns seconds; anything else is
+/// a usage error (exit 2 territory).
+fn parse_core_session_duration(text: &str) -> Result<u64, String> {
+    let trimmed = text.trim();
+    // The suffix is stripped by the match itself — a bare number and an
+    // explicit `s` both mean seconds, but only one of them has a suffix.
+    let (digits, unit_secs) = match trimmed.chars().last() {
+        Some('s' | 'S') => (&trimmed[..trimmed.len() - 1], 1u64),
+        Some('m' | 'M') => (&trimmed[..trimmed.len() - 1], 60),
+        Some('h' | 'H') => (&trimmed[..trimmed.len() - 1], 3600),
+        _ => (trimmed, 1),
+    };
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid duration '{trimmed}' — use <n>{{s|m|h}}, e.g. 90m"))?;
+    n.checked_mul(unit_secs)
+        .filter(|secs| *secs > 0)
+        .ok_or_else(|| format!("duration '{trimmed}' is out of range — the cap is 24h"))
+}
+
+/// Seconds → a compact human string ("1h 30m", "45s"), for the CLI's one-line
+/// answers. (The pretty HH:MM end-time display is Phase 4's Settings job.)
+fn format_core_session_duration(secs: u64) -> String {
+    let (hours, rest) = (secs / 3600, secs % 3600);
+    let (minutes, seconds) = (rest / 60, rest % 60);
+    let mut parts = Vec::new();
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{seconds}s"));
+    }
+    parts.join(" ")
+}
+
+/// `umux core-session start|extend|stop` (#111): one round trip to the daemon
+/// socket, same rules as every live command — Storestation REQUIRED (the
+/// session lives in the daemon; spawning one from here would be a second,
+/// divergent spawn path): offline exits 3 promptly; a daemon-answered
+/// refusal prints the enumerated error object and exits 5. `--json` mirrors
+/// the status document's `core.session` fields.
+fn run_core_session(action: CoreSessionAction) {
+    let (op, params, as_json) = match action {
+        CoreSessionAction::Start { duration, json } => match parse_core_session_duration(&duration)
+        {
+            Ok(secs) => (
+                "core.session.start",
+                serde_json::json!({ "durationSecs": secs }),
+                json,
+            ),
+            Err(message) => {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&umux_storestation::protocol::ErrorObj::new(
+                        umux_storestation::protocol::codes::BAD_PARAMS,
+                        message,
+                        vec!["example: umux core-session start 90m".into()],
+                    ))
+                    .expect("error objects serialize")
+                );
+                std::process::exit(2);
+            }
+        },
+        CoreSessionAction::Extend { duration, json } => match parse_core_session_duration(&duration)
+        {
+            Ok(secs) => (
+                "core.session.extend",
+                serde_json::json!({ "durationSecs": secs }),
+                json,
+            ),
+            Err(message) => {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&umux_storestation::protocol::ErrorObj::new(
+                        umux_storestation::protocol::codes::BAD_PARAMS,
+                        message,
+                        vec!["example: umux core-session extend 30m".into()],
+                    ))
+                    .expect("error objects serialize")
+                );
+                std::process::exit(2);
+            }
+        },
+        CoreSessionAction::Stop { json } => ("core.session.stop", serde_json::json!({}), json),
+    };
+
+    let dir = store_core::paths::config_dir();
+    let mut client = match umux_storestation::client::Client::connect(
+        &dir,
+        "cli",
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Ok(client) => client,
+        Err(umux_storestation::client::ConnectError::NotRunning { stale }) => {
+            if stale {
+                umux_storestation::server::cleanup(&dir);
+            }
+            eprintln!(
+                "{}",
+                serde_json::to_string(&umux_storestation::client::ConnectError::NotRunning {
+                    stale
+                }
+                .to_error_obj())
+                .expect("error objects serialize")
+            );
+            eprintln!("note: umux Core Session lives in the daemon — start it first: umux-storestation run");
+            std::process::exit(3);
+        }
+        Err(other) => {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&other.to_error_obj()).expect("error objects serialize")
+            );
+            std::process::exit(5);
+        }
+    };
+
+    match client.call(op, params) {
+        Ok(result) => {
+            // The daemon answers the full core view; the CLI surfaces the
+            // session half (the pinned core.session fields). A daemon older
+            // than the field reads as "no session" (additive rule).
+            let session = result.get("session").cloned().unwrap_or_else(|| {
+                serde_json::json!({
+                    "active": false,
+                    "endsAt": null,
+                    "remainingSecs": null,
+                    "lastEndedAt": null,
+                    "lastEndReason": null,
+                })
+            });
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&session).expect("session views serialize")
+                );
+                return;
+            }
+            let active = session["active"].as_bool() == Some(true);
+            let remaining = session["remainingSecs"].as_u64().unwrap_or(0);
+            let ends_at = session["endsAt"].as_u64().unwrap_or(0);
+            match op {
+                "core.session.start" => {
+                    if active {
+                        println!(
+                            "umux Core Session started — the machine stays awake for the next {} (endsAt {ends_at}).",
+                            format_core_session_duration(remaining)
+                        );
+                    } else {
+                        println!("umux Core Session started — but the sleep block is NOT held (check: umux status --json).");
+                    }
+                }
+                "core.session.extend" => {
+                    if active {
+                        println!(
+                            "umux Core Session extended — the machine stays awake for the next {} (endsAt {ends_at}).",
+                            format_core_session_duration(remaining)
+                        );
+                    } else {
+                        println!("umux Core Session extended — but the sleep block is NOT held (check: umux status --json).");
+                    }
+                }
+                _ => {
+                    if let Some(reason) = session["lastEndReason"].as_str() {
+                        match reason {
+                            "stopped" => println!("umux Core Session stopped — the sleep block is released."),
+                            _ => println!("umux Core Session is no longer active ({reason})."),
+                        }
+                    } else {
+                        println!("umux Core Session is no longer active.");
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
             std::process::exit(5);
         }
     }
@@ -1177,6 +1433,9 @@ fn agent_context() -> serde_json::Value {
             umux_storestation::protocol::codes::SESSION_NOT_FOUND,
             umux_storestation::protocol::codes::LIMIT_INVALID,
             umux_storestation::protocol::codes::IO_ERROR,
+            umux_storestation::protocol::codes::CORE_CONFLICT,
+            umux_storestation::protocol::codes::SESSION_CAP_EXCEEDED,
+            umux_storestation::protocol::codes::NO_ACTIVE_SESSION,
         ],
         // The live surface. `sessions list` joined at phase 2 (#84),
         // `attach` joins at phase 5 — each phase extends this table WITH
@@ -1207,12 +1466,48 @@ fn agent_context() -> serde_json::Value {
                 ],
             },
             {
+                "name": "core-session",
+                "class": "mutate",
+                "json": true,
+                "notes": [
+                    "requires Storestation running — offline exits 3 with storestationNotRunning",
+                    "start/extend take <n>{s|m|h} (no suffix = seconds); a session may span at most 24h from its start",
+                    "start is refused with coreConflict while umux Core is ON (and core on while a session is live); refusals exit 5 with the code on stderr",
+                ],
+            },
+            {
                 "name": "agent-context",
                 "class": "read",
                 "json": "always",
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod core_session_duration {
+    use super::parse_core_session_duration;
+
+    // The pinned grammar: <n>{s|m|h}, no suffix = seconds; the answer is
+    // always SECONDS (the wire carries durationSecs).
+    #[test]
+    fn the_grammar_maps_every_unit_to_seconds() {
+        assert_eq!(parse_core_session_duration("45s"), Ok(45));
+        assert_eq!(parse_core_session_duration("45"), Ok(45));
+        assert_eq!(parse_core_session_duration("90m"), Ok(5400));
+        assert_eq!(parse_core_session_duration("2h"), Ok(7200));
+        assert_eq!(parse_core_session_duration(" 90m "), Ok(5400), "surrounding space is tolerated");
+    }
+
+    // Refusals: non-numeric, bare unit, zero, and overflow all name the
+    // grammar instead of panicking.
+    #[test]
+    fn bad_durations_are_refused_with_the_grammar_hint() {
+        for bad in ["", "abc", "m", "90x", "0", "0m", "1.5h"] {
+            assert!(parse_core_session_duration(bad).is_err(), "'{bad}' is refused");
+        }
+        assert!(parse_core_session_duration("99999999999999999999h").is_err());
+    }
 }
 
 #[cfg(test)]

@@ -57,6 +57,12 @@ pub mod codes {
     pub const SESSION_NOT_FOUND: &str = "sessionNotFound";
     pub const LIMIT_INVALID: &str = "limitInvalid";
     pub const IO_ERROR: &str = "ioError";
+    // umux Core Session (#111) — the daemon-side refusals, one gate at the
+    // dispatch (server.rs). Additive catalog: older clients treat unknown
+    // codes as generic errors.
+    pub const CORE_CONFLICT: &str = "coreConflict";
+    pub const SESSION_CAP_EXCEEDED: &str = "sessionCapExceeded";
+    pub const NO_ACTIVE_SESSION: &str = "noActiveSession";
 }
 
 /// The one error shape shared by the CLI `--json` output and the wire

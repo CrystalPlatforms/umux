@@ -48,7 +48,7 @@ fn storestation_bin() -> PathBuf {
 /// The full v1 error catalog from plans/umux-storestation-cli-protocol.md —
 /// phase 2 documents ALL of it (clients treat future additions as generic;
 /// `badParams` joined at phase 2 with the session ops).
-const ERROR_CATALOG: [&str; 10] = [
+const ERROR_CATALOG: [&str; 13] = [
     "storestationNotRunning",
     "storestationAlreadyRunning",
     "staleSocket",
@@ -59,6 +59,11 @@ const ERROR_CATALOG: [&str; 10] = [
     "sessionNotFound",
     "limitInvalid",
     "ioError",
+    // Core Session (#111): the daemon-side refusals join the documented
+    // catalog with their feature (clients treat unknown codes as generic).
+    "coreConflict",
+    "sessionCapExceeded",
+    "noActiveSession",
 ];
 
 #[test]
