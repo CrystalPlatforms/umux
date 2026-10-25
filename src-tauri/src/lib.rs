@@ -1587,6 +1587,73 @@ async fn core_set_enabled(enable: bool) -> Result<serde_json::Value, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The Core Session ops (#114, phase 4): Settings drives the SAME daemon
+/// ops as the CLI (`core.session.start|extend|stop`) — one source of truth.
+/// The pessimistic mirror contract matches `core_set_enabled`: START first
+/// makes sure a daemon is running (the session's point is "every window
+/// closed"), then sends the op; the returned view is the truth the UI
+/// mirrors. Offline extend/stop are already the ended state (the session
+/// dies with the daemon), answered as success so the controls never hang
+/// on an absent daemon. Daemon-answered refusals (Core ON, the 24 h cap)
+/// surface as Err — the section renders them, never silence.
+#[tauri::command]
+async fn core_session_start(duration_secs: u64) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        spawn_daemon_if_absent()?;
+        core_session_op("core.session.start", serde_json::json!({ "durationSecs": duration_secs }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn core_session_extend(duration_secs: u64) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_session_op("core.session.extend", serde_json::json!({ "durationSecs": duration_secs }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn core_session_stop() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_session_op("core.session.stop", serde_json::json!({}))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One Core Session round trip over the socket (the shared body of the
+/// three commands above). Offline extend/stop read as the inactive view —
+/// nothing survives a dead daemon to extend or stop.
+fn core_session_op(op: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    let dir = config_dir();
+    let sent = match umux_storestation::client::Client::connect(
+        &dir,
+        "desktop",
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Ok(mut client) => client.call(op, params),
+        Err(umux_storestation::client::ConnectError::NotRunning { .. }) => Ok(
+            serde_json::json!({
+                "enabled": false,
+                "held": false,
+                "instruction": null,
+                "session": {
+                    "active": false,
+                    "endsAt": null,
+                    "remainingSecs": null,
+                    "lastEndedAt": null,
+                    "lastEndReason": null,
+                },
+            }),
+        ),
+        Err(other) => Err(other.to_error_obj()),
+    };
+    sent.map_err(|e| e.message)
+}
+
 /// Factory reset (#74): remove EVERY umux state file — workspaces.json (the
 /// workspace/layout/tree store) and settings.json — so the next launch boots
 /// first-run clean. The frontend restarts the app afterwards (plugin-process
@@ -1939,6 +2006,9 @@ pub fn run() {
             storestation_set_enabled,
             storestation_set_autostart,
             core_set_enabled,
+            core_session_start,
+            core_session_extend,
+            core_session_stop,
             reset_all,
             list_shells,
             open_settings_file,
@@ -2557,6 +2627,10 @@ mod tests {
     // hardcoded 'umux' matched nothing — banner clicks did nothing at all.
 
     // T-AUMID1: the script targets the given AUMID verbatim.
+    // (Windows-only: the script builder is a Win32 toast path — the gate
+    // keeps `cargo test` compiling on macOS/Linux, where the suite simply
+    // has no toast builder to exercise.)
+    #[cfg(target_os = "windows")]
     #[test]
     fn toast_script_targets_the_registered_aumid() {
         let script = windows_toast_script("t", "b", "com.umux.app", None);
@@ -2568,6 +2642,7 @@ mod tests {
 
     // T-AUMID2: the AUMID rides in the same single-quoted PowerShell literal
     // as every other string — a quote inside doubles up, never breaks out.
+    #[cfg(target_os = "windows")]
     #[test]
     fn toast_script_escapes_the_aumid_slot_too() {
         let script = windows_toast_script("t", "b", "com.um'x", None);
@@ -2611,6 +2686,7 @@ mod tests {
     }
 
     // T-TOAST-PROTO: a toast with a launch URL activates via the protocol.
+    #[cfg(target_os = "windows")]
     #[test]
     fn toast_script_with_launch_activates_protocol() {
         let script = windows_toast_script("t", "b", "com.umux.app", Some("umux-app://notification?p=4142"));
@@ -2620,6 +2696,7 @@ mod tests {
 
     // T-TOAST-NOPROTO: without a launch URL there is no activation attribute
     // (the plain toast behaves exactly as before).
+    #[cfg(target_os = "windows")]
     #[test]
     fn toast_script_without_launch_has_no_activation() {
         let script = windows_toast_script("t", "b", "com.umux.app", None);

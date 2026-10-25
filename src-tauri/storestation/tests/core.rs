@@ -100,6 +100,11 @@ fn status_core(stream: &mut std::os::unix::net::UnixStream) -> Value {
 // The set op flips the view, and the status op carries the SAME view — one
 // shape, two faces. On macOS held:true means the kernel assertion exists
 // (the pmset visibility itself is checked outside this process).
+//
+// Gate: NON-macOS since #113 — on macOS the daemon refuses `core.set(true)`
+// outright (the retirement gate), so the ON flip only exists elsewhere; the
+// macOS semantics live in the retirement tests below.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn core_set_flips_the_view_and_status_carries_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -144,8 +149,10 @@ fn core_set_flips_the_view_and_status_carries_it() {
 }
 
 // The flag survives a daemon RESTART: server B on the same dir comes up
-// with Core ON (and on macOS, holding the assertion) before any client
-// says a word — the "every window closed" contract, over the wire.
+// with Core ON (and holding the assertion where the platform honors it)
+// before any client says a word — the "every window closed" contract, over
+// the wire. Non-macOS since #113 (on macOS the ON state is unreachable).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn core_on_survives_a_daemon_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -244,3 +251,92 @@ fn a_client_to_an_absent_daemon_gets_the_catalog_error_promptly() {
 fn _read_is_available(_: &mut dyn Read) {}
 #[allow(unused)]
 fn _write_is_available(_: &mut dyn Write) {}
+
+// ---- macOS Core retirement (#113, story 147) -------------------------------
+//
+// Assumptions (state-before-RED): the refusal lives at the DAEMON —
+// `core.set(true)` answers the enumerated `coreRetired` with the message
+// NAMING `core-session start` (the refusal is also the pointer) and
+// `next` carrying the command; `core.set(false)` stays allowed. A legacy
+// `enabled: true` flag is migrated OFF at daemon start: persisted false,
+// nothing asserted, and `core.instruction` explains the Core Session
+// (beta) replacement — never silence.
+
+// macOS: the daemon's ONE gate — no client can flip Core on, and the off
+// path still works (it releases whatever stale hold exists).
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_core_set_on_is_refused_and_off_stays_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path());
+    let mut stream = server.connect();
+
+    let response = exchange(
+        &mut stream,
+        json!({ "id": 1, "op": "core.set", "params": { "enabled": true } }),
+    );
+    assert_eq!(
+        response["ok"], false,
+        "the retirement gate refuses the flip: {response}"
+    );
+    assert_eq!(response["error"]["code"], "coreRetired");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("core-session start"), "the refusal NAMES the replacement: {message}");
+    assert!(
+        response["error"]["next"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step.as_str().unwrap().contains("core-session start")),
+        "the pointer travels in next too: {response}"
+    );
+
+    let core = status_core(&mut stream);
+    assert_eq!(core["enabled"], false, "nothing flipped: {core}");
+    assert_eq!(core["held"], false, "nothing asserted: {core}");
+    assert_eq!(
+        core["session"]["active"], false,
+        "the core object keeps its full contract shape: {core}"
+    );
+
+    let response = exchange(
+        &mut stream,
+        json!({ "id": 2, "op": "core.set", "params": { "enabled": false } }),
+    );
+    assert_eq!(
+        response["ok"], true,
+        "core.set(false) stays allowed on macOS: {response}"
+    );
+    assert_eq!(response["result"]["enabled"], false);
+}
+
+// macOS: the migration over the wire — a legacy ON document comes back OFF
+// with no assertion and the honest instruction, and the DOCUMENT is
+// settled to false so the next daemon never sees the stale ON again.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_a_legacy_on_flag_migrates_off_at_daemon_start() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("storestation.core.json"),
+        serde_json::to_vec_pretty(&json!({ "enabled": true })).unwrap(),
+    )
+    .unwrap();
+
+    let server = TestServer::start(dir.path());
+    let mut stream = server.connect();
+    let core = status_core(&mut stream);
+    assert_eq!(core["enabled"], false, "migrated OFF: {core}");
+    assert_eq!(core["held"], false, "nothing asserted: {core}");
+    let instruction = core["instruction"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the migration is explained, never silent: {core}"));
+    assert!(instruction.contains("Core Session"), "{instruction}");
+
+    let doc: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("storestation.core.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(doc["enabled"], false, "the migrated flag PERSISTS false: {doc}");
+    assert_eq!(doc["session"], Value::Null, "{doc}");
+}

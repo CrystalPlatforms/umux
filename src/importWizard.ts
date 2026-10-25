@@ -170,3 +170,12 @@ export function isWindowsPlatform(): boolean {
     typeof navigator !== 'undefined' && /Win/i.test(navigator.platform)
   )
 }
+
+/// True on macOS — the ONE platform where umux Core (Always-On) is retired
+/// (#113): Settings renders the Core Session section instead of the Core
+/// switch. Same navigator.platform reading as isWindowsPlatform.
+export function isMacosPlatform(): boolean {
+  return (
+    typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
+  )
+}

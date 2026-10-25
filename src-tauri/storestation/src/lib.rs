@@ -29,6 +29,10 @@
 //! - [`gate`] — the daemon version gate (v1.7.6 P2, #102): the pure
 //!   (daemon version, app version) → verdict classification the driver
 //!   applies to the hello handshake at its one choke point.
+//! - [`notify`] — the daemon-side desktop notification (#114): the Core
+//!   Session expiry fires it with every umux window closed — the same
+//!   per-platform tools the `umux notify` CLI shells out to, by convention
+//!   (never a code dependency: the CLI crate pulls in its own copy).
 //! - [`console`] — Windows output routing for console-less launches of the
 //!   daemon binary (#101): pure decision (direct / attach parent console /
 //!   silent) with thin OS calls around it.
@@ -37,6 +41,7 @@ pub mod client;
 pub mod console;
 pub mod core;
 pub mod gate;
+pub mod notify;
 pub mod protocol;
 pub mod registry;
 pub mod server;

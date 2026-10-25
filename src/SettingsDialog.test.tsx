@@ -15,8 +15,14 @@
 //  - NOT tested here: persistence and live effect (WorkspaceShell glue).
 
 import { describe, it, expect, vi } from 'vitest'
-import { render, fireEvent, screen } from '@testing-library/react'
-import { SettingsDialog } from './SettingsDialog'
+import { render, fireEvent, screen, act } from '@testing-library/react'
+import {
+  SettingsDialog,
+  formatSessionClock,
+  formatSessionCountdown,
+  parseSessionDuration,
+  type CoreSessionStatus,
+} from './SettingsDialog'
 import { defaultSettings } from './settings'
 import type { UpdateState } from './updater'
 
@@ -1270,5 +1276,347 @@ describe('SettingsDialog app version label (#107)', () => {
   it('renders the available state without the version when none resolved', () => {
     renderWith({ state: { kind: 'available', version: '1.8.0' } })
     expect(screen.getByText('umux 1.8.0 is available.')).toBeTruthy()
+  })
+})
+
+// --- umux Core Session (#114, phase 4) --------------------------------------
+//
+// Assumptions (state-before-RED): the section MIRRORS the daemon's
+// `core.session` object (the shape the status contract pins) and reports
+// start/extend/stop UPWARD — the parent drives the SAME daemon ops the CLI
+// does. The length dialog only parses the `<n>{s|m|h}` grammar locally and
+// offers the default ("90m"); the 24 h cap stays the daemon's refusal, which
+// arrives as `coreStatus.error` and renders visibly. The end state renders
+// from the DAEMON's ended record (lastEndedAt), never from local guessing;
+// the countdown computes from the ABSOLUTE endsAt and asks the parent to
+// re-probe at the deadline. Platform split (#113): on macOS there is NO Core
+// switch — the section IS Core Session (BETA); Windows/Linux keep the Core
+// switch with the session controls beside it.
+describe('SettingsDialog Core Session (#114)', () => {
+  const setPlatform = (value: string) => {
+    Object.defineProperty(window.navigator, 'platform', { value, configurable: true })
+  }
+  const restorePlatform = () => {
+    // The jsdom value is a prototype getter; deleting the own property
+    // restores it.
+    delete (window.navigator as { platform?: string }).platform
+  }
+
+  const sessionProps = () => ({
+    onSessionStart: vi.fn(),
+    onSessionExtend: vi.fn(),
+    onSessionStop: vi.fn(),
+    onSessionExpiry: vi.fn(),
+  })
+
+  type CoreStatus = {
+    enabled: boolean
+    held: boolean
+    instruction: string | null
+    session?: CoreSessionStatus | null
+    error: string | null
+  }
+
+  const activeSession = (endsAt: number): CoreSessionStatus => ({
+    active: true,
+    endsAt,
+    remainingSecs: null,
+    lastEndedAt: null,
+    lastEndReason: null,
+  })
+
+  // Renders the dialog and OPENS the Core/Core Session view (every test
+  // below works inside that sub-view).
+  const renderCoreView = (opts: {
+    platform?: string
+    handlers?: ReturnType<typeof sessionProps>
+    coreStatus?: CoreStatus
+  }) => {
+    if (opts.platform != null) setPlatform(opts.platform)
+    const utils = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onCoreToggle={() => {}}
+        coreStatus={
+          opts.coreStatus ?? {
+            enabled: false,
+            held: false,
+            instruction: null,
+            error: null,
+          }
+        }
+        {...(opts.handlers ?? sessionProps())}
+      />,
+    )
+    fireEvent.click(utils.getByTestId('core-open'))
+    return utils
+  }
+
+  // macOS: no Core switch — the entry button and the section are Core
+  // Session, with the BETA badge and the Insomnia info line.
+  it('on macOS there is no Core switch — the section is Core Session (BETA) with the Insomnia line', () => {
+    setPlatform('MacIntel')
+    try {
+      const utils = render(
+        <SettingsDialog
+          settings={defaultSettings}
+          onChange={() => {}}
+          onClose={() => {}}
+          onCoreToggle={() => {}}
+          coreStatus={{ enabled: false, held: false, instruction: null, error: null }}
+          {...sessionProps()}
+        />,
+      )
+      expect(utils.getByTestId('core-open').textContent).toBe('umux Core Session')
+      fireEvent.click(utils.getByTestId('core-open'))
+      expect(utils.queryByTestId('toggle-core')).toBeNull()
+      expect(utils.getByTestId('core-session-beta').textContent).toBe('BETA')
+      expect(utils.getByTestId('core-session-insomnia').textContent).toContain('Insomnia')
+      expect(utils.getByTestId('toggle-core-session')).toBeTruthy()
+    } finally {
+      restorePlatform()
+    }
+  })
+
+  // Windows/Linux: the shipped Core switch stays and the session controls
+  // appear beside it (start button; the switch-with-dialog is macOS-only).
+  it('on Windows/Linux the Core switch stays and the session controls sit beside it', () => {
+    const { getByTestId, queryByTestId } = renderCoreView({})
+    expect(getByTestId('toggle-core')).toBeTruthy()
+    expect(queryByTestId('toggle-core-session')).toBeNull()
+    expect(getByTestId('core-session-start')).toBeTruthy()
+  })
+
+  // The macOS switch ON opens the length dialog with the default offered;
+  // applying reports start with SECONDS (the CLI grammar parsed locally).
+  it('the macOS switch opens the length dialog with the default offered; applying reports start', () => {
+    setPlatform('MacIntel')
+    try {
+      const handlers = sessionProps()
+      const { getByTestId, queryByTestId } = renderCoreView({ platform: 'MacIntel', handlers })
+      fireEvent.click(getByTestId('toggle-core-session'))
+      const input = getByTestId('core-session-duration') as HTMLInputElement
+      expect(input.value).toBe('90m')
+      fireEvent.change(input, { target: { value: '2h' } })
+      fireEvent.click(getByTestId('core-session-apply'))
+      expect(handlers.onSessionStart).toHaveBeenCalledTimes(1)
+      expect(handlers.onSessionStart).toHaveBeenCalledWith(7200)
+      expect(queryByTestId('core-session-dialog')).toBeNull()
+    } finally {
+      restorePlatform()
+    }
+  })
+
+  // An unparseable length stays in the dialog with a visible error and
+  // starts NOTHING (never a silent no-op, never a bad op).
+  it('an unparseable length shows a visible dialog error and starts nothing', () => {
+    setPlatform('MacIntel')
+    try {
+      const handlers = sessionProps()
+      const { getByTestId } = renderCoreView({ platform: 'MacIntel', handlers })
+      fireEvent.click(getByTestId('toggle-core-session'))
+      fireEvent.change(getByTestId('core-session-duration'), { target: { value: 'abc' } })
+      fireEvent.click(getByTestId('core-session-apply'))
+      expect(handlers.onSessionStart).not.toHaveBeenCalled()
+      expect(getByTestId('core-session-dialog-error').textContent).toContain('45s')
+      expect(getByTestId('core-session-dialog')).toBeTruthy()
+    } finally {
+      restorePlatform()
+    }
+  })
+
+  // Cancel backs out without starting anything (the one-reflex rule: Escape
+  // closes ONLY the dialog).
+  it('cancel and Escape back out of the length dialog without starting a session', () => {
+    setPlatform('MacIntel')
+    try {
+      const handlers = sessionProps()
+      const { getByTestId, queryByTestId } = renderCoreView({ platform: 'MacIntel', handlers })
+      fireEvent.click(getByTestId('toggle-core-session'))
+      fireEvent.click(getByTestId('core-session-cancel'))
+      expect(queryByTestId('core-session-dialog')).toBeNull()
+      expect(handlers.onSessionStart).not.toHaveBeenCalled()
+
+      fireEvent.click(getByTestId('toggle-core-session'))
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(queryByTestId('core-session-dialog')).toBeNull()
+      expect(handlers.onSessionStart).not.toHaveBeenCalled()
+      // The Core view itself survived — Escape was the dialog's key only.
+      expect(getByTestId('toggle-core-session')).toBeTruthy()
+    } finally {
+      restorePlatform()
+    }
+  })
+
+  // Toggling the macOS switch OFF reports the stop of the live session.
+  it('toggling the macOS switch OFF reports stop of the live session', () => {
+    setPlatform('MacIntel')
+    try {
+      const handlers = sessionProps()
+      const endsAt = Math.floor(Date.now() / 1000) + 600
+      const { getByTestId } = renderCoreView({
+        platform: 'MacIntel',
+        handlers,
+        coreStatus: {
+          enabled: false,
+          held: true,
+          instruction: null,
+          session: activeSession(endsAt),
+          error: null,
+        },
+      })
+      expect(getByTestId('toggle-core-session')).toHaveAttribute('aria-checked', 'true')
+      fireEvent.click(getByTestId('toggle-core-session'))
+      expect(handlers.onSessionStop).toHaveBeenCalledTimes(1)
+    } finally {
+      restorePlatform()
+    }
+  })
+
+  // The countdown renders from the ABSOLUTE endsAt, ticks once a second,
+  // and asks the parent to re-probe exactly ONCE at the deadline — the end
+  // state comes back from the daemon's settled mirror, not local guessing.
+  it('the countdown renders from endsAt, ticks, and re-probes once at the deadline', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-10-25T12:00:00'))
+      const handlers = sessionProps()
+      const endsAt = Math.floor(Date.now() / 1000) + 90
+      const { getByTestId } = renderCoreView({
+        handlers,
+        coreStatus: {
+          enabled: false,
+          held: true,
+          instruction: null,
+          session: activeSession(endsAt),
+          error: null,
+        },
+      })
+      expect(getByTestId('core-session-countdown').textContent).toContain('1m 30s')
+      expect(getByTestId('core-session-countdown').textContent).toContain('until')
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(getByTestId('core-session-countdown').textContent).toContain('1m 29s')
+      act(() => {
+        vi.advanceTimersByTime(90_000)
+      })
+      expect(handlers.onSessionExpiry).toHaveBeenCalledTimes(1)
+      act(() => {
+        vi.advanceTimersByTime(2000)
+      })
+      expect(handlers.onSessionExpiry).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // After expiry/stop the daemon's ended record is the end state: the time
+  // it names is the daemon's own lastEndedAt (formatted HH:MM).
+  it('after expiry/stop the ended state renders with the daemon-recorded time', () => {
+    const endedAt = 1761400000
+    const { getByTestId, queryByTestId } = renderCoreView({
+      coreStatus: {
+        enabled: false,
+        held: false,
+        instruction: null,
+        session: {
+          active: false,
+          endsAt: null,
+          remainingSecs: null,
+          lastEndedAt: endedAt,
+          lastEndReason: 'expired',
+        },
+        error: null,
+      },
+    })
+    expect(queryByTestId('core-session-countdown')).toBeNull()
+    expect(getByTestId('core-session-ended').textContent).toBe(
+      `Session ended at ${formatSessionClock(endedAt)}.`,
+    )
+  })
+
+  // The Windows/Linux session controls drive the SAME handlers (one source
+  // of truth with the CLI): extend opens the dialog in extend mode, stop
+  // reports immediately.
+  it('the Windows/Linux controls report extend and stop through the same handlers', () => {
+    const handlers = sessionProps()
+    const endsAt = Math.floor(Date.now() / 1000) + 3600
+    const { getByTestId, queryByTestId } = renderCoreView({
+      handlers,
+      coreStatus: {
+        enabled: false,
+        held: true,
+        instruction: null,
+        session: activeSession(endsAt),
+        error: null,
+      },
+    })
+    expect(queryByTestId('core-session-start')).toBeNull()
+    fireEvent.click(getByTestId('core-session-extend'))
+    const input = getByTestId('core-session-duration') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '30m' } })
+    fireEvent.click(getByTestId('core-session-apply'))
+    expect(handlers.onSessionExtend).toHaveBeenCalledTimes(1)
+    expect(handlers.onSessionExtend).toHaveBeenCalledWith(1800)
+
+    fireEvent.click(getByTestId('core-session-stop'))
+    expect(handlers.onSessionStop).toHaveBeenCalledTimes(1)
+  })
+
+  // A refusal (Core ON, the cap — daemon-answered) is VISIBLE: the parent's
+  // error lands in the section's error line, never silence.
+  it('a refusal surfaces as the visible error, never silence', () => {
+    setPlatform('MacIntel')
+    try {
+      const { getByTestId } = renderCoreView({
+        platform: 'MacIntel',
+        coreStatus: {
+          enabled: false,
+          held: false,
+          instruction: null,
+          error:
+            'umux Core (Always-On) is retired on macOS — `core-session start` (beta) replaced it as the way to keep this machine awake.',
+        },
+      })
+      expect(getByTestId('core-error').textContent).toContain('core-session start')
+    } finally {
+      restorePlatform()
+    }
+  })
+})
+
+// The pure session helpers (#114): the CLI's duration grammar, the compact
+// countdown, and the HH:MM clock the end state shows.
+describe('Core Session helpers (#114)', () => {
+  it('parseSessionDuration speaks the CLI grammar', () => {
+    expect(parseSessionDuration('90m')).toBe(5400)
+    expect(parseSessionDuration('45')).toBe(45)
+    expect(parseSessionDuration('45s')).toBe(45)
+    expect(parseSessionDuration('2h')).toBe(7200)
+    expect(parseSessionDuration(' 90m ')).toBe(5400)
+    expect(parseSessionDuration('0')).toBeNull()
+    expect(parseSessionDuration('90x')).toBeNull()
+    expect(parseSessionDuration('m')).toBeNull()
+    expect(parseSessionDuration('')).toBeNull()
+    expect(parseSessionDuration('abc')).toBeNull()
+  })
+
+  it('formatSessionCountdown renders h/m/s compactly and clamps at zero', () => {
+    expect(formatSessionCountdown(3725)).toBe('1h 02m 05s')
+    expect(formatSessionCountdown(65)).toBe('1m 05s')
+    expect(formatSessionCountdown(45)).toBe('45s')
+    expect(formatSessionCountdown(0)).toBe('0s')
+    expect(formatSessionCountdown(-5)).toBe('0s')
+  })
+
+  it('formatSessionClock renders a zero-padded local HH:MM', () => {
+    const d = new Date()
+    d.setHours(10, 5, 0, 0)
+    expect(formatSessionClock(Math.floor(d.getTime() / 1000))).toBe('10:05')
+    d.setHours(23, 59, 0, 0)
+    expect(formatSessionClock(Math.floor(d.getTime() / 1000))).toBe('23:59')
   })
 })

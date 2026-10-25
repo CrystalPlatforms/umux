@@ -1538,6 +1538,22 @@ body.is-dragging * {
   font-size: var(--text-xs);
 }
 
+/* The BETA badge (issue 114): the Core Session switch wears it on macOS — a
+   small quiet pill next to the label, never a headline. */
+.settings-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  margin-left: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  vertical-align: 1px;
+}
+
 .settings-switch {
   position: relative;
   flex-shrink: 0;
@@ -1548,7 +1564,15 @@ body.is-dragging * {
   border-radius: 11px;
   background: var(--bg-input);
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background 120ms ease, border-color 120ms ease,
+    transform 0.1s ease-out;
+}
+
+/* Press feedback (issue 101, spring rule): switches compress like every
+   other control — covers the Core Session switch (issue 114) and the
+   existing rows. */
+.settings-switch:active {
+  transform: scale(var(--press-scale));
 }
 
 .settings-switch__knob {

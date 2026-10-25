@@ -63,6 +63,10 @@ pub mod codes {
     pub const CORE_CONFLICT: &str = "coreConflict";
     pub const SESSION_CAP_EXCEEDED: &str = "sessionCapExceeded";
     pub const NO_ACTIVE_SESSION: &str = "noActiveSession";
+    // macOS Core retirement (#113, story 147): `core.set(true)` is refused
+    // at the daemon — the ONE gate no client can bypass; the message points
+    // at `core-session start`.
+    pub const CORE_RETIRED: &str = "coreRetired";
 }
 
 /// The one error shape shared by the CLI `--json` output and the wire

@@ -52,6 +52,11 @@ pub struct ServeState {
     /// the persisted flag was already applied in `prepare` (a Core ON
     /// daemon re-asserts before the first client ever connects).
     core: Mutex<core::CoreState>,
+    /// The desktop-notification boundary (#114): the Core Session expiry
+    /// posts through it with every umux window closed. Arc so the fire-
+    /// and-forget thread can own a copy; tests inject a recorder instead
+    /// of popping real toasts.
+    notifier: Arc<dyn Fn(&str, &str) + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -64,6 +69,16 @@ pub enum PrepareError {
 /// Make this config dir serveable: refuse if a live daemon owns the socket,
 /// clean any crash leftovers, bind, and write the pid file.
 pub fn prepare(config_dir: &Path) -> Result<Prepared, PrepareError> {
+    prepare_with_notifier(config_dir, Arc::new(crate::notify::show_swallowed))
+}
+
+/// [`prepare`] with an injected notifier — the desktop notification system
+/// is a system boundary, so tests substitute a recording fake and never
+/// pop real toasts.
+pub fn prepare_with_notifier(
+    config_dir: &Path,
+    notifier: Arc<dyn Fn(&str, &str) + Send + Sync>,
+) -> Result<Prepared, PrepareError> {
     std::fs::create_dir_all(config_dir).map_err(PrepareError::Io)?;
 
     // Liveness = a successful connect, nothing else.
@@ -103,8 +118,43 @@ pub fn prepare(config_dir: &Path) -> Result<Prepared, PrepareError> {
                 socketpath::session_pids_path(config_dir),
             )))),
             core: Mutex::new(core::CoreState::restore(config_dir)),
+            notifier,
         }),
     })
+}
+
+impl ServeState {
+    /// Settle a due session expiry and, when one fired, post the desktop
+    /// notification (#114, story 145) — daemon-side, so it reaches the user
+    /// with every umux window closed. Expiry ONLY: start/extend always have
+    /// a client looking at the answer.
+    fn settle_core_expiry(&self) -> bool {
+        let expired = self
+            .core
+            .lock()
+            .expect("core lock")
+            .expire_if_due(&self.config_dir, core::unix_now());
+        if expired {
+            expiry_notification(self);
+        }
+        expired
+    }
+}
+
+/// Fire-and-forget expiry notification: the platform tool runs on its own
+/// thread (a slow or hung notifier must never stall the accept loop or hold
+/// the core lock), and a thread-spawn failure just notes stderr — the
+/// expiry state itself is already settled.
+fn expiry_notification(state: &ServeState) {
+    let notifier = Arc::clone(&state.notifier);
+    let title = crate::notify::EXPIRY_TITLE.to_string();
+    let body = crate::notify::expiry_body(core::END_REASON_EXPIRED);
+    let spawned = std::thread::Builder::new()
+        .name("umux-session-notify".to_string())
+        .spawn(move || notifier(&title, &body));
+    if let Err(e) = spawned {
+        eprintln!("umux-storestation: could not spawn the notification thread: {e}");
+    }
 }
 
 /// The crash-recovery sweep (#88, Unix): a hard-killed daemon's owned shells
@@ -179,12 +229,9 @@ pub fn serve<F: Fn() -> bool>(prepared: Prepared, stop: F) {
         // Core Session deadline tick (#111): rides the loop's own cadence —
         // every idle iteration is at most one ACCEPT_TICK, so expiry fires
         // with no client call and no extra thread. The state is behind the
-        // one core mutex, held briefly.
-        state
-            .core
-            .lock()
-            .expect("core lock")
-            .expire_if_due(&state.config_dir, core::unix_now());
+        // one core mutex, held briefly; the notification (#114) posts off
+        // the loop's path.
+        state.settle_core_expiry();
         match listener.next_client(&stop) {
             Ok(Some(stream)) => {
                 let state = Arc::clone(&state);
@@ -349,12 +396,9 @@ pub fn dispatch(
             let (sessions, attached_clients) =
                 state.registry.lock().expect("registry lock").counts();
             // Settle a due session expiry first — the status must report
-            // the truth, never a window that ended seconds ago.
-            state
-                .core
-                .lock()
-                .expect("core lock")
-                .expire_if_due(&state.config_dir, core::unix_now());
+            // the truth, never a window that ended seconds ago (and the
+            // settled expiry posts its notification, #114).
+            state.settle_core_expiry();
             let core_view = state.core.lock().expect("core lock").view();
             Ok(json!({
                 "proto": protocol::PROTOCOL_VERSION,
@@ -404,6 +448,14 @@ pub fn dispatch(
                         "a Core Session is active and owns the sleep hold — stop it before turning Core on (the two holds never stack).",
                         vec!["run: umux core-session stop".into()],
                     ),
+                    // macOS Core retirement (#113, story 147): the message
+                    // NAMES the replacement command — the refusal is also
+                    // the pointer.
+                    core::CoreSetError::CoreRetired => ErrorObj::new(
+                        codes::CORE_RETIRED,
+                        "umux Core (Always-On) is retired on macOS — `core-session start` (beta) replaced it as the way to keep this machine awake.",
+                        vec!["run: umux core-session start <n>{s|m|h}".into()],
+                    ),
                     core::CoreSetError::Persist(message) => {
                         ErrorObj::new(codes::IO_ERROR, message, vec![])
                     }
@@ -438,22 +490,30 @@ pub fn dispatch(
             let mut core = state.core.lock().expect("core lock");
             // Settle a due expiry first: an extend/stop must hit the LIVE
             // session, never a window that just ended.
-            core.expire_if_due(&state.config_dir, now);
+            let expired = core.expire_if_due(&state.config_dir, now);
             let outcome = if op == "core.session.start" {
                 core.start_session(&state.config_dir, duration_secs, now)
             } else {
                 core.extend_session(&state.config_dir, duration_secs)
             };
+            drop(core);
+            if expired {
+                expiry_notification(state);
+            }
             outcome.map_err(core_session_refusal_error)?;
-            Ok(core.view())
+            Ok(state.core.lock().expect("core lock").view())
         }
         "core.session.stop" => {
             let now = core::unix_now();
             let mut core = state.core.lock().expect("core lock");
-            core.expire_if_due(&state.config_dir, now);
-            core.stop_session(&state.config_dir, now)
-                .map_err(core_session_refusal_error)?;
-            Ok(core.view())
+            let expired = core.expire_if_due(&state.config_dir, now);
+            let outcome = core.stop_session(&state.config_dir, now);
+            drop(core);
+            if expired {
+                expiry_notification(state);
+            }
+            outcome.map_err(core_session_refusal_error)?;
+            Ok(state.core.lock().expect("core lock").view())
         }
         "sessions.list" => {
             let limit = parse_limit(&request.params)?;

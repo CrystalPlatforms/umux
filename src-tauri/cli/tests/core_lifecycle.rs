@@ -131,6 +131,11 @@ fn wait_until_running(store_dir: &Path) -> Value {
 // #93 AC: `core on` flips it, `umux status --json` reports sleepPrevented
 // in sync, `core off` releases — and the OFFLINE document keeps the same
 // Core schema (phase 5's "identical field names everywhere" starts here).
+//
+// Gate: NON-macOS since #113 — on macOS `core on` is REFUSED by the daemon
+// (the retirement gate), so the flip only exists on Windows/Linux; the
+// macOS semantics live in the retirement tests at the bottom.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn core_on_off_flips_status_and_the_offline_doc_keeps_the_schema() {
     let store = tempfile::tempdir().unwrap();
@@ -185,8 +190,10 @@ fn core_on_off_flips_status_and_the_offline_doc_keeps_the_schema() {
 }
 
 // #93 AC: Core ON survives a daemon restart — stop, start again, the fresh
-// daemon reports it with no client call (and on macOS the assertion is
-// back: `held`/`sleepPrevented` true).
+// daemon reports it with no client call (and the assertion is back where
+// the platform honors it). Non-macOS since #113: on macOS the ON state is
+// unreachable (the daemon refuses it), so this contract exists elsewhere.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn core_on_survives_a_daemon_restart() {
     let store = tempfile::tempdir().unwrap();
@@ -284,12 +291,23 @@ fn core_schema_field_names_are_identical_in_both_status_documents() {
     // The offline document first: no daemon, no flag file.
     let offline = json(&run_umux(store.path(), &["status", "--json"]).0);
 
-    // Then the running document with Core ON, so the instruction
-    // semantics are exercised on every platform's honest state.
+    // Then the running document — with Core ON where the platform still
+    // offers it (non-macOS), so the instruction semantics are exercised;
+    // on macOS the retirement gate refuses the flip (#113) and the schema
+    // assertions below run against the migrated-OFF state, which carries
+    // exactly the same contract keys (the gate itself is exercised here).
     let mut daemon = Daemon::start(store.path());
     wait_until_running(store.path());
-    let (_, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
-    assert_eq!(code, Some(0), "`core on` exits 0; stderr: {stderr}");
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (_, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
+        assert_eq!(code, Some(0), "`core on` exits 0; stderr: {stderr}");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (_, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
+        assert_eq!(code, Some(5), "`core on` is refused on macOS; stderr: {stderr}");
+    }
     let running = json(&run_umux(store.path(), &["status", "--json"]).0);
 
     let core_keys = |svc: &Value| -> Vec<String> {
@@ -555,7 +573,10 @@ fn core_session_survives_a_daemon_restart_with_the_same_deadline() {
 
 // story 148 end-to-end: start while Core is ON is refused (exit 5, the
 // code on stderr) and NOTHING changes; the same start succeeds after
-// Core off.
+// Core off. Non-macOS since #113 — Core ON is unreachable there, so the
+// conflict simply cannot arise (the macOS start path has no Core to
+// conflict with; the retirement tests pin that).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn core_session_start_while_core_on_is_refused_end_to_end() {
     let store = tempfile::tempdir().unwrap();
@@ -586,6 +607,9 @@ fn core_session_start_while_core_on_is_refused_end_to_end() {
 // A daemon-answered refusal in the OTHER direction too: core on while a
 // session is live is refused with coreConflict naming the way out; core
 // off during a session is allowed and does not end the session.
+// Non-macOS since #113 (Core ON is unreachable there; on macOS `core on`
+// is refused `coreRetired` regardless of any session — pinned below).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn core_on_while_a_session_is_live_is_refused_end_to_end() {
     let store = tempfile::tempdir().unwrap();
@@ -643,4 +667,99 @@ fn core_session_usage_errors_are_exit_2() {
     // grammar parsed fine.
     let (_stdout, _stderr, code) = run_umux(store.path(), &["core-session", "start", "45s"]);
     assert_eq!(code, Some(3));
+}
+
+// ---- macOS Core retirement (#113, story 147) — through the REAL binaries --
+//
+// Assumptions (state-before-RED): `umux-storestation core on` on macOS
+// surfaces the daemon's refusal — exit 5, the `coreRetired` code on stderr,
+// and the `core-session start` pointer in BOTH the message and next;
+// `core off` succeeds. A legacy `enabled: true` flag migrates OFF at daemon
+// start: the status reports enabled:false, held:false, an instruction
+// naming Core Session, and the DOC reads false (persisted, not cosmetic).
+
+// macOS: the CLI faces the refusal honestly — exit 5, the catalog code,
+// the pointer — and `core off` keeps working (it releases stale holds).
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_core_on_is_refused_with_the_pointer_and_core_off_succeeds() {
+    let store = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::start(store.path());
+    wait_until_running(store.path());
+
+    let (stdout, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
+    assert_eq!(code, Some(5), "`core on` is refused on macOS; stdout: {stdout}");
+    assert!(stderr.contains("coreRetired"), "the catalog code travels: {stderr}");
+    assert!(
+        stderr.contains("core-session start"),
+        "the refusal carries the core-session start pointer: {stderr}"
+    );
+
+    let status = json(&run_umux(store.path(), &["status", "--json"]).0);
+    let svc = &status["storestation"];
+    assert_eq!(svc["core"]["enabled"], false, "nothing flipped: {svc}");
+    assert_eq!(svc["sleepPrevented"], false, "nothing asserted: {svc}");
+
+    let (_stdout, stderr, code) = run_core_cli(store.path(), &["core", "off"]);
+    assert_eq!(code, Some(0), "`core off` succeeds on macOS; stderr: {stderr}");
+
+    // The contract keys survive the retirement on the macOS documents too.
+    let (_, stderr, stop_code) = run_core_cli(store.path(), &["stop"]);
+    assert_eq!(stop_code, Some(0), "stop exits 0; stderr: {stderr}");
+    assert!(
+        daemon.wait_exit(Duration::from_secs(10)).is_some(),
+        "daemon exits after stop"
+    );
+    let offline = json(&run_umux(store.path(), &["status", "--json"]).0);
+    let off = &offline["storestation"];
+    for key in ["enabled", "held", "instruction", "session"] {
+        assert!(
+            off["core"].get(key).is_some(),
+            "the core contract keeps `{key}` on macOS offline: {off}"
+        );
+    }
+}
+
+// macOS: a legacy Core-ON document (a v1.7.5 leftover) migrates OFF at
+// daemon start — the status explains the swap, nothing is asserted, and
+// the doc is persisted false.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_a_legacy_core_on_flag_migrates_off_at_daemon_start() {
+    let store = tempfile::tempdir().unwrap();
+    std::fs::write(
+        store.path().join("storestation.core.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({ "enabled": true })).unwrap(),
+    )
+    .unwrap();
+
+    let mut daemon = Daemon::start(store.path());
+    let status = wait_until_running(store.path());
+    let svc = &status["storestation"];
+    assert_eq!(
+        svc["core"]["enabled"], false,
+        "the legacy flag migrated OFF with no client call: {svc}"
+    );
+    assert_eq!(svc["core"]["held"], false, "nothing asserted: {svc}");
+    assert_eq!(svc["sleepPrevented"], false, "no sleep block: {svc}");
+    let instruction = svc["core"]["instruction"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the migration is explained, never silent: {svc}"));
+    assert!(instruction.contains("Core Session"), "{instruction}");
+
+    // The migration PERSISTS: the doc reads false, so no daemon ever
+    // restores the retired ON state again.
+    let flag: Value = serde_json::from_str(
+        &std::fs::read_to_string(store.path().join("storestation.core.json"))
+            .expect("the Core flag file exists"),
+    )
+    .unwrap();
+    assert_eq!(flag["enabled"], false, "{flag}");
+
+    // And the retired state stays put: `core on` is still refused.
+    let (_stdout, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
+    assert_eq!(code, Some(5), "the gate holds after the migration; stderr: {stderr}");
+    assert!(stderr.contains("coreRetired"), "{stderr}");
+
+    drop(daemon);
 }

@@ -40,15 +40,47 @@ use umux_storestation::{server, socketpath};
 
 /// A running in-process daemon bound to a GIVEN dir (the restart test needs
 /// one tempdir across two server lifetimes); stops and joins on drop.
+///
+/// The notifier is injected (prepare_with_notifier): `start` uses a NO-OP so
+/// the suite never pops real desktop toasts, `start_recording` captures
+/// every (title, body) at the boundary — the emission is the contract, the
+/// real toast is the HITL walkthrough.
 struct TestServer {
     dir: PathBuf,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Every (title, body) the daemon posted, in order.
+type RecordedNotifications = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
 impl TestServer {
     fn start(dir: &Path) -> Self {
-        let prepared = server::prepare(dir).expect("prepare a fresh instance");
+        Self::start_with_notifier(dir, Arc::new(|_, _| {}))
+    }
+
+    /// Start with a RECORDING notifier — the test reads every notification
+    /// the daemon posted (#114).
+    fn start_recording(dir: &Path) -> (Self, RecordedNotifications) {
+        let calls: RecordedNotifications = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&calls);
+        let server = Self::start_with_notifier(
+            dir,
+            Arc::new(move |title: &str, body: &str| {
+                sink.lock()
+                    .expect("notifier lock")
+                    .push((title.to_string(), body.to_string()));
+            }),
+        );
+        (server, calls)
+    }
+
+    fn start_with_notifier(
+        dir: &Path,
+        notifier: Arc<dyn Fn(&str, &str) + Send + Sync>,
+    ) -> Self {
+        let prepared =
+            server::prepare_with_notifier(dir, notifier).expect("prepare a fresh instance");
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
@@ -420,6 +452,10 @@ fn expiry_auto_releases_with_no_client_call() {
 
 // #111 AC (story 148): start while Core is ON is refused coreConflict and
 // changes NOTHING — Core keeps its hold, no session appears.
+// Non-macOS since #113: on macOS Core cannot be turned on at all (the
+// daemon refuses it), so the conflict cannot arise; the macOS retirement
+// tests live in tests/core.rs.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn start_while_core_on_is_refused_and_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -476,7 +512,9 @@ fn start_while_core_on_is_refused_and_changes_nothing() {
 // The mirror refusal (one hold at a time, by construction): core.set(true)
 // while a session is live is refused coreConflict naming core-session, and
 // core.set(false) during a session flips ONLY the choice — the session's
-// hold is not the Core flip's to touch.
+// hold is not the Core flip's to touch. Non-macOS since #113 (the ON state
+// is unreachable there; on macOS `core on` is refused `coreRetired`).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn core_on_while_a_session_is_live_is_refused_and_off_keeps_the_session_hold() {
     let dir = tempfile::tempdir().unwrap();
@@ -594,4 +632,71 @@ fn a_restart_after_the_deadline_asserts_nothing_and_records_the_expiry() {
     .unwrap();
     assert_eq!(doc["enabled"], false);
     assert_eq!(doc["session"], Value::Null, "{doc}");
+}
+
+// #114 AC (the automated half): the daemon EMITS the expiry notification —
+// recorded at the injected boundary, so no real toast pops in the suite.
+// A STOP notifies NOTHING (expiry only — the plan's decision; start/extend
+// always have a client looking at the answer).
+#[test]
+fn expiry_posts_the_notification_and_stop_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let (server, calls) = TestServer::start_recording(dir.path());
+    let mut stream = server.connect();
+
+    let response = call(
+        &mut stream,
+        1,
+        "core.session.start",
+        json!({ "durationSecs": 2 }),
+    );
+    assert_eq!(response["ok"], true, "{response}");
+
+    // Wait for the daemon-side expiry (tick or status settle), then for the
+    // fire-and-forget notification thread to land in the recorder.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let core = status_core(&mut stream);
+        if core["session"]["active"] == Value::Bool(false) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the session did not expire within 10s: {core}"
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while calls.lock().expect("notifier lock").is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "no expiry notification arrived within 5s"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (title, body) = calls.lock().expect("notifier lock").last().unwrap().clone();
+    assert_eq!(title, "umux", "the notification carries the app label");
+    assert!(
+        body.contains("Core Session ended") && body.contains("sleep"),
+        "the body says what happened and what changes: {body}"
+    );
+    let after_expiry = calls.lock().expect("notifier lock").len();
+
+    // A stop is the user's own click: expiry-only means NO notification.
+    let response = call(
+        &mut stream,
+        2,
+        "core.session.start",
+        json!({ "durationSecs": 3600 }),
+    );
+    assert_eq!(response["ok"], true, "{response}");
+    let response = call(&mut stream, 3, "core.session.stop", json!({}));
+    assert_eq!(response["ok"], true, "{response}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        calls.lock().expect("notifier lock").len(),
+        after_expiry,
+        "a stop never notifies: {:?}",
+        calls.lock().expect("notifier lock")
+    );
 }

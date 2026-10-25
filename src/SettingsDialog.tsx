@@ -35,9 +35,86 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { defaultSettings, type Settings } from './settings'
-import { isWindowsPlatform } from './importWizard'
+import { isMacosPlatform, isWindowsPlatform } from './importWizard'
 import { downloadProgressText, type UpdateState } from './updater'
 import { pickerOptions, type ShellEntry } from './shellDetector'
+
+// The daemon's core.session object (#114), verbatim from the status
+// contract: absolute `endsAt` (unix seconds), the ended record riding for
+// the daemon's lifetime. The UI only renders and drives it.
+export type CoreSessionStatus = {
+  active: boolean
+  endsAt: number | null
+  remainingSecs: number | null
+  lastEndedAt: number | null
+  lastEndReason: 'expired' | 'stopped' | null
+}
+
+// Unix seconds → local wall clock "HH:MM" — the end state's time (the AC's
+// „sesja zakończona o HH:MM").
+export function formatSessionClock(unixSecs: number): string {
+  const d = new Date(unixSecs * 1000)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${two(d.getHours())}:${two(d.getMinutes())}`
+}
+
+// Seconds → a compact ticking countdown ("1h 24m 05s", "4m 05s", "45s").
+export function formatSessionCountdown(secs: number): string {
+  const s = Math.max(0, Math.floor(secs))
+  const two = (n: number) => String(n).padStart(2, '0')
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}h ${two(m)}m ${two(sec)}s`
+  if (m > 0) return `${m}m ${two(sec)}s`
+  return `${sec}s`
+}
+
+// The session length grammar, the CLI's own (`<n>{s|m|h}`, bare = seconds):
+// one vocabulary everywhere. Returns seconds, or null when unparseable —
+// the 24 h cap itself is the daemon's refusal (it surfaces visibly).
+export function parseSessionDuration(text: string): number | null {
+  const match = /^(\d+)([smh]?)$/.exec(text.trim())
+  if (match == null) return null
+  const n = Number(match[1])
+  if (n < 1) return null
+  const unit = match[2] === 'm' ? 60 : match[2] === 'h' ? 3600 : 1
+  return n * unit
+}
+
+// The live countdown (#114): ticks once a second, computed from the
+// ABSOLUTE `endsAt` (the daemon's contract — a sleeping renderer catches
+// up), never from a locally accumulated remainder. When the deadline
+// passes, `onExpired` fires ONCE so the parent re-probes the daemon: the
+// settled view (active=false, lastEndedAt, reason) is what renders the end
+// state — the mirror, not local guessing.
+function SessionCountdown({
+  endsAt,
+  onExpired,
+}: {
+  endsAt: number
+  onExpired: () => void
+}) {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const timer = setInterval(() => setTick((n) => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const remaining = endsAt - Date.now() / 1000
+  const firedRef = useRef(false)
+  useEffect(() => {
+    if (remaining <= 0 && !firedRef.current) {
+      firedRef.current = true
+      onExpired()
+    }
+  }, [remaining, onExpired])
+  return (
+    <p className="settings-status" data-testid="core-session-countdown">
+      Awake for another {formatSessionCountdown(remaining)} (until{' '}
+      {formatSessionClock(endsAt)}).
+    </p>
+  )
+}
 
 type ToggleProps = {
   label: string
@@ -131,6 +208,10 @@ export function SettingsDialog({
   storestationStatus = null,
   onCoreToggle,
   coreStatus = null,
+  onSessionStart,
+  onSessionExtend,
+  onSessionStop,
+  onSessionExpiry,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -203,8 +284,20 @@ export function SettingsDialog({
     enabled: boolean
     held: boolean
     instruction: string | null
+    session?: CoreSessionStatus | null
     error: string | null
   } | null
+  // The Core Session controls (#114): start/extend/stop report UPWARD and
+  // drive the SAME daemon ops the CLI uses (one source of truth). start/
+  // extend take SECONDS (the dialog parses the `<n>{s|m|h}` grammar
+  // locally, the daemon owns the refusals). Absent = no session UI.
+  onSessionStart?: (durationSecs: number) => void
+  onSessionExtend?: (durationSecs: number) => void
+  onSessionStop?: () => void
+  // The countdown reached the deadline: the parent re-probes the daemon,
+  // whose settled view (active=false, lastEndedAt) is the end state's
+  // source — the UI never declares expiry on its own.
+  onSessionExpiry?: () => void
 }) {
   // The sub-views (2026-10-02 rework, Adam): 'main' is the regular settings
   // page; 'storestation', 'core' and 'reset' are the dedicated screens the
@@ -222,6 +315,12 @@ export function SettingsDialog({
   const lidHelpShown =
     isWindowsPlatform() && coreStatus?.held === true && !!coreStatus.instruction
 
+  // macOS Core retirement (#113/#114): on macOS the persistent Core switch
+  // is retired at the daemon — the section IS Core Session (BETA). Windows/
+  // Linux keep the Core switch and get the session controls beside it.
+  const macosCore = isMacosPlatform()
+  const session = coreStatus?.session ?? null
+
   // Custom shell entry (#77, fix round 2): the "Custom…" menu item opens a
   // small dialog with the command field. The field prefills with the saved
   // command when one is in effect and it is not already a detected entry.
@@ -234,6 +333,15 @@ export function SettingsDialog({
     return shells.some((s) => s.launchCommand === saved) ? '' : saved
   })
 
+  // The Core Session length dialog (#114): the switch (macOS) or the Start/
+  // Extend buttons open it — a session starts only FROM the dialog, with
+  // the default length offered ("90m", the CLI's own example) prefilled
+  // every time. Same nested-overlay shape as the custom-shell dialog.
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false)
+  const [sessionDialogMode, setSessionDialogMode] = useState<'start' | 'extend'>('start')
+  const [sessionDuration, setSessionDuration] = useState('90m')
+  const [sessionDialogError, setSessionDialogError] = useState<string | null>(null)
+
   // Escape closes the dialog — the same dismissal key the rename/create
   // inputs use, so the app has one "back out" reflex everywhere. While the
   // custom-shell dialog is open, Escape closes ONLY that dialog; inside a
@@ -242,6 +350,10 @@ export function SettingsDialog({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (sessionDialogOpen) {
+        setSessionDialogOpen(false)
+        return
+      }
       if (customOpen) {
         setCustomOpen(false)
         return
@@ -254,7 +366,7 @@ export function SettingsDialog({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose, customOpen, view])
+  }, [onClose, customOpen, view, sessionDialogOpen])
 
   // The Import dropdown (HITL round): open state + close on any press outside
   // it — the same interaction pattern as the header's "+" dropdown.
@@ -307,6 +419,27 @@ export function SettingsDialog({
   // stray press can never wipe the store.
   const [resetArmed, setResetArmed] = useState(false)
 
+  const openSessionDialog = (mode: 'start' | 'extend') => {
+    setSessionDialogMode(mode)
+    setSessionDuration('90m')
+    setSessionDialogError(null)
+    setSessionDialogOpen(true)
+  }
+
+  const applySessionDialog = () => {
+    const secs = parseSessionDuration(sessionDuration)
+    if (secs == null) {
+      setSessionDialogError('Use a length like 45s, 90m or 2h.')
+      return
+    }
+    setSessionDialogOpen(false)
+    if (sessionDialogMode === 'extend') {
+      onSessionExtend?.(secs)
+    } else {
+      onSessionStart?.(secs)
+    }
+  }
+
   // The picker's menu rows and the label the button shows for the value in
   // effect ("Auto" when nothing is set). pickerOptions already appends a
   // saved custom command, so the current value is always on the list.
@@ -354,7 +487,9 @@ export function SettingsDialog({
             {view === 'storestation'
               ? 'umux Storestation'
               : view === 'core'
-                ? 'umux Core'
+                ? macosCore
+                  ? 'umux Core Session'
+                  : 'umux Core'
                 : view === 'core-lid-help'
                   ? 'umux Core'
                   : view === 'reset'
@@ -622,10 +757,10 @@ export function SettingsDialog({
             type="button"
             className="settings-nav-entry"
             data-testid="core-open"
-            aria-label="umux Core (Always-On)"
+            aria-label={macosCore ? 'umux Core Session' : 'umux Core (Always-On)'}
             onClick={() => setView('core')}
           >
-            umux Core (Always-On)
+            {macosCore ? 'umux Core Session' : 'umux Core (Always-On)'}
           </button>
         )}
 
@@ -706,12 +841,13 @@ export function SettingsDialog({
           </>
         )}
 
-        {/* The Core view itself (v1.7.5 phase 2, #94): Back, the Always-On
-            switch, the daemon status line and (when present) the platform
-            instruction — nothing else, same shape as the Storestation view.
-            The switch mirrors the DAEMON's reported state (coreStatus), not
-            a local setting: a failed op leaves the mirror untouched and the
-            error renders below, so nothing is ever silent. */}
+        {/* The Core view itself (v1.7.5 phase 2, #94; platform-aware since
+            #113/#114): Back, then — macOS: the Core Session switch (BETA
+            badge, Insomnia info line); Windows/Linux: the Always-On switch
+            with the session controls beside it. The switches mirror the
+            DAEMON's reported state (coreStatus), not local UI state: a
+            failed op leaves the mirror untouched and the error renders
+            below, so nothing is ever silent. */}
         {view === 'core' && onCoreToggle != null && (
           <>
             <button
@@ -722,21 +858,118 @@ export function SettingsDialog({
             >
               ← Back
             </button>
-            <div className="settings-row" data-testid="core-row">
-              <div className="settings-row__text">
-                <span className="settings-row__label">umux Core (Always-On)</span>
-                <span className="settings-row__description">
-                  Keeps your machine awake while it sits idle. The screen may
-                  turn off.
-                </span>
+            {macosCore ? (
+              /* macOS (#113/#114): no Core switch — this IS the section.
+                  Flipping it ON opens the length dialog (a session starts
+                  only from there); flipping it OFF stops the live session. */
+              <div className="settings-row" data-testid="core-session-row">
+                <div className="settings-row__text">
+                  <span className="settings-row__label">
+                    Core Session{' '}
+                    <span className="settings-badge" data-testid="core-session-beta">
+                      BETA
+                    </span>
+                  </span>
+                  <span
+                    className="settings-row__description"
+                    data-testid="core-session-insomnia"
+                  >
+                    Inspired by the Insomnia project — only the technology,
+                    no menu bar. Keeps this Mac awake for a time you pick,
+                    then ends by itself.
+                  </span>
+                </div>
+                <SettingsToggle
+                  label="Core Session"
+                  checked={session?.active ?? false}
+                  testId="toggle-core-session"
+                  onToggle={(next) => {
+                    if (next) {
+                      openSessionDialog('start')
+                    } else {
+                      onSessionStop?.()
+                    }
+                  }}
+                />
               </div>
-              <SettingsToggle
-                label="umux Core (Always-On)"
-                checked={coreStatus?.enabled ?? false}
-                testId="toggle-core"
-                onToggle={onCoreToggle}
-              />
-            </div>
+            ) : (
+              <div className="settings-row" data-testid="core-row">
+                <div className="settings-row__text">
+                  <span className="settings-row__label">umux Core (Always-On)</span>
+                  <span className="settings-row__description">
+                    Keeps your machine awake while it sits idle. The screen may
+                    turn off.
+                  </span>
+                </div>
+                <SettingsToggle
+                  label="umux Core (Always-On)"
+                  checked={coreStatus?.enabled ?? false}
+                  testId="toggle-core"
+                  onToggle={onCoreToggle}
+                />
+              </div>
+            )}
+            {/* The session controls and their live readouts (#114): on
+                Windows/Linux a Start/Extend/Stop row beside the Core switch;
+                on macOS the switch above IS the control, so only the
+                countdown and the end state render here. */}
+            {onSessionStart != null && (
+              <>
+                {!macosCore && (
+                  <div className="settings-row" data-testid="core-session-row">
+                    <div className="settings-row__text">
+                      <span className="settings-row__label">Core Session</span>
+                      <span className="settings-row__description">
+                        A timed awake window — the same sleep block, with an
+                        end time you pick.
+                      </span>
+                    </div>
+                    <div className="settings-import">
+                      {session?.active === true ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            data-testid="core-session-extend"
+                            onClick={() => openSessionDialog('extend')}
+                          >
+                            Extend…
+                          </button>{' '}
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            data-testid="core-session-stop"
+                            onClick={() => onSessionStop?.()}
+                          >
+                            Stop
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          data-testid="core-session-start"
+                          onClick={() => openSessionDialog('start')}
+                        >
+                          Start session…
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {session?.active === true && session.endsAt != null && (
+                  <SessionCountdown
+                    endsAt={session.endsAt}
+                    onExpired={() => onSessionExpiry?.()}
+                  />
+                )}
+                {session?.active !== true && session?.lastEndedAt != null && (
+                  <p className="settings-status" data-testid="core-session-ended">
+                    Session ended at {formatSessionClock(session.lastEndedAt)}.
+                  </p>
+                )}
+              </>
+            )}
             {storestationStatus != null && (
               <p className="settings-status" data-testid="core-status">
                 {storestationStatus.running
@@ -905,6 +1138,72 @@ export function SettingsDialog({
         </div>
       </div>
     </div>
+
+      {/* The Core Session length dialog (#114): the default length is
+          offered ("90m"), the CLI's own `<n>{s|m|h}` grammar parses
+          locally, and the 24 h cap stays the DAEMON's refusal (it surfaces
+          in the section, never silence). Escape/overlay/Cancel back out
+          without starting anything. */}
+      {sessionDialogOpen && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={sessionDialogMode === 'extend' ? 'Extend Core Session' : 'Core Session length'}
+          data-testid="core-session-dialog"
+          onClick={() => setSessionDialogOpen(false)}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-card__header">
+              <span className="modal-card__title">
+                {sessionDialogMode === 'extend' ? 'Extend Core Session' : 'Core Session'}
+              </span>
+            </div>
+            <div className="modal-card__message">
+              {sessionDialogMode === 'extend'
+                ? 'How much time should be added to the running session?'
+                : 'How long should the machine stay awake? The session ends by itself — nothing to remember.'}
+            </div>
+            <input
+              className="text-input"
+              data-testid="core-session-duration"
+              aria-label="Session length, e.g. 90m"
+              placeholder="e.g. 90m"
+              autoFocus
+              value={sessionDuration}
+              onChange={(e) => setSessionDuration(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  applySessionDialog()
+                }
+              }}
+            />
+            {sessionDialogError != null && (
+              <p className="settings-status settings-status--error" data-testid="core-session-dialog-error">
+                {sessionDialogError}
+              </p>
+            )}
+            <div className="modal-card__actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                data-testid="core-session-cancel"
+                onClick={() => setSessionDialogOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                data-testid="core-session-apply"
+                onClick={applySessionDialog}
+              >
+                {sessionDialogMode === 'extend' ? 'Add time' : 'Start session'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Custom shell command dialog (#77, fix round 2): opened by the
           picker's "Custom…" menu item. Escape/overlay/Cancel back out without

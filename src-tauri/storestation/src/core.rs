@@ -54,6 +54,11 @@ const BATTERY_INSTRUCTION: &str = "Running on battery power: macOS honors the Al
 const BACKEND_MISSING_INSTRUCTION: &str =
     "umux Core has no Always-On backend on this platform yet — support ships in a later v1.7.5 phase.";
 
+/// macOS Core retirement (#113, story 147): the honest status instruction
+/// that replaces a migrated-away Core flag. It names the replacement — the
+/// one honest way left to keep a Mac awake is a timed Core Session.
+const CORE_RETIRED_INSTRUCTION: &str = "umux Core (Always-On) was retired on macOS: your old Always-On switch has been turned off. Core Session (beta) replaces it — start a timed awake session with `umux core-session start <n>{s|m|h}` (e.g. 90m).";
+
 /// The Windows lid caveat (story 142): the `SetThreadExecutionState` hold
 /// stops IDLE sleep — but the lid-close action is a power-plan setting no
 /// daemon can touch, so closing the lid may still sleep the machine per
@@ -120,11 +125,14 @@ pub enum SessionRefusal {
     Persist(String),
 }
 
-/// Why `core.set(true)` was refused: a live session owns the hold until it
-/// ends (the exact mirror of the start refusal — one hold at a time).
+/// Why `core.set(true)` was refused. `SessionActive` is the mirror of the
+/// start refusal (one hold at a time); `CoreRetired` is the macOS
+/// retirement gate (#113) — on macOS the daemon refuses the flip for EVERY
+/// client (CLI, Settings, a hand-rolled socket client): no bypass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreSetError {
     SessionActive,
+    CoreRetired,
     Persist(String),
 }
 
@@ -192,6 +200,42 @@ pub struct CoreState {
     last_end_reason: Option<&'static str>,
 }
 
+/// macOS Core retirement (#113, story 147): migrate a legacy `enabled: true`
+/// flag OFF at daemon start — persisted back as `false` BEFORE anything is
+/// asserted, and the caller marks the state so the status instruction can
+/// explain the Core Session (beta) replacement. The flag is cleared, never
+/// left ON in the background: a hold nobody could switch off from Settings
+/// is a trap, not a migration (PO decision 2026-10-19). The session record
+/// (if any — a hand-edit; the daemon can never produce both fields) stays in
+/// the document so the normal restore/settle logic runs on a coherent doc.
+/// Other platforms: identity — the choice restores exactly as saved.
+#[cfg(target_os = "macos")]
+fn migrate_retired_core_flag(
+    config_dir: &Path,
+    enabled: bool,
+    session: Option<SessionWindow>,
+) -> (bool, bool) {
+    if !enabled {
+        return (false, false);
+    }
+    if let Err(e) = save_doc(config_dir, false, session) {
+        eprintln!("umux-storestation: could not persist the macOS Core migration: {e}");
+    }
+    eprintln!(
+        "umux-storestation: umux Core (Always-On) is retired on macOS — the old flag was switched off; Core Session (beta) replaces it (umux core-session start)."
+    );
+    (false, true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn migrate_retired_core_flag(
+    _config_dir: &Path,
+    enabled: bool,
+    _session: Option<SessionWindow>,
+) -> (bool, bool) {
+    (enabled, false)
+}
+
 impl CoreState {
     /// Daemon-start restore: read the document and re-assert whatever the
     /// user left running — Core ON, a live session, or nothing — BEFORE the
@@ -207,6 +251,9 @@ impl CoreState {
     /// restore is no exception (the unit tests pin the expiry arithmetic).
     pub fn restore_with_clock(config_dir: &Path, now: u64) -> CoreState {
         let (enabled, session) = load_doc(config_dir);
+        // macOS Core retirement (#113): a legacy ON flag is migrated off
+        // before any restore decision — see [`migrate_retired_core_flag`].
+        let (enabled, core_retired) = migrate_retired_core_flag(config_dir, enabled, session);
         // A document claiming BOTH holds at once is unreachable through the
         // daemon (each side refuses the other); if a hand-edit produced it,
         // Core — the primary v1.7.5 state — wins and the session record is
@@ -262,6 +309,12 @@ impl CoreState {
                 );
             }
         }
+        // The migration's honest channel (#113): the status instruction
+        // explains the retirement — unless a live hold owns the instruction
+        // already (its caveat must not be silenced by the migration note).
+        if core_retired && state.instruction.is_none() {
+            state.instruction = Some(CORE_RETIRED_INSTRUCTION.to_string());
+        }
         state
     }
 
@@ -272,7 +325,16 @@ impl CoreState {
     /// session's assertion slot. `on = false` is allowed everywhere and —
     /// while a session is live — touches ONLY the Core choice, never the
     /// session's hold.
+    ///
+    /// macOS Core retirement (#113, story 147): `on = true` is refused for
+    /// EVERY client at this one gate, before anything is read or written —
+    /// the choice, the document and the hold all stay untouched. `off`
+    /// stays allowed (it releases any stale hold).
     pub fn set_enabled(&mut self, config_dir: &Path, on: bool) -> Result<(), CoreSetError> {
+        #[cfg(target_os = "macos")]
+        if on {
+            return Err(CoreSetError::CoreRetired);
+        }
         if on && self.session.is_some() {
             return Err(CoreSetError::SessionActive);
         }
@@ -946,6 +1008,64 @@ mod tests {
         assert!(!state.enabled());
     }
 
+    // macOS Core retirement (#113, story 147): the state machine refuses
+    // `set_enabled(true)` at the ONE gate — before the doc, the choice or
+    // the hold is touched — and `off` stays allowed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_core_set_on_is_refused_and_off_stays_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        assert_eq!(
+            state.set_enabled(dir.path(), true),
+            Err(CoreSetError::CoreRetired),
+            "the retirement gate refuses the flip"
+        );
+        assert!(!state.enabled(), "the choice is untouched");
+        assert!(!state.held(), "nothing asserted");
+        assert_eq!(load_doc(dir.path()), (false, None), "the doc is untouched");
+        state.set_enabled(dir.path(), false).unwrap();
+        assert!(!state.enabled(), "off still works");
+    }
+
+    // macOS Core retirement (#113): the migration — a legacy `enabled: true`
+    // flag is PERSISTED back as false at daemon start, nothing is asserted,
+    // and the status instruction explains the Core Session (beta) swap
+    // (never silence).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_restore_migrates_a_legacy_on_flag_off() {
+        let dir = tempfile::tempdir().unwrap();
+        save_doc(dir.path(), true, None).unwrap();
+        let state = CoreState::restore(dir.path());
+        assert!(!state.enabled(), "the flag migrated OFF");
+        assert!(!state.held(), "nothing asserted");
+        let view = state.view();
+        let instruction = view["instruction"]
+            .as_str()
+            .expect("the migration is explained, never silent");
+        assert!(instruction.contains("Core Session"), "{instruction}");
+        assert_eq!(
+            load_doc(dir.path()),
+            (false, None),
+            "the migrated flag is persisted false, not just shown off"
+        );
+    }
+
+    // Off macOS (compiled everywhere else): the retirement gate does not
+    // exist — `core.set(true)` behaves exactly as shipped (the platform
+    // split, pinned from the other side).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_macos_core_set_on_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        state.set_enabled(dir.path(), true).unwrap();
+        assert!(state.enabled());
+        state.set_enabled(dir.path(), false).unwrap();
+        assert!(!state.enabled());
+    }
+
     // The view always carries all three contract keys (the wire shape the
     // status op and the core.set result share).
     #[test]
@@ -1301,7 +1421,10 @@ mod tests {
 
     // A doc claiming BOTH holds is unreachable through the daemon; if a
     // hand-edit produces one, Core wins and the session record is dropped
-    // without an end record (it never ran).
+    // without an end record (it never ran). Non-macOS since #113 — there,
+    // the flag migrates off and the live session record restores instead
+    // (the macOS twin below).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn restore_prefers_core_when_the_doc_claims_both_holds() {
         let dir = tempfile::tempdir().unwrap();
@@ -1314,10 +1437,37 @@ mod tests {
         assert_eq!(state.last_end_reason, None);
     }
 
+    // macOS twin (#113): the BOTH-holds hand-edit migrates the flag off and
+    // lets the live session record restore — there is no Core to win on
+    // macOS, and the bounded session is the only legal hold there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_restore_migrates_the_flag_and_lets_a_live_session_record_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = unix_now();
+        save_doc(
+            dir.path(),
+            true,
+            Some(SessionWindow { started_at: now, ends_at: now + 3600 }),
+        )
+        .unwrap();
+        let state = CoreState::restore_with_clock(dir.path(), now);
+        assert!(!state.enabled(), "the flag migrated OFF");
+        assert!(state.session_active(), "the live session record restored");
+        assert_eq!(
+            load_doc(dir.path()).1,
+            Some(SessionWindow { started_at: now, ends_at: now + 3600 }),
+            "the doc stayed coherent with the restored state"
+        );
+    }
+
     // The mirror refusal: core.set(true) while a session is live is
     // refused before anything is persisted; core.set(false) during a
     // session flips ONLY the choice — the session's window survives in
-    // both the state and the doc.
+    // both the state and the doc. Non-macOS since #113: on macOS the
+    // retirement gate answers first (Core ON cannot exist there), pinned
+    // by macos_core_set_on_is_refused_and_off_stays_allowed.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn core_set_refusals_and_off_during_a_session() {
         let dir = tempfile::tempdir().unwrap();

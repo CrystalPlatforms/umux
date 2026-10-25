@@ -1304,10 +1304,20 @@ export function WorkspaceShell() {
   // answer. Same pessimistic contract as the Storestation toggles: the op
   // must succeed before the mirror adopts it; a failure leaves the mirror
   // untouched and surfaces the error in the Core view (never silent).
+  type CoreSessionView = {
+    active: boolean
+    endsAt: number | null
+    remainingSecs: number | null
+    lastEndedAt: number | null
+    lastEndReason: 'expired' | 'stopped' | null
+  }
   type CoreView = {
     enabled: boolean
     held: boolean
     instruction: string | null
+    // The Core Session half (#114): the daemon reports it inside the same
+    // core view; an older daemon (no session key) reads as no session.
+    session?: CoreSessionView | null
   }
   const [coreMirror, setCoreMirror] = useState<CoreView | null>(null)
   const [coreError, setCoreError] = useState<string | null>(null)
@@ -1409,6 +1419,32 @@ export function WorkspaceShell() {
         })
         .catch((e) => {
           console.error('core_set_enabled failed:', e)
+          setCoreError(typeof e === 'string' ? e : String(e))
+          refreshStorestationStatus()
+        })
+    },
+    [refreshStorestationStatus],
+  )
+
+  // The Core Session controls (#114): the SAME daemon ops the CLI drives
+  // (`core.session.start|extend|stop` — one source of truth), the same
+  // pessimistic mirror as the Core toggle. A refusal (Core ON, the 24 h
+  // cap) surfaces as the section's error, never silence.
+  const applySessionOp = useCallback(
+    (
+      command: 'core_session_start' | 'core_session_extend' | 'core_session_stop',
+      durationSecs?: number,
+    ) => {
+      setCoreError(null)
+      const params: Record<string, unknown> =
+        durationSecs != null ? { durationSecs } : {}
+      invoke<CoreView>(command, params)
+        .then((view) => {
+          setCoreMirror(view)
+          refreshStorestationStatus()
+        })
+        .catch((e) => {
+          console.error(`${command} failed:`, e)
           setCoreError(typeof e === 'string' ? e : String(e))
           refreshStorestationStatus()
         })
@@ -4339,6 +4375,10 @@ export function WorkspaceShell() {
           onStorestationAutostartToggle={applyStorestationAutostart}
           storestationStatus={storestationStatus}
           onCoreToggle={applyCoreToggle}
+          onSessionStart={(secs) => applySessionOp('core_session_start', secs)}
+          onSessionExtend={(secs) => applySessionOp('core_session_extend', secs)}
+          onSessionStop={() => applySessionOp('core_session_stop')}
+          onSessionExpiry={refreshStorestationStatus}
           coreStatus={{
             // The mirror (daemon's truth). null mirror = a daemon that has
             // not reported (or is gone) — the switch reads OFF, the honest
@@ -4346,6 +4386,7 @@ export function WorkspaceShell() {
             enabled: coreMirror?.enabled ?? false,
             held: coreMirror?.held ?? false,
             instruction: coreMirror?.instruction ?? null,
+            session: coreMirror?.session ?? null,
             error: coreError,
           }}
         />
