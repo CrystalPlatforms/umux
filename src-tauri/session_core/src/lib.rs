@@ -14,6 +14,9 @@
 //!   birth; replay is consumed by phase 5.
 //! - [`escape_boundary`] — where a replay window may start so it never
 //!   begins inside an escape sequence (#115). Pure companion to `ring`.
+//! - [`queries`] — which interrogation sequences a REPLAY must drop so a
+//!   fresh terminal never answers them into the live shell (#120). Pure
+//!   companion to `escape_boundary`; the live stream stays byte-identical.
 //! - [`title`] — the passive OSC 0/2 terminal-title scanner. Reads bytes
 //!   to NOTICE a title change, never mutates anything — the byte-identical
 //!   rule (normal output passes through untouched) holds everywhere.
@@ -25,6 +28,7 @@
 
 pub mod escape_boundary;
 pub mod pty_service;
+pub mod queries;
 pub mod ring;
 pub mod title;
 

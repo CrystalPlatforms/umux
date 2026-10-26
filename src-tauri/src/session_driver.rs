@@ -229,13 +229,39 @@ pub struct DaemonDriver {
     ssh: Mutex<SshManager>,
 }
 
-#[derive(Default)]
+/// App-side ids for DAEMON sessions start here — disjoint from the
+/// in-process engine's id space (issue #120, macOS 2026-10-23).
+///
+/// The in-process PtyService mints its handle ids from 0 and the daemon map
+/// used to mint from 0 too, but BOTH emit on the shared `pty_output` event
+/// (SSH got its own channel instead — see ssh_open in lib.rs; the daemon
+/// panels are local panels as far as the UI knows, so the channel must stay
+/// shared). The moment both backends own live sessions at once — the boot
+/// fallback: the first panels open while the daemon is still unreachable
+/// (CONNECT_RETRY_BACKOFF) and land in-process, the later ones daemon-side,
+/// or a wedged daemon that recovers — the two counters overlap and TWO
+/// panels share one numeric id: each receives the other's output and cwd
+/// reports (the history-in-the-wrong-tab + wrong-folder-name symptoms), and
+/// one routing entry decides both panels' keystrokes (the stuck-input
+/// symptom). A base of 2^31 puts the daemon's ids where the in-process
+/// counter cannot follow (it would need 2^31 opens to reach it).
+pub const DAEMON_APP_ID_BASE: u32 = 0x8000_0000;
+
 struct IdMap {
     next_id: u32,
     /// app id → (daemon session id, dispatcher feed token). pty_close uses
     /// the token to detach; when it was the session's last panel, the whole
     /// dispatcher tears down.
     by_app: HashMap<u32, (String, u64)>,
+}
+
+impl IdMap {
+    fn new() -> Self {
+        IdMap {
+            next_id: DAEMON_APP_ID_BASE,
+            by_app: HashMap::new(),
+        }
+    }
 }
 
 /// Why `DaemonDriver::connect` did not produce a usable daemon connection
@@ -367,7 +393,7 @@ impl DaemonDriver {
     fn from_client(client: umux_storestation::client::PersistentClient) -> Self {
         DaemonDriver {
             client,
-            map: Mutex::new(IdMap::default()),
+            map: Mutex::new(IdMap::new()),
             open_slots: Mutex::new(HashMap::new()),
             dispatchers: Mutex::new(HashMap::new()),
             ssh: Mutex::new(SshManager::new()),
@@ -1179,6 +1205,27 @@ impl SessionCore for RouterDriver {
 #[cfg(test)]
 mod connect_error_tests {
     use super::*;
+
+    // The #120 id-space invariant: a daemon app id can never collide with
+    // an in-process handle id. The two counters share the `pty_output`
+    // channel (SSH dodged that with its own channel — daemon panels are
+    // local panels to the UI), so the daemon's ids start at 2^31, where
+    // the in-process counter (one increment per open) cannot follow.
+    // Guards the base against a revert to a plain Default (next_id=0) —
+    // the exact shape of the wrong-tab-history / wrong-folder-name bug.
+    #[test]
+    fn daemon_app_ids_start_disjoint_from_in_process() {
+        let map = IdMap::new();
+        assert!(
+            map.next_id >= DAEMON_APP_ID_BASE,
+            "the daemon id counter must start at the disjoint base, got {}",
+            map.next_id
+        );
+        assert!(
+            DAEMON_APP_ID_BASE >= 0x8000_0000,
+            "the base must sit beyond any plausible in-process counter value"
+        );
+    }
 
     // The boot-path audit (#102 AC): every failure shape the handshake and
     // transport can hand the driver maps to a TYPED outcome — offline stays

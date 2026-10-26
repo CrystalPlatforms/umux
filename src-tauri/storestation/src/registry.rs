@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 
 use session_core::escape_boundary;
 use session_core::pty_service::{PtyHandle, PtyService};
+use session_core::queries;
 use session_core::{ring, title};
 
 use crate::protocol::{codes, ErrorObj};
@@ -359,8 +360,17 @@ impl Registry {
         // (e.g. the echoed DA1 answer `\x1b[?1;2c`) would replay the
         // sequence's headless tail — `1;2c1;2c…` rendered as literal text
         // on every reattach, the macOS restart garbage.
+        //
+        // Alignment alone was not enough (#120, macOS 2026-10-23): an INTACT
+        // interrogation sequence replays fine and a fresh xterm ANSWERS it
+        // into the session's input — a shell at a prompt echoes the answer
+        // as visible `1;2c` text, one more run per reattach. The replay is
+        // a reconstruction, so the queries drop whole (queries module);
+        // the LIVE stream — ring capture and subscriber fan-out below —
+        // stays byte-identical, where the byte policy actually lives.
         let snapshot = ring.snapshot();
-        let replay = escape_boundary::replay_slice(&snapshot, REPLAY_BUDGET);
+        let aligned = escape_boundary::replay_slice(&snapshot, REPLAY_BUDGET);
+        let replay = queries::strip_device_queries(aligned);
         for chunk in replay.chunks(replay_chunk_len(id.len())) {
             let _ = outbound.send(Outbound::Data {
                 session: id.to_string(),
