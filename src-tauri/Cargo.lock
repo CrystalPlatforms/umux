@@ -121,6 +121,7 @@ dependencies = [
  "base64 0.22.1",
  "libc",
  "log",
+ "mac-notification-sys",
  "portable-pty",
  "reqwest 0.13.4",
  "serde",

@@ -698,18 +698,23 @@ impl Notifier for NativeNotifier {
     }
 }
 
-// macOS (issue #68): every notification used to go through `osascript`, so
-// macOS attributed the banner to **Script Editor** — the AppleScript runtime —
-// no matter who sent it. Two paths now live behind the same `Notifier` trait:
-//  - Bundled app (running from umux.app/…/MacOS/umux): post through
-//    UNUserNotificationCenter via tauri-plugin-notification, so the banner
-//    carries the umux name and icon. UNUserNotificationCenter refuses to post
-//    from an UNBUNDLED process — that is exactly why the split exists. On any
-//    error (permission denied/revoked, runtime refusal) we fall back to
-//    osascript, so a notification is never lost.
-//  - Unbundled binary (`tauri dev`): straight to osascript — the pre-#68
-//    behavior, which keeps the zero-cost policy (no codesign requirement).
-// Linux and Windows keep their single `NativeNotifier` path, unchanged.
+// macOS notifications (#68, click-to-navigate since #119): the BUNDLED app
+// posts through UNUserNotificationCenter via mac-notification-sys — the same
+// crate the notification plugin drives on macOS, used DIRECTLY because only
+// its delegate exposes what the plugin does not: WHICH notification the user
+// clicked. Attribution is the app's own bundle id (umux name + icon, the #68
+// HITL check); on any delivery error we fall back to osascript, so a
+// notification is never lost. The UNBUNDLED dev binary keeps the pre-#68
+// behavior — straight to osascript: an unbundled process cannot post through
+// UNUserNotificationCenter reliably (macOS HITL 2026-10-26: spoofing
+// com.umux.app swallowed every post, spoofing com.apple.Terminal delivered
+// nothing on this machine either), and osascript is the always-arrives path.
+// osascript banners cannot carry click payloads, so a dev ping degrades to
+// a plain notification — click-to-navigate verifies on the bundled build.
+// The actionable path mirrors Linux's `notify-send --wait`: a detached
+// thread waits for the user's response — clicking the banner or its "Open"
+// action emits `notification_activated` with the EXACT payload; dismissing
+// or ignoring never navigates.
 #[cfg(target_os = "macos")]
 fn is_bundled_app(exe: &std::path::Path) -> bool {
     exe.to_string_lossy().contains(".app/Contents/MacOS")
@@ -740,37 +745,94 @@ impl Notifier for OsascriptNotifier {
     }
 }
 
-/// Bundled-app notifier: UNUserNotificationCenter through the notification
-/// plugin (needs the AppHandle, hence the field). Not unit-tested — its
-/// behavior is Adam's HITL check on macOS (umux attribution in the banner).
+/// The real macOS notifier (see the module comment above). Not unit-tested —
+/// its behavior is Adam's HITL check on macOS (umux attribution; a click
+/// navigates to the origin panel).
 #[cfg(target_os = "macos")]
-struct BundledNotifier {
+struct MacNotifier {
     app: AppHandle,
 }
 
 #[cfg(target_os = "macos")]
-impl Notifier for BundledNotifier {
+impl MacNotifier {
+    fn new(app: AppHandle) -> Self {
+        // The bundle identifier decides attribution ("umux", the umux
+        // icon): set it ONCE, before the first post. Without it the
+        // notification would attribute to Finder (the crate's default).
+        static SET_APPLICATION: std::sync::Once = std::sync::Once::new();
+        SET_APPLICATION.call_once(|| {
+            let id = app.config().identifier.clone();
+            if let Err(e) = mac_notification_sys::set_application(&id) {
+                log::warn!("[notify] set_application({id}) failed: {e:?}");
+            }
+        });
+        Self { app }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Notifier for MacNotifier {
     fn show(&self, summary: &str, body: &str) {
-        use tauri_plugin_notification::NotificationExt;
-        let result = self
-            .app
-            .notification()
-            .builder()
-            .title(summary)
-            .body(body)
-            .show();
-        match result {
-            Ok(()) => log::info!("[notify] dispatched (UNUserNotificationCenter): summary={summary:?} body={body:?}"),
+        // Fire-and-forget: `asynchronous` returns as soon as the OS accepts
+        // the post — the terminal-stream thread must never wait on delivery.
+        let mut options = mac_notification_sys::Notification::new();
+        options.asynchronous(true);
+        match mac_notification_sys::send_notification(summary, None, body, Some(&options)) {
+            Ok(_) => log::info!("[notify] dispatched (mac): summary={summary:?} body={body:?}"),
             Err(e) => {
                 // Fallback, not failure: attribution is cosmetic, delivery is
-                // the contract. osascript always works (it is what `tauri dev`
-                // uses), so the notification still arrives.
-                log::warn!(
-                    "[notify] UNUserNotificationCenter failed ({e}); falling back to osascript"
-                );
+                // the contract. osascript always works, so the ping arrives.
+                log::warn!("[notify] mac post failed ({e:?}); falling back to osascript");
                 OsascriptNotifier.show(summary, body);
             }
         }
+    }
+
+    /// Click-to-navigate (#119): the SAME native banner plus an "Open"
+    /// action. The wait runs on a DETACHED thread — a ping can sit until
+    /// the user deals with it, and the caller (a PTY reader thread or an
+    /// invoke) must never block on its lifetime. Clicking the banner
+    /// itself or the action both activate; a dismiss never does.
+    fn show_actionable(&self, summary: &str, body: &str, payload: &str) {
+        let app = self.app.clone();
+        let summary = summary.to_string();
+        let body = body.to_string();
+        let payload = payload.to_string();
+        std::thread::Builder::new()
+            .name("umux-notify-click".into())
+            .spawn(move || {
+                let mut options = mac_notification_sys::Notification::new();
+                options
+                    .main_button(mac_notification_sys::MainButton::SingleAction("Open"))
+                    .wait_for_click(true);
+                let activated = match mac_notification_sys::send_notification(
+                    &summary,
+                    None,
+                    &body,
+                    Some(&options),
+                ) {
+                    Ok(resp) => matches!(
+                        resp,
+                        mac_notification_sys::NotificationResponse::Click
+                            | mac_notification_sys::NotificationResponse::ActionButton(_)
+                    ),
+                    // A refused post must not eat the ping either — the
+                    // fallback delivers a plain notification (no click
+                    // payload; osascript banners cannot carry one).
+                    Err(e) => {
+                        log::warn!(
+                            "[notify] mac post failed ({e:?}); falling back to osascript"
+                        );
+                        OsascriptNotifier.show(&summary, &body);
+                        false
+                    }
+                };
+                if activated {
+                    log::info!("[notify] click activated: payload={payload:?}");
+                    let _ = app.emit("notification_activated", payload);
+                }
+            })
+            .expect("spawn the macOS notification click waiter");
     }
 }
 
@@ -959,8 +1021,9 @@ fn windows_toast_script(summary: &str, body: &str, aumid: &str, launch: Option<&
 /// Windows the notifier shows an umux-owned banner WINDOW instead (like
 /// Steam/Discord toasts): borderless, always-on-top, bottom-right of the
 /// work area, focusable(false) so APPEARING never steals focus (a click
-/// still lands — WS_EX_NOACTIVATE windows receive mouse input). macOS and
-/// Linux keep their native notifications untouched.
+/// still lands — WS_EX_NOACTIVATE windows receive mouse input). macOS keeps
+/// its native notifications (with click-to-navigate since #119) and Linux
+/// its native ones untouched.
 ///
 /// `BannerShow` is the system boundary (same shape as `Notifier`): the
 /// behaviorally interesting routing is unit-tested with a recording fake;
@@ -1122,13 +1185,18 @@ async fn updater_status(app: AppHandle) -> updater_probe::UpdaterStatus {
 fn platform_notifier(app: &AppHandle) -> Box<dyn Notifier + Send> {
     #[cfg(target_os = "macos")]
     {
+        // Bundled: the NATIVE notification with the click payload (#119).
+        // Dev: osascript — the always-arrives path (see the module comment
+        // above); its banners carry no click payload, so a dev ping
+        // degrades to a plain notification via the trait's default.
         let bundled = std::env::current_exe()
             .map(|exe| is_bundled_app(&exe))
             .unwrap_or(false);
         if bundled {
-            return Box::new(BundledNotifier { app: app.clone() });
+            Box::new(MacNotifier::new(app.clone()))
+        } else {
+            Box::new(OsascriptNotifier)
         }
-        Box::new(OsascriptNotifier)
     }
     #[cfg(target_os = "windows")]
     {
@@ -2136,7 +2204,9 @@ pub fn run() {
                 }
             }
             // #118: the umux notification banner window (Windows only —
-            // macOS and Linux keep their native notifications). Created
+            // macOS keeps its NATIVE notifications, whose click now
+            // navigates via the mac-notification-sys delegate, #119; Linux
+            // keeps its native path untouched). Created
             // HIDDEN at boot so the first notification paints instantly,
             // then shown per ping by AppBanner. focusable(false) is the
             // whole point of the banner: appearing must never steal focus,
@@ -2441,8 +2511,9 @@ mod tests {
 
     // Issue #68 — which macOS path a process takes is decided by ONE pure
     // predicate on current_exe: a binary inside an .app bundle posts through
-    // UNUserNotificationCenter (umux attribution), everything else (the
-    // `tauri dev` binary under target/, cargo test itself) uses osascript.
+    // UNUserNotificationCenter WITH the click payload (#119), everything
+    // else (the `tauri dev` binary under target/, cargo test itself) uses
+    // osascript — the always-arrives path.
     #[cfg(target_os = "macos")]
     #[test]
     fn bundled_app_detected_by_exe_path() {

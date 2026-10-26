@@ -91,5 +91,12 @@ windows = { version = "0.61", features = ["Win32_System_Com"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# macOS notifications with a CLICK payload (#119): mac-notification-sys is
+# already in the tree transitively (tauri-plugin-notification → notify-rust);
+# this makes its delegate API — the click/action response no other layer
+# exposes — directly usable.
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
