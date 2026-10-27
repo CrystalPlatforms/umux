@@ -1,4 +1,4 @@
-# umux v1.6.0 — PRD (COMPLETED)
+# umux v1.6.0 — (COMPLETED)
 
 **Status:** shipped as v1.6.0 on 2026-09-10 · created 2026-08-31 ("versions cleanup" discovery); renumbered v1.9.0 → v1.6.0 and extended to all platforms on 2026-09-07 (swap with the old v1.6.0 icons/press/pinned-tabs package, which moved to v1.9.0). The sidebar drag-resize item (story #91, issue #79) moved to **v1.6.1** on 2026-09-10.
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
@@ -10,16 +10,16 @@ On Windows, new tabs always open in the OS default shell — a user juggling Pow
 
 ## Solution
 
-v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Settings (auto-detected installed shells + a custom entry) and a small **arrow next to "+ New tab"** opening a dropdown for the shell of that specific tab. The arrow appears **only when more than one shell is detected** — with a single installed shell there is nothing to choose, so the arrow is hidden and "+ New tab" alone remains. It adds two **Settings switches, both defaulting to off**: hide the git branch on tab rows, and show **per-tab working directories on workspace rows** (each tab gets one line combining its agent-status chip with the folder that tab's shell is in). *(The originally planned sidebar drag-resize fix and width persistence moved to v1.6.1 on 2026-09-10 — story #91, issue #79.)*
+v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Settings (auto-detected installed shells + a custom entry) and a small **arrow next to "+ New tab"** opening a dropdown for the shell of that specific tab. The arrow appears **only when more than one shell is detected** — with a single installed shell there is nothing to choose, so the arrow is hidden and "+ New tab" alone remains. It adds two **Settings switches, both defaulting to off**: hide the git branch on tab rows, and show **per-tab working directories on workspace rows** (each tab gets one line combining its agent-status chip with the folder that tab's shell is in). _(The originally planned sidebar drag-resize fix and width persistence moved to v1.6.1 on 2026-09-10 — story #91, issue #79.)_
 
 ## User Stories
 
-*(story numbers match the master PRD)*
+_(story numbers match the master PRD)_
 
 - **88.** As a user on any platform, I want to pick my default shell in Settings from an auto-detected list (Windows: PowerShell, cmd, Git Bash, WSL; Linux: bash, zsh, fish, …; macOS: zsh, bash, …) or enter a custom command, so that new tabs open in the shell I actually use.
 - **89.** As a user on any platform, I want an arrow next to the "+ New tab" button that opens a dropdown for choosing the shell of that specific new tab, so that I can spawn, say, a fish tab without changing my default. **The arrow is visible only when the detector finds more than one shell** — with one shell it is hidden.
-- **90.** As a user, I want the shell picker to affect local tabs only — SSH tabs keep today's behavior — so that remote sessions stay predictable. *(Local tabs on all three platforms; SSH excluded — extended from Windows-only, 2026-09-07.)*
-- **91.** *(Moved to v1.6.1 on 2026-09-10 — sidebar drag-resize on Windows/Linux + width persistence; see the master PRD and issue #79.)*
+- **90.** As a user, I want the shell picker to affect local tabs only — SSH tabs keep today's behavior — so that remote sessions stay predictable. _(Local tabs on all three platforms; SSH excluded — extended from Windows-only, 2026-09-07.)_
+- **91.** _(Moved to v1.6.1 on 2026-09-10 — sidebar drag-resize on Windows/Linux + width persistence; see the master PRD and issue #79.)_
 - **92.** As a user, I want a Settings switch that hides the git branch on tab rows (default: off), so that the sidebar stays minimal when I don't care about branches.
 - **93.** As a developer, I want each workspace row to show, per tab, one line combining that tab's agent-status chip with the folder that tab's shell is in — every tab gets a line (with or without an agent), duplicate folders are not merged — toggled by a Settings switch (default: off), so that I can see at a glance where every terminal sits.
 
@@ -27,7 +27,7 @@ v1.6.0 adds a **cross-platform shell picker**: a default-shell choice in Setting
 
 ## Implementation Decisions
 
-- **ShellDetector** *(deep, pure)* — turns injected probe results into the installed-shell list (display name + launch command) for both the Settings picker and the "+"-dropdown. Windows: PATH scan + registry checks; **Unix (Linux/macOS): PATH scan + `/etc/shells` + the login shell from the environment**. The pure core does no I/O — detection, ranking, dedup, and the **arrow-visibility rule (hide when ≤1 shell found)** are unit-testable; setups the probes miss land in the custom entry.
+- **ShellDetector** _(deep, pure)_ — turns injected probe results into the installed-shell list (display name + launch command) for both the Settings picker and the "+"-dropdown. Windows: PATH scan + registry checks; **Unix (Linux/macOS): PATH scan + `/etc/shells` + the login shell from the environment**. The pure core does no I/O — detection, ranking, dedup, and the **arrow-visibility rule (hide when ≤1 shell found)** are unit-testable; setups the probes miss land in the custom entry.
 - **Picker scope** — local tabs on **all three platforms**; SSH tabs unchanged (extended from Windows-only, 2026-09-07). Clicking "+" itself uses the Settings default; the arrow picks a different shell for just that tab and is rendered only when the detected list has more than one entry.
 - **Metadata switches** — the git-branch switch hides only the branch on tab rows (ports tooltip untouched). The folders switch renders one line per tab on its workspace row: agent chip + folder, every tab, duplicates unmerged — data comes from the working directories umux already tracks.
 - **Defaults** — both switches are **off** after install (decided 2026-08-31).

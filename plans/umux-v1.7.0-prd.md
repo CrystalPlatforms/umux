@@ -1,4 +1,4 @@
-# umux v1.7.0 — PRD (umux Storestation + landing-page revamp)
+# umux v1.7.0 — (COMPLETED)
 
 **Status:** shipped — implemented in full on branch **`core`** (issues #83–#91, phases 1–9), released from `main` as **v1.7.0**. Discovered 2026-09-04 (the "umux Ecosystem" /ask + /blueprint session) as part of v2.0; **rescheduled 2026-09-12 (PO decision)** to be v1.7.0 — the first ecosystem piece to ship. Built on branch **`core`**, released from `main` like any 1.x version.
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.
@@ -7,7 +7,7 @@
 
 ## Problem Statement
 
-Closing the umux window kills every session: agents stop mid-task, long jobs die, and there is nothing to reattach to — the work existed only as long as the window did. The desktop app, the future TUI, and the CLI live as separate islands with separate lifetimes instead of views on the same running work. (And on the web, umux's landing page is a one-pager — a visitor who wants to *learn* the tool has to dig through the repo.)
+Closing the umux window kills every session: agents stop mid-task, long jobs die, and there is nothing to reattach to — the work existed only as long as the window did. The desktop app, the future TUI, and the CLI live as separate islands with separate lifetimes instead of views on the same running work. (And on the web, umux's landing page is a one-pager — a visitor who wants to _learn_ the tool has to dig through the repo.)
 
 ## Solution
 
@@ -23,7 +23,7 @@ With Storestation OFF, the desktop app behaves exactly like today — the daemon
 
 ## User Stories
 
-*(story numbers match the master PRD; #105–#113 formed the Storestation block of the old v2.0 ecosystem scope)*
+_(story numbers match the master PRD; #105–#113 formed the Storestation block of the old v2.0 ecosystem scope)_
 
 - **105.** As a developer, I want Storestation to keep my terminal sessions alive after I close umux Desktop, so that a closed window never kills a running agent or long job.
 - **106.** As a developer, I want `umux attach` to reattach the desktop app or the CLI to Storestation's living sessions, so that coming back costs seconds and loses nothing.
@@ -31,15 +31,15 @@ With Storestation OFF, the desktop app behaves exactly like today — the daemon
 - **108.** As a user, I want a dedicated Storestation section in Settings — daemon on/off, autostart on/off, and running status — styled like the import wizard, so that all ecosystem controls live in one obvious place.
 - **109.** As a user, I want Storestation to start automatically at login when autostart is enabled, so that the ecosystem reaches my machine even after a reboot.
 - **110.** As a developer, I want stopping Storestation to terminate its shells cleanly (no orphan processes) and a crashed Storestation's leftovers to be detected and cleaned on the next start, so that the daemon never litters my system.
-- **111.** As a developer, I want the CLI's commands to work against Storestation while no window is open, so that scripts and agents can drive umux headlessly. *(The full live surface completes at v1.8.0.)*
-- **112.** As a developer, I want umux Terminal (TUI) to be able to attach to the same Storestation sessions as the desktop app, so that both are interchangeable views on the same work. *(Store separation (v1.9.0) untouched; this story completes when the TUI ships in v1.9.0.)*
+- **111.** As a developer, I want the CLI's commands to work against Storestation while no window is open, so that scripts and agents can drive umux headlessly. _(The full live surface completes at v1.8.0.)_
+- **112.** As a developer, I want umux Terminal (TUI) to be able to attach to the same Storestation sessions as the desktop app, so that both are interchangeable views on the same work. _(Store separation (v1.9.0) untouched; this story completes when the TUI ships in v1.9.0.)_
 - **113.** As a user, I want Storestation to ship inside the normal installers and update with the app, so that enabling it never means installing something extra.
-- **136.** As a visitor, I want an expanded umux landing page — a documentation section and more content beyond the current one-pager — so that I can learn and adopt umux without digging through the repo. *(Scope decided at v1.7.0 planning.)*
+- **136.** As a visitor, I want an expanded umux landing page — a documentation section and more content beyond the current one-pager — so that I can learn and adopt umux without digging through the repo. _(Scope decided at v1.7.0 planning.)_
 
 ## Implementation Decisions
 
-- **SessionCore** *(deep module)* — one session-management interface with two interchangeable drivers: *in-process* (today's behavior, Storestation OFF) and *daemon-client* (all operations proxied to umux Storestation over the local socket, Storestation ON). Desktop and CLI become views; the UI never knows which driver is active.
-- **umux Storestation** *(deep module)* — headless Rust binary owning PTYs and session state: serves the **local socket API**, survives app close, optional per-OS autostart (mechanism per platform decided at /carve), clean shutdown with no orphan shells, crash-leftover cleanup on next start.
+- **SessionCore** _(deep module)_ — one session-management interface with two interchangeable drivers: _in-process_ (today's behavior, Storestation OFF) and _daemon-client_ (all operations proxied to umux Storestation over the local socket, Storestation ON). Desktop and CLI become views; the UI never knows which driver is active.
+- **umux Storestation** _(deep module)_ — headless Rust binary owning PTYs and session state: serves the **local socket API**, survives app close, optional per-OS autostart (mechanism per platform decided at /carve), clean shutdown with no orphan shells, crash-leftover cleanup on next start.
 - **Socket protocol ownership (2026-09-12):** because Storestation now **precedes** the live CLI, umux Storestation defines the local-socket protocol; the desktop CliGateway (v1.8.0) joins it. The protocol is designed extensible from day one.
 - **Settings → Storestation section** — daemon on/off (default off), autostart on/off, live status; the paired-devices list with revoke fills in later with the Bridge work (`development` branch).
 - **Branch model (PO decision 2026-09-12):** development happens on a long-lived **`core` branch**; releases are tagged from `main` as normal versions. Test instances run against an **isolated data directory** (separate store, socket, sessions — e.g. `~/.umux-test`) so the test daemon never touches a daily-use umux.

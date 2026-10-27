@@ -1,4 +1,4 @@
-# umux v1.7.6 — PRD (Windows Stability & UX Quickupdate)
+# umux v1.7.6 — (COMPLETED)
 
 > Created 2026-10-10 from a /ask discovery + /blueprint session with the PO (Adam).
 > Ship order agreed by the PO: the bug package first, the feature package second.

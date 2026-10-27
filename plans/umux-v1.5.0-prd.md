@@ -1,4 +1,4 @@
-# umux v1.5.0 — PRD (COMPLETED)
+# umux v1.5.0 — (COMPLETED)
 
 **Status:** shipped — the package went out as **v1.5.1** on 2026-09-04 ("the color & quality-of-life release"; no v1.5.0 tag was ever cut) _(discovery 2026-09-01, "umux v1.5.0, v1.6.0 plan" session)_
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins.

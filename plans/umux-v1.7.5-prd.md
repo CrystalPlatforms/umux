@@ -1,4 +1,4 @@
-# PRD: umux v1.7.5 — umux Core (Always-On device)
+# umux v1.7.5 — (COMPLETED)
 
 > Extract of the master PRD ([`umux-prd.md`](./umux-prd.md) wins on conflict); stories #141–#143.
 > Discovered 2026-09-20 in an /ask session with the PO. Same day, the v1.7.0 daemon was **rebranded umux Storestation** and the name **umux Core** was assigned to this feature.
