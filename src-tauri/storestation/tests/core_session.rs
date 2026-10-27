@@ -181,18 +181,13 @@ fn assert_session_shape(session: &Value, context: &str) {
     );
 }
 
-/// macOS honors the hold only on AC; elsewhere (Linux, in this gate) the
-/// hold is expected unconditionally. Yields whether a hold is expected.
-#[cfg(target_os = "macos")]
+/// A hold is expected exactly where the daemon recorded no caveat: on macOS
+/// that means AC power, elsewhere it means the backend did not refuse. The
+/// CI runner's logind policy is the environment's business — an honest
+/// refusal travels as the instruction string and the hold assertion yields
+/// (the real inhibit path is core_linux's, against a fake logind).
 fn expect_held(core: &Value) -> bool {
-    // On battery the OS may refuse the assertion — the honest caveat
-    // travels instead; on AC the hold must exist.
     core["instruction"].as_str().is_none()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn expect_held(_core: &Value) -> bool {
-    true
 }
 
 // #111 AC: start holds the sleep block and the status carries the session —
