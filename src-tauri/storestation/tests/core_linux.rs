@@ -162,12 +162,13 @@ fn status(client: &mut Client) -> Value {
 }
 
 fn assert_held(view: &Value) {
-    assert_eq!(view.as_object().unwrap().len(), 3, "Phase 1 schema");
+    assert_eq!(view.as_object().unwrap().len(), 4, "Phase 1 schema + additive session (#111)");
     assert_eq!(view["enabled"], true);
     assert_eq!(view["held"], true, "{view}");
     let instruction = view["instruction"].as_str().expect("Linux lid caveat");
     assert!(instruction.contains("lid"), "{instruction}");
     assert!(instruction.contains("logind"), "{instruction}");
+    assert_eq!(view["session"]["active"], false, "{view}");
 }
 
 fn assert_open(fd: &mut UnixStream) {
@@ -206,9 +207,13 @@ fn linux_toggle_holds_fd_reports_lid_and_releases_on_off() {
     let logind = Logind::start("ok");
     let dir = tempfile::tempdir().unwrap();
     let (_daemon, mut client) = start_daemon(dir.path(), &logind.address);
+    let no_session = json!({
+        "active": false, "endsAt": null, "remainingSecs": null,
+        "lastEndedAt": null, "lastEndReason": null
+    });
     assert_eq!(
         status(&mut client),
-        json!({"enabled": false, "held": false, "instruction": null})
+        json!({"enabled": false, "held": false, "instruction": null, "session": no_session})
     );
     let on = set(&mut client, true);
     assert_held(&on);
@@ -217,7 +222,7 @@ fn linux_toggle_holds_fd_reports_lid_and_releases_on_off() {
     assert_open(&mut fd);
     assert_eq!(
         set(&mut client, false),
-        json!({"enabled": false, "held": false, "instruction": null})
+        json!({"enabled": false, "held": false, "instruction": null, "session": no_session})
     );
     assert_released(fd);
 }
