@@ -449,8 +449,8 @@
     <div class="feature reveal">
       <img class="feature-img" loading="lazy" src="assets/umux-core.png" alt="umux Core (Always-On device) switch in Settings"
            onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27960%27 height=%27560%27%3E%3Crect width=%27100%25%27 height=%27100%25%27 fill=%27%2316181c%27/%3E%3Ctext x=%2750%25%27 y=%2750%25%27 fill=%27%238a929c%27 font-family=%27sans-serif%27 font-size=%2726%27 text-anchor=%27middle%27%3Eplaceholder - real file pending (landing/README.md)%3C/text%3E%3C/svg%3E'">
-      <h2>Always-On (umux Core)</h2>
-      <p>One switch and the machine itself stays awake for as long as Core holds it — even with the lid closed and every window shut. The screen may still sleep, and where the OS limits the promise (battery, the lid) umux says so in plain words instead of pretending. Off by default.</p>
+      <h2>Always-On (umux Core &amp; Core Session)</h2>
+      <p>One switch and the machine itself stays awake for as long as Core holds it — even with the lid closed and every window shut. Need it just for a while? <code>umux core-session start 2h</code> holds the same promise for a bounded window, then releases itself and pings you. The screen may still sleep, and where the OS limits the promise (battery, the lid) umux says so in plain words instead of pretending. Off by default.</p>
     </div>
     <div class="feature reveal">
       <img class="feature-img" loading="lazy" src="assets/umux-updates.png" alt="umux Settings — App updates section with the check-for-updates button"
@@ -552,9 +552,17 @@
         <span class="version">v1.7.0</span>
         <span class="what"><strong>umux Storestation</strong> — sessions outlive the window; <code>umux attach</code>, autostart; ships in every installer.</span>
       </div>
-      <div class="timeline-item now">
+      <div class="timeline-item">
         <span class="version">v1.7.5</span>
         <span class="what">umux Core (Always-On) — keep the machine awake while sessions run, even with every window closed; off by default.</span>
+      </div>
+      <div class="timeline-item">
+        <span class="version">v1.7.6</span>
+        <span class="what">Windows stability &amp; UX — no abort with the daemon alive, console-free autostart, overlay scrollbars, tab multi-select.</span>
+      </div>
+      <div class="timeline-item now">
+        <span class="version">v1.7.7</span>
+        <span class="what">Core Session — the machine awake for a set window (start/extend/stop, expiry ping); on macOS it replaces the Core switch.</span>
       </div>
       <div class="timeline-item">
         <span class="version">v1.8.0</span>
