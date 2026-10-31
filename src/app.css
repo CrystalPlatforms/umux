@@ -1260,10 +1260,13 @@ body.is-dragging * {
   min-width: 0;
 }
 
-/* #81 (v1.6.0): one line per tab on a workspace row — the tab's agent chip
-   followed by the folder its shell sits in. The folder truncates (ellipsis)
-   so a very long path can never break the row's layout; the full path stays
-   on the title attribute. */
+/* #81 (v1.6.0): folder lines on a workspace row — the tab's agent chip
+   followed by the folder its shell sits in. Issue 121 (number written
+   WITHOUT the hash on purpose: the token test reads this file as raw text
+   and a 3-digit hash parses as a hex color): a SPLIT tab contributes one
+   line PER PANEL (each terminal gets its own chip + folder), so these
+   simply stack. The folder truncates (ellipsis) so a very long path can
+   never break the row's layout; the full path stays on the title attr. */
 .workspace-folder-line {
   display: flex;
   align-items: center;

@@ -1497,6 +1497,83 @@ export function closeTabs(
   return next
 }
 
+/// Separate a SPLIT tab into one tab per panel (#121): every split terminal
+/// becomes its own tab — its own folder line and chip in the sidebar — so a
+/// workspace can show as many statuses as it runs terminals. The panels keep
+/// their ids, which keeps the LIVE shells (PTYs) and the workspace's
+/// `panels` config (cwd / SSH target, keyed by leaf id) untouched; only the
+/// tab structure moves. Leaves split in TREE order: the FIRST leaf stays in
+/// the original tab (same tab id, same name/color — nothing in the tab bar
+/// jumps), each later leaf becomes a fresh tab inserted right after it, in
+/// order. Spawned tabs get sticky positional names (nextTabName). genId is
+/// consumed once per spawned tab (n-1 calls for n leaves). No-op for an
+/// unknown workspace or tab id, and for a tab whose tree holds a single
+/// leaf (nothing to separate).
+export function separateTab(
+  state: WorkspaceState,
+  id: string,
+  tabId: string,
+  genId: () => string = defaultGenId,
+): WorkspaceState {
+  const ws = state.workspaces.find((w) => w.id === id)
+  if (ws == null) return state
+  const idx = ws.tabs?.findIndex((t) => t.id === tabId) ?? -1
+  if (ws.tabs == null || idx === -1) return state
+  const tab = ws.tabs[idx]
+  const leaves = leafIds(tab.layout)
+  if (leaves.length <= 1) return state
+  const spawned: Tab[] = []
+  for (const panelId of leaves.slice(1)) {
+    spawned.push({
+      id: genId(),
+      layout: createTree(panelId),
+      name: nextTabName([...ws.tabs, ...spawned]),
+      // The spawned tabs CONTINUE the original's shell (future panels of
+      // each spawn through it) and stay in the pinned block with it — both
+      // ride along only when set, so an unset flag never gains its key (the
+      // module's payload hygiene). The COLOR stays on the original: it was
+      // that tab's look, not the group's.
+      ...(tab.pinned === true ? { pinned: true } : {}),
+      ...(tab.shell != null ? { shell: tab.shell } : {}),
+    })
+  }
+  const tabs = [
+    // The original tab SURVIVES with the same id/name — but its tree shrinks
+    // to the first leaf (the shell that leaf owns never restarts).
+    ...ws.tabs.slice(0, idx),
+    { ...tab, layout: createTree(leaves[0]) },
+    ...spawned,
+    ...ws.tabs.slice(idx + 1),
+  ]
+  // Focus FOLLOW (#121): when the separated tab is the active one, the
+  // focused panel must keep receiving keystrokes — if it now lives in a
+  // spawned tab, THAT tab becomes active with the same panel focused
+  // (splitPanel's "keystrokes follow" rule, carried over). Focus in the
+  // first leaf, or a background-tab separation, leaves the records alone.
+  let activeTabId = state.activeTabId
+  let activePanelId = state.activePanelId
+  if (state.activeTabId[id] === tabId) {
+    const focused = activePanelOf(state, id)
+    if (focused != null) {
+      const owner = spawned.find((t) => leafIds(t.layout)[0] === focused)
+      if (owner != null) {
+        activeTabId = { ...state.activeTabId, [id]: owner.id }
+        activePanelId = { ...state.activePanelId, [id]: focused }
+      }
+    }
+  }
+  return {
+    ...state,
+    workspaces: state.workspaces.map((w) => (w.id === id ? { ...w, tabs } : w)),
+    activeTabId,
+    activePanelId,
+    // The zoom record dies with the split — the tab no longer holds that
+    // tree (a spawned tab is born unzoomed; the original's remaining leaf
+    // renders its normal half).
+    zoomedPanelId: removeKey(state.zoomedPanelId, tabId),
+  }
+}
+
 /// The panel ids of workspace `id`, in tab-then-tree order — the stable
 /// identity the renderer keys terminal surfaces by. Covers EVERY tab's
 /// panes (#37 rework), with the legacy top-level `layout` as a fallback for

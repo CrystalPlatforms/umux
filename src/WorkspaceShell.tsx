@@ -62,6 +62,7 @@ import {
   switchTab,
   renameTab,
   setTabPinned,
+  separateTab,
   activeTabOf,
   splitPanel,
   resizePanel,
@@ -286,6 +287,16 @@ function SplitVerticalIcon({ className }: IconProps) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <rect x="3" y="3" width="18" height="18" rx="2" />
       <path d="M3 12h18" />
+    </svg>
+  )
+}
+
+function SeparateIcon({ className }: IconProps) {
+  // A split pulling apart — each terminal becomes its own tab (#121).
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2.5" y="4" width="7" height="16" rx="1.5" />
+      <rect x="14.5" y="4" width="7" height="16" rx="1.5" />
     </svg>
   )
 }
@@ -2381,6 +2392,18 @@ export function WorkspaceShell() {
     splitWorkspace(id, orientation)
   }
 
+  /// Separate (#121): the split terminals of the right-clicked tab become
+  /// separate TABS — one per panel — so every terminal earns its own folder
+  /// line and Status Agent chip in the sidebar. The pure op keeps the
+  /// panels' live shells (PTYs) intact; only the tab structure moves.
+  const separateFromMenu = () => {
+    const id = menu?.workspaceId
+    const tabId = menu?.tabId
+    setMenu(null)
+    if (id == null || tabId == null) return
+    persist(separateTab(stateRef.current, id, tabId))
+  }
+
   /// Pin/unpin from the context menu (#37): flips the workspace's pinned flag
   /// and moves it to the top group (setWorkspacePinned keeps the invariant).
   const togglePinFromMenu = () => {
@@ -3828,9 +3851,12 @@ export function WorkspaceShell() {
                             settings.agentStatusEnabled,
                           )[entry.workspace.id]?.map((line) => (
                             <span
-                              key={line.tabId}
+                              // #121: a split tab yields one line PER PANEL —
+                              // the key and testid must carry the panel id
+                              // too, or two lines of one tab would collide.
+                              key={`${line.tabId}:${line.panelId}`}
                               className="workspace-folder-line"
-                              data-testid={`folder-line-${entry.workspace.id}-${line.tabId}`}
+                              data-testid={`folder-line-${entry.workspace.id}-${line.tabId}-${line.panelId}`}
                             >
                               {settings.agentStatusEnabled && (
                                 <AgentStatusIndicator
@@ -4762,6 +4788,8 @@ export function WorkspaceShell() {
               const tab = ws?.tabs?.[index]
               const pinned = tab?.pinned === true
               const only = (ws?.tabs ?? []).length <= 1
+              // Separate (#121): meaningful only while the tab HOLDS a split.
+              const separable = tab != null && leafIds(tab.layout).length > 1
               return (
                 <>
                   <button
@@ -4809,6 +4837,22 @@ export function WorkspaceShell() {
                   >
                     <SplitVerticalIcon />
                     Split vertical
+                  </button>
+                  <button
+                    className="menu-item"
+                    role="menuitem"
+                    // Separate (#121): the tab's split terminals become
+                    // separate tabs — each with its own folder line + status
+                    // chip in the sidebar. Meaningful only when the tab
+                    // actually HOLDS a split; a single-panel tab says so.
+                    disabled={!separable}
+                    title={
+                      separable ? undefined : 'Nothing to separate — split the tab first'
+                    }
+                    onClick={separateFromMenu}
+                  >
+                    <SeparateIcon />
+                    Separate
                   </button>
                   <button
                     className="menu-item"

@@ -127,6 +127,99 @@ describe('tabFolderLines', () => {
   })
 })
 
+// #121: a SPLIT tab used to contribute ONE line — the focused panel's status
+// ("shows the one I hold the mouse on"). Now every split terminal keeps its
+// own line: chip(status of THAT panel) + that panel's own folder, in tree
+// order — the same per-panel rule the branch labels have used since v1.0.
+// Assumptions: the line's `tabId` repeats for every panel of the tab (the DOM
+// key/testid pair it with `panelId`); agent-OFF merging runs over the flat
+// per-panel list, so panels sharing a folder still merge into one line.
+describe('split tabs show one line per panel (#121)', () => {
+  // The file-level `state()` helper opens only ws-1; these tests need BOTH
+  // workspaces open (tabFolderLines skips closed ones).
+  const openState = (workspaces: Workspace[]): WorkspaceState =>
+    ({
+      workspaces,
+      activeId: 'ws-1',
+      openIds: ['ws-1', 'ws-2'],
+      activeTabId: { 'ws-1': 't-1', 'ws-2': 't-5' },
+      activePanelId: { 'ws-1': 'p-1', 'ws-2': 'p-5' },
+    }) as unknown as WorkspaceState
+
+  // One tab, three leaves: p-5 (/repo), p-6 (/srv), p-7 (SSH — no folder).
+  const splitWs: Workspace = {
+    id: 'ws-2',
+    name: 'split',
+    panels: [
+      { id: 'p-5', workingDirectory: '/repo' },
+      { id: 'p-6', workingDirectory: '/srv' },
+      { id: 'p-7', sshTarget: 'a@h' },
+    ],
+    tabs: [
+      {
+        id: 't-5',
+        name: 'split',
+        layout: {
+          kind: 'split',
+          id: 's-5',
+          orientation: 'horizontal',
+          ratio: 0.5,
+          first: { kind: 'leaf', id: 'p-5' },
+          second: {
+            kind: 'split',
+            id: 's-6',
+            orientation: 'vertical',
+            ratio: 0.5,
+            first: { kind: 'leaf', id: 'p-6' },
+            second: { kind: 'leaf', id: 'p-7' },
+          },
+        },
+      },
+    ],
+  }
+
+  it('a split tab yields ONE line per panel, each bound to its own terminal', () => {
+    const lines = tabFolderLines(
+      openState([ws1, splitWs]),
+      { 'p-5': 'working', 'p-6': 'needs-attention' },
+      true,
+    )['ws-2']
+
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toEqual({ tabId: 't-5', panelId: 'p-5', folder: '/repo', status: 'working' })
+    expect(lines[1]).toEqual({ tabId: 't-5', panelId: 'p-6', folder: '/srv', status: 'needs-attention' })
+    expect(lines[2]).toEqual({ tabId: 't-5', panelId: 'p-7', folder: null, status: 'idle' })
+  })
+
+  it('SSH and no-cwd panels of a split yield chip-only lines', () => {
+    const lines = tabFolderLines(openState([splitWs]), {}, true)['ws-2']
+
+    expect(lines[2]).toEqual({ tabId: 't-5', panelId: 'p-7', folder: null, status: 'idle' })
+  })
+
+  it('agent status OFF: split panels sharing a folder still merge into ONE line', () => {
+    const shared: Workspace = {
+      ...splitWs,
+      panels: [
+        { id: 'p-5', workingDirectory: '/repo' },
+        { id: 'p-6', workingDirectory: '/repo' },
+      ],
+    }
+    const lines = tabFolderLines(openState([shared]), {}, true, false)['ws-2']
+
+    // /repo merges at p-5's position; the SSH panel keeps its chip-only line.
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toMatchObject({ tabId: 't-5', panelId: 'p-5', folder: '/repo' })
+    expect(lines[1]).toMatchObject({ tabId: 't-5', panelId: 'p-7', folder: null })
+  })
+
+  it('agent status OFF: split panels in DISTINCT folders stay distinct lines', () => {
+    const lines = tabFolderLines(openState([splitWs]), {}, true, false)['ws-2']
+
+    expect(lines.map((l) => l.folder)).toEqual(['/repo', '/srv', null])
+  })
+})
+
 // Display form (#81 HITL round): the row shows the TAIL of the path —
 // <parent folder>/<target folder> — never the full path from the root; the
 // full path stays on the tooltip. A path with a single segment shows just it.

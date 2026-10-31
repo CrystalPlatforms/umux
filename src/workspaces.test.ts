@@ -36,6 +36,7 @@ import {
   moveTabGroup,
   moveTabsToWorkspace,
   closeTabs,
+  separateTab,
   activeTabOf,
   moveNode,
   moveNodes,
@@ -2668,5 +2669,171 @@ describe('closeTabs (#106 close selected)', () => {
     const s = twoWorkspaceState(['a1', 'a2'], ['b1'])
     expect(closeTabs(s, 'ws-a', ['ghost']).workspaces).toEqual(s.workspaces)
     expect(closeTabs(s, 'ws-ghost', ['a1'])).toBe(s)
+  })
+})
+
+// #121 "Separate" — a SPLIT tab becomes one tab per panel, so every split
+// terminal gets its own tab (own folder line + chip in the sidebar). The
+// panels keep their ids, so their live shells (PTYs) are untouched; the
+// workspace's `panels` config (cwd / sshTarget, keyed by leaf id) moves with
+// them untouched too.
+// Assumptions stated before RED:
+//  - leaves split in TREE order: the FIRST leaf stays in the original tab
+//    (same id, same name/color), each later leaf becomes a fresh tab inserted
+//    right after it, in order;
+//  - genId is consumed ONCE per spawned tab (n-1 calls for n leaves);
+//  - spawned tabs get sticky positional names (nextTabName over the tabs
+//    known when each is created);
+//  - NOT tested here: terminal rendering/PTY reuse (HITL), Rust store (no
+//    schema change — tabs/panels shapes unchanged).
+describe('separateTab (#121)', () => {
+  /// ws-a with a TWO-LEAF tab 't-1' (leaves 't-1-leaf' in /repo and
+  /// 't-1-leaf2' in /srv) followed by the single-leaf tab t-2; A active.
+  /// `extra` rides onto the t-1 definition (pinned/shell/color fixtures).
+  function splitTabState(
+    extra: { pinned?: boolean; shell?: string; color?: string } = {},
+  ): WorkspaceState {
+    const base = twoWorkspaceState(['t-1', 't-2'], ['b1'])
+    return {
+      ...base,
+      workspaces: base.workspaces.map((w) =>
+        w.id !== 'ws-a'
+          ? w
+          : {
+              ...w,
+              panels: [
+                { id: 't-1-leaf', workingDirectory: '/repo' },
+                { id: 't-1-leaf2', workingDirectory: '/srv' },
+              ],
+              tabs: [
+                {
+                  id: 't-1',
+                  name: 'main',
+                  ...extra,
+                  layout: {
+                    kind: 'split',
+                    id: 's-1',
+                    orientation: 'horizontal',
+                    ratio: 0.5,
+                    first: { kind: 'leaf', id: 't-1-leaf' },
+                    second: { kind: 'leaf', id: 't-1-leaf2' },
+                  },
+                },
+                tabOf('t-2'),
+              ],
+            },
+      ),
+    }
+  }
+
+  it('separates a split tab into one tab per panel — shells (panel ids) intact', () => {
+    const s = splitTabState()
+    const gen = seq('t-new')
+
+    const next = separateTab(s, 'ws-a', 't-1', gen)
+
+    const ws = next.workspaces.find((w) => w.id === 'ws-a')!
+    const tabs = ws.tabs!
+    expect(tabs).toHaveLength(3)
+    // The FIRST leaf stays in the original tab (id and name kept).
+    expect(tabs[0]).toMatchObject({ id: 't-1', name: 'main' })
+    expect(tabs[0].layout).toEqual({ kind: 'leaf', id: 't-1-leaf' })
+    // The SECOND leaf becomes a fresh tab right after it, in tree order.
+    expect(tabs[1]).toMatchObject({ id: 't-new', name: 'Tab 3' })
+    expect(tabs[1].layout).toEqual({ kind: 'leaf', id: 't-1-leaf2' })
+    expect(tabs[2]).toEqual(tabOf('t-2'))
+    // The cwd/ssh config hangs off the workspace keyed by leaf id — moving
+    // leaves between tabs must not orphan or duplicate it.
+    expect(ws.panels).toEqual([
+      { id: 't-1-leaf', workingDirectory: '/repo' },
+      { id: 't-1-leaf2', workingDirectory: '/srv' },
+    ])
+  })
+
+  it('spawned tabs inherit pinned and shell — the color stays on the original', () => {
+    const s = splitTabState({ pinned: true, shell: 'pwsh', color: '#2563eb' })
+
+    const next = separateTab(s, 'ws-a', 't-1', seq('t-new'))
+
+    const ws = next.workspaces.find((w) => w.id === 'ws-a')!
+    const tabs = ws.tabs!
+    // Future panels of the spawned tabs spawn through the SAME shell, and
+    // the pinned block keeps the group together — both travel. The color was
+    // the ORIGINAL tab's look: it stays there, the siblings stay uncolored.
+    expect(tabs[0].pinned).toBe(true)
+    expect(tabs[0].shell).toBe('pwsh')
+    expect(tabs[0].color).toBe('#2563eb')
+    expect(tabs[1].pinned).toBe(true)
+    expect(tabs[1].shell).toBe('pwsh')
+    expect('color' in tabs[1]).toBe(false)
+  })
+
+  it('a bare original leaves the spawned payload keyless (byte-identical hygiene)', () => {
+    const s = splitTabState()
+
+    const next = separateTab(s, 'ws-a', 't-1', seq('t-new'))
+
+    const spawned = next.workspaces.find((w) => w.id === 'ws-a')!.tabs![1]
+    expect('pinned' in spawned).toBe(false)
+    expect('shell' in spawned).toBe(false)
+    expect('color' in spawned).toBe(false)
+  })
+
+  it('the focused panel follows its new tab (keystrokes keep landing there)', () => {
+    const s = splitTabState()
+    // Focus sits in the SECOND leaf — after the split it lives in the new tab.
+    const focused: WorkspaceState = {
+      ...s,
+      activePanelId: { ...s.activePanelId, 'ws-a': 't-1-leaf2' },
+    }
+
+    const next = separateTab(focused, 'ws-a', 't-1', seq('t-new'))
+
+    expect(next.activeTabId['ws-a']).toBe('t-new')
+    expect(next.activePanelId['ws-a']).toBe('t-1-leaf2')
+  })
+
+  it('focus in the FIRST leaf keeps the original tab active', () => {
+    const s = splitTabState()
+    // activePanelId points at t-1-leaf (the fixture default) — already the
+    // leaf that stays put.
+
+    const next = separateTab(s, 'ws-a', 't-1', seq('t-new'))
+
+    expect(next.activeTabId['ws-a']).toBe('t-1')
+    expect(next.activePanelId['ws-a']).toBe('t-1-leaf')
+  })
+
+  it('separating a BACKGROUND tab leaves the activation records untouched', () => {
+    const s = splitTabState()
+    const background: WorkspaceState = {
+      ...s,
+      activeTabId: { ...s.activeTabId, 'ws-a': 't-2' },
+      activePanelId: { ...s.activePanelId, 'ws-a': 't-2-leaf' },
+    }
+
+    const next = separateTab(background, 'ws-a', 't-1', seq('t-new'))
+
+    expect(next.activeTabId['ws-a']).toBe('t-2')
+    expect(next.activePanelId['ws-a']).toBe('t-2-leaf')
+  })
+
+  it('the zoom record dies with the split (the tab no longer holds that tree)', () => {
+    const s: WorkspaceState = {
+      ...splitTabState(),
+      zoomedPanelId: { 't-1': 't-1-leaf2' },
+    }
+
+    const next = separateTab(s, 'ws-a', 't-1', seq('t-new'))
+
+    expect(next.zoomedPanelId).toEqual({})
+  })
+
+  it('no-ops return the SAME state: unknown workspace, unknown tab, single leaf', () => {
+    const s = splitTabState()
+    expect(separateTab(s, 'ws-ghost', 't-1', seq('x'))).toBe(s)
+    expect(separateTab(s, 'ws-a', 't-ghost', seq('x'))).toBe(s)
+    // t-2 is a single-leaf tab — nothing to separate.
+    expect(separateTab(s, 'ws-a', 't-2', seq('x'))).toBe(s)
   })
 })

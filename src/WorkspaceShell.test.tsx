@@ -5105,3 +5105,178 @@ describe('sidebar width persists across restarts (quickupdate 2026-09-12)', () =
     expect(saves[0][1]).toMatchObject({ settings: { sidebarWidth: 378 } })
   })
 })
+
+// --- Separate in the tab context menu (#121) --------------------------------
+//
+// The issue's second ask: a SPLIT tab gets a "Separate" action that turns
+// its split terminals into separate TABS (one tab per panel), so every
+// terminal earns its own folder line + Status chip in the sidebar. The
+// panels keep their live shells — the pure layer (workspaces.separateTab)
+// owns that; here we test the WIRING: the menu entry, its enabled state,
+// and that the gesture persists the new tab structure.
+// Assumptions encoded:
+//  - the menu item lives among the tab-scoped actions (after the splits);
+//  - it is DISABLED with an explanatory title on a single-panel tab;
+//  - NOT tested here: PTY reuse on remount (HITL — TerminalSurface is mocked).
+describe('Separate in the tab context menu (#121)', () => {
+  const seedSplitTab = () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({})
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [
+                { id: 'p-1', workingDirectory: '/repo' },
+                { id: 'p-2', workingDirectory: '/srv' },
+              ],
+              tabs: [
+                {
+                  id: 't-1',
+                  name: 'main',
+                  layout: {
+                    kind: 'split',
+                    id: 's-1',
+                    orientation: 'horizontal',
+                    ratio: 0.5,
+                    first: { kind: 'leaf', id: 'p-1' },
+                    second: { kind: 'leaf', id: 'p-2' },
+                  },
+                },
+              ],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  it('offers Separate on a split tab; clicking turns it into two tabs (shells intact)', async () => {
+    seedSplitTab()
+    render(<WorkspaceShell />)
+    const panel = await screen.findByTestId('panel-ws-1')
+    expect(within(panel).getAllByRole('tab')).toHaveLength(1)
+
+    fireEvent.contextMenu(within(panel).getAllByRole('tab')[0])
+    const item = await screen.findByRole('menuitem', { name: /^separate$/i })
+    expect(item).toBeEnabled()
+
+    fireEvent.click(item)
+
+    // The tab bar now holds TWO tabs — the original (shrunk to its first
+    // panel) plus the spawned sibling.
+    await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+    await waitFor(() => {
+      const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_workspaces')
+      const last = calls[calls.length - 1][1] as {
+        workspaces: Array<{
+          id: string
+          tabs?: Array<{ id: string; layout: { kind: string; id?: string } }>
+        }>
+      }
+      const tabs = last.workspaces.find((w) => w.id === 'ws-1')!.tabs!
+      expect(tabs).toHaveLength(2)
+      expect(tabs[0]).toMatchObject({ id: 't-1', layout: { kind: 'leaf', id: 'p-1' } })
+      expect(tabs[1]).toMatchObject({ layout: { kind: 'leaf', id: 'p-2' } })
+    })
+  })
+
+  it('disables Separate on a single-panel tab with an explanatory title', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings') return Promise.resolve({})
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [{ id: 'p-1' }],
+              tabs: [{ id: 't-1', name: 'one', layout: { kind: 'leaf', id: 'p-1' } }],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    const panel = await screen.findByTestId('panel-ws-1')
+    fireEvent.contextMenu(within(panel).getAllByRole('tab')[0])
+
+    const item = await screen.findByRole('menuitem', { name: /^separate$/i })
+    expect(item).toBeDisabled()
+    expect(item.getAttribute('title')).toMatch(/split/i)
+  })
+})
+
+// --- Folder lines of a split tab (#121, part 1 — the bug) --------------------
+//
+// With folder lines ON, a split tab used to render ONE line carrying the
+// focused panel's chip ("the status follows my mouse"). Since the pure
+// tabFolders fix every panel owns its line: chip + ITS OWN folder, in tree
+// order. Here we pin the DOM contract: one `.workspace-folder-line` per
+// panel, a unique testid per panel (`folder-line-<ws>-<tab>-<panel>`), and
+// the focused panel's chip full-size while the siblings render mini.
+// NOT tested here: the pure line computation (tabFolders.test.ts).
+describe('folder lines of a split tab (#121)', () => {
+  const seedSplitFolders = () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_settings')
+        return Promise.resolve({ showTabFolders: true, agentStatusEnabled: true })
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            {
+              id: 'ws-1',
+              name: 'alpha',
+              panels: [
+                { id: 'p-1', workingDirectory: '/repo' },
+                { id: 'p-2', workingDirectory: '/srv' },
+              ],
+              tabs: [
+                {
+                  id: 't-1',
+                  name: 'main',
+                  layout: {
+                    kind: 'split',
+                    id: 's-1',
+                    orientation: 'horizontal',
+                    ratio: 0.5,
+                    first: { kind: 'leaf', id: 'p-1' },
+                    second: { kind: 'leaf', id: 'p-2' },
+                  },
+                },
+              ],
+            },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+  }
+
+  it('renders ONE folder line per panel, each with its own chip and folder', async () => {
+    seedSplitFolders()
+    render(<WorkspaceShell />)
+    const row = await screen.findByTestId('workspace-row-ws-1')
+
+    const lines = row.querySelectorAll('.workspace-folder-line')
+    expect(lines).toHaveLength(2)
+
+    // Both panels carry their chip — the ACTIVE panel's full-size, the
+    // sibling's mini (the chips never move; only the dot grows, HITL round 7).
+    const chips = row.querySelectorAll('.workspace-folder-line .agent-status')
+    expect(chips).toHaveLength(2)
+    expect(chips[0].className).not.toMatch(/mini/)
+    expect(chips[1].className).toMatch(/mini/)
+
+    // Unique per-panel testids — no two lines may share one.
+    expect(screen.getByTestId('folder-line-ws-1-t-1-p-1')).toBeInTheDocument()
+    expect(screen.getByTestId('folder-line-ws-1-t-1-p-2')).toBeInTheDocument()
+
+    // Each line shows ITS OWN folder tail (/repo → "repo", /srv → "srv").
+    const folders = [...row.querySelectorAll('.workspace-folder-line__folder')].map(
+      (el) => el.textContent,
+    )
+    expect(folders).toEqual(['repo', 'srv'])
+  })
+})

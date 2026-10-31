@@ -2,22 +2,22 @@
 //
 // Pure module, sibling of tabBranch: the Settings switch `showTabFolders`
 // adds lines under the workspace's name — an agent chip followed by the
-// folder a tab's shell sits in. Explicit decisions pinned here:
+// folder a terminal panel sits in. Explicit decisions pinned here:
 //   - with agent status ON (quickupdate round 2, Adam): EVERY tab keeps its
 //     own line and its own chip — nothing merges, because each line carries
-//     that tab's live status;
-//   - with agent status OFF: tabs sharing a folder merge into ONE line —
+//     that tab's live status; #121 refines this to PER PANEL: a split tab
+//     contributes one line per terminal, so a workspace shows as many Status
+//     Agents as it runs split terminals (each bound to its own panel, in
+//     tree order — the same per-panel rule the branch labels use, v1.0);
+//   - with agent status OFF: panels sharing a folder merge into ONE line —
 //     pure folder names, duplicates are noise (quickupdate 2026-09-12,
 //     supersedes the 2026-08-31 never-merge rule). The merged line sits at
-//     the folder's FIRST tab position; chip-only lines (no folder) never
+//     the folder's FIRST panel position; chip-only lines (no folder) never
 //     merge;
-//   - the panel speaking for a tab is its focused panel when the tab is
-//     active, otherwise its first panel — the same rule the branch labels
-//     use (tabBranch.branchEntriesOfTab);
 //   - SSH-backed panels have no local folder → a chip-only line;
 //   - with session restore off (#27) the saved cwd must not pose as the
 //     folder, so every line is chip-only;
-//   - a tab without an agent still gets its line (status 'idle').
+//   - a panel without an agent still gets its line (status 'idle').
 
 import type { AgentStatus } from './agentStatus'
 import { branchDirsByTab } from './tabBranch'
@@ -33,11 +33,12 @@ export type TabFolderLine = {
 }
 
 /// Every open workspace's folder lines (workspace id → lines). With agent
-/// status ON every tab keeps its own line (its chip renders inside it); with
-/// agent status OFF tabs sharing a folder merge into one line at the
-/// folder's first tab position, and chip-only lines (folder null) stay one
-/// per tab. `statuses` is the live per-panel status map the workspace-row
-/// chips already render from.
+/// status ON every PANEL keeps its own line (#121 — a split tab yields as
+/// many lines as it holds terminals, each carrying that panel's live chip
+/// and folder); with agent status OFF panels sharing a folder merge into one
+/// line at the folder's first panel position, and chip-only lines (folder
+/// null) stay one per panel. `statuses` is the live per-panel status map the
+/// workspace-row chips already render from.
 export function tabFolderLines(
   state: WorkspaceState,
   statuses: Record<string, AgentStatus>,
@@ -48,17 +49,16 @@ export function tabFolderLines(
   const byWs: Record<string, TabFolderLine[]> = {}
   for (const ws of state.workspaces) {
     if (!state.openIds.includes(ws.id)) continue
-    const lines: TabFolderLine[] = (ws.tabs ?? []).map((tab) => {
-      const entries = byTab[tab.id] ?? []
-      const entry =
-        entries.find((e) => e.focused) ?? (entries.length > 0 ? entries[0] : null)
-      return {
+    const lines: TabFolderLine[] = (ws.tabs ?? []).flatMap((tab) =>
+      // #121: one line per PANEL, not per tab — the focused-first pick is
+      // gone; every split terminal speaks for itself, in tree order.
+      (byTab[tab.id] ?? []).map((entry) => ({
         tabId: tab.id,
-        panelId: entry?.panelId ?? '',
-        folder: entry?.dir ?? null,
-        status: (entry != null ? statuses[entry.panelId] : undefined) ?? 'idle',
-      }
-    })
+        panelId: entry.panelId,
+        folder: entry.dir ?? null,
+        status: statuses[entry.panelId] ?? 'idle',
+      })),
+    )
     if (agentStatusEnabled) {
       // Agent status ON: every line carries its tab's live chip — merging
       // would hide a tab's status, so nothing merges.
