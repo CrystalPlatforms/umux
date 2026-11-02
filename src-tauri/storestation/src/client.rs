@@ -251,6 +251,9 @@ struct WireError {
 // sessions pushing data frames and events back for hours. One reader thread
 // routes every inbound frame; callers get channels out.
 
+#[cfg(test)]
+static PENDING_GAP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -376,6 +379,13 @@ impl PersistentClient {
     /// One request → its response `result`, like the one-shot client — but
     /// safe from any thread, and subscribed sessions' frames keep flowing
     /// meanwhile (the reader routes them independently).
+    ///
+    /// Ordering contract (#122): the response route registers BEFORE the
+    /// request goes on the wire. The old write-then-register order left a
+    /// gap where the daemon's answer (routed within microseconds of the
+    /// write) found no recipient and was silently dropped — the caller then
+    /// burned the full 10 s budget on the UI thread (the restart-rebind
+    /// freeze). A response can no longer arrive before its route exists.
     pub fn call(&self, op: &str, params: Value) -> Result<Value, ErrorObj> {
         if self.is_dead() {
             return Err(ErrorObj::new(
@@ -389,22 +399,42 @@ impl PersistentClient {
             let mut inner = self.inner.lock().expect("persistent inner lock");
             let id = inner.next_id;
             inner.next_id += 1;
-            let request = json!({ "id": id, "op": op, "params": params });
-            write_control(&mut inner.write, &request).map_err(|e| {
-                ErrorObj::new(
-                    codes::IO_ERROR,
-                    format!("could not write to the umux-storestation socket: {e}"),
-                    vec![],
-                )
-            })?;
             id
         };
-        self.pending
-            .lock()
-            .expect("pending map lock")
-            .insert(id, tx);
+        // Register FIRST (#122): from here on, any response for this id is
+        // deliverable, whenever it arrives.
+        self.pending.lock().expect("pending map lock").insert(id, tx);
+        let write_result = {
+            let mut inner = self.inner.lock().expect("persistent inner lock");
+            let request = json!({ "id": id, "op": op, "params": params });
+            write_control(&mut inner.write, &request)
+        };
+        // A failed write un-registers: the answer can never come, and the
+        // entry must not leak (the over-cap frame path lands here — the
+        // daemon refuses the frame and closes).
+        if let Err(e) = write_result {
+            self.pending.lock().expect("pending map lock").remove(&id);
+            return Err(ErrorObj::new(
+                codes::IO_ERROR,
+                format!("could not write to the umux-storestation socket: {e}"),
+                vec![],
+            ));
+        }
         // The bounded request budget (protocol: 10 s) — but WITHOUT stream
         // timeouts ending the connection: the reader keeps running either way.
+        #[cfg(test)]
+        {
+            // Determinism knob for the pending-registration test below: the
+            // caller stalls here AFTER the write — exactly the gap the old
+            // write-then-register order exposed. Compiles out of production.
+            let gap = std::sync::atomic::AtomicU64::load(
+                &PENDING_GAP_MS,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            if gap > 0 {
+                std::thread::sleep(Duration::from_millis(gap));
+            }
+        }
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(envelope) => decode_response(envelope),
             Err(_) => {
@@ -528,5 +558,86 @@ fn offline_error(config_dir: &Path, _e: std::io::Error) -> ConnectError {
     {
         let _ = config_dir;
         ConnectError::NotRunning { stale: false }
+    }
+}
+
+// #122: the response route must exist BEFORE its request can be answered.
+// The knob stalls the caller AFTER the write — the exact gap the old
+// write-then-register order left open — and the daemon's (microsecond) answer
+// lands inside it. With the route registered first the answer is delivered;
+// with the old order it is silently dropped and the caller burns the budget.
+#[cfg(test)]
+mod pending_registration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::time::{Duration, Instant};
+
+    struct TestServer {
+        dir: tempfile::TempDir,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        fn start() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let prepared = crate::server::prepare(dir.path()).expect("prepare");
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_flag = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                crate::server::serve(prepared, move || stop_flag.load(AtomicOrdering::SeqCst))
+            });
+            TestServer {
+                dir,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn client(&self) -> PersistentClient {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match PersistentClient::connect(self.dir.path(), "test", "1.0.0") {
+                    Ok(client) => return client,
+                    Err(_) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(e) => panic!("connect to the test daemon: {e:?}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.stop.store(true, AtomicOrdering::SeqCst);
+            self.handle.take().unwrap().join().expect("serve thread ends");
+        }
+    }
+
+    // AC: an answer arriving INSIDE the post-write gap still reaches its
+    // caller — fast, with its own id's result. Bound 5 s: well inside the
+    // 10 s budget whose burn is the drop's signature (the old order failed
+    // here at exactly 10 s with the budget error).
+    #[test]
+    fn an_answer_during_the_post_write_gap_is_never_dropped() {
+        let server = TestServer::start();
+        let client = server.client();
+        PENDING_GAP_MS.store(400, AtomicOrdering::SeqCst);
+
+        let started = Instant::now();
+        let result = client.call("storestation.status", serde_json::json!({}));
+        let elapsed = started.elapsed();
+        PENDING_GAP_MS.store(0, AtomicOrdering::SeqCst);
+
+        let result = result.expect("the answer routed through the gap");
+        assert!(
+            result.get("daemonVersion").and_then(Value::as_str).is_some(),
+            "the caller got ITS OWN op's answer: {result}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the answer must be delivered, not dropped into the budget — took {elapsed:?}"
+        );
     }
 }

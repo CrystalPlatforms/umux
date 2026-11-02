@@ -296,7 +296,18 @@ impl Registry {
         code
     }
 
-    pub fn write_bytes(&mut self, id: &str, data_b64: &str) -> Result<(), ErrorObj> {
+    /// Resolve one session's write target: the decoded bytes and a CLONEABLE
+    /// writer for its master. The caller writes OUTSIDE the registry lock
+    /// (#122) — a master write blocks while the session's input queue is
+    /// full (a raw-mode program that stopped reading), and that block must
+    /// stall only this session's keystrokes, never the other sessions' ops
+    /// (the same class as the 2026-10-20 cwd freeze). Params: `id` + base64
+    /// `data`; validation errors here, I/O errors on the caller's write.
+    pub fn write_target(
+        &self,
+        id: &str,
+        data_b64: &str,
+    ) -> Result<(session_core::pty_service::PtyWriter, Vec<u8>), ErrorObj> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(data_b64)
             .map_err(|_| bad_params("\"data\" is not valid base64"))?;
@@ -305,9 +316,11 @@ impl Registry {
             .get(id)
             .ok_or_else(|| session_not_found(id))?
             .handle;
-        self.pty
-            .write(&handle, &bytes)
-            .map_err(|e| ErrorObj::new(codes::IO_ERROR, format!("write failed: {e}"), vec![]))
+        let writer = self
+            .pty
+            .writer_for(&handle)
+            .map_err(|e| ErrorObj::new(codes::IO_ERROR, format!("write failed: {e}"), vec![]))?;
+        Ok((writer, bytes))
     }
 
     pub fn resize(&mut self, id: &str, cols: u16, rows: u16) -> Result<(), ErrorObj> {

@@ -108,8 +108,16 @@ impl SessionCore for InProcessDriver {
     }
 
     fn pty_write(&self, id: u32, data: &[u8]) -> io::Result<()> {
-        let mut pty = self.pty.lock().map_err(|e| io::Error::other(e.to_string()))?;
-        pty.write(&session_core::pty_service::PtyHandle { id }, data)
+        // The lock covers only the HANDLE lookup; the master write runs off
+        // the engine lock (#122 class, app side): a jammed panel's full
+        // input queue must stall only its own keystrokes, never the other
+        // panels' writes/opens/status polls.
+        let writer = self
+            .pty
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?
+            .writer_for(&session_core::pty_service::PtyHandle { id })?;
+        writer.write_all(data)
     }
 
     fn pty_resize(&self, id: u32, cols: u16, rows: u16) -> io::Result<()> {

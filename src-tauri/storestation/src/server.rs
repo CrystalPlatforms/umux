@@ -532,11 +532,19 @@ pub fn dispatch(
                 .ok_or_else(|| {
                     ErrorObj::new(codes::BAD_PARAMS, "session.write needs \"data\" (base64 bytes)", vec![])
                 })?;
-            state
+            // Two-phase (#122): resolve the writer UNDER the registry lock,
+            // then write OUTSIDE it. The master write blocks while the
+            // session's input queue is full; under the lock that blocked
+            // EVERY session op on EVERY connection (issue #122's whole-
+            // Storestation freeze) — now it stalls only this session.
+            let (writer, bytes) = state
                 .registry
                 .lock()
                 .expect("registry lock")
-                .write_bytes(&id, data)?;
+                .write_target(&id, data)?;
+            writer
+                .write_all(&bytes)
+                .map_err(|e| ErrorObj::new(codes::IO_ERROR, format!("write failed: {e}"), vec![]))?;
             Ok(json!({ "written": true }))
         }
         "session.resize" => {

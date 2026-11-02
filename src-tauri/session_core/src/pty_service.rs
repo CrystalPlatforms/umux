@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// Opaque handle identifying one open PTY.
@@ -130,7 +131,7 @@ mod job {
 
 struct PtyEntry {
     master: SendMaster,
-    writer: Box<dyn Write + Send>,
+    writer: PtyWriter,
     child: Box<dyn portable_pty::Child + Send>,
     // Cached exit code once the child has been reaped. `None` until then, so a
     // panel can poll `child_exit_code` without re-waiting an already-dead child
@@ -153,6 +154,32 @@ struct PtyEntry {
 // serialized by the service's Mutex, so sharing across threads is safe.
 struct SendMaster(Box<dyn portable_pty::MasterPty>);
 unsafe impl Send for SendMaster {}
+
+/// A cloneable write handle to one PTY's master (the keystroke path). The
+/// clone is what lets CALLERS write without holding the engine/registry
+/// lock (#122): a master write blocks while the session's input queue is
+/// full (a raw-mode program that stopped reading — e.g. a suspended AI
+/// CLI), and that block must stall only THIS session's keystrokes, never
+/// the other sessions' ops. Holding a clone also outlives the entry: a
+/// session killed mid-write closes the master under the writer, so the
+/// in-flight `write_all` errors out instead of hanging forever.
+pub struct PtyWriter(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl Clone for PtyWriter {
+    fn clone(&self) -> Self {
+        PtyWriter(Arc::clone(&self.0))
+    }
+}
+
+impl PtyWriter {
+    pub fn write_all(&self, data: &[u8]) -> io::Result<()> {
+        let mut writer = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("pty writer lock poisoned"))?;
+        writer.write_all(data)
+    }
+}
 
 /// The PTY's foreground process-group leader (who owns the terminal right
 /// now), or `None` when the OS cannot say. Unix: portable-pty's
@@ -1009,7 +1036,7 @@ impl PtyService {
             id,
             PtyEntry {
                 master: SendMaster(pair.master),
-                writer,
+                writer: PtyWriter(Arc::new(Mutex::new(writer))),
                 child,
                 exit_code: None,
                 spawn_cwd,
@@ -1020,11 +1047,20 @@ impl PtyService {
     }
 
     pub fn write(&mut self, handle: &PtyHandle, data: &[u8]) -> io::Result<()> {
-        let entry = self
-            .entries
-            .get_mut(&handle.id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown pty handle"))?;
-        entry.writer.write_all(data)
+        // Only the per-session writer lock is held across the write — a
+        // full input queue on THIS session stalls this session alone.
+        self.writer_for(handle)?.write_all(data)
+    }
+
+    /// A cloneable write handle for writing OUTSIDE any engine lock (#122).
+    /// The caller drops the engine/registry lock before calling
+    /// [`PtyWriter::write_all`] — a blocked master write then holds nothing
+    /// but this one session's writer mutex.
+    pub fn writer_for(&self, handle: &PtyHandle) -> io::Result<PtyWriter> {
+        self.entries
+            .get(&handle.id)
+            .map(|entry| entry.writer.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown pty handle"))
     }
 
     pub fn resize(&mut self, handle: &PtyHandle, cols: u16, rows: u16) -> io::Result<()> {

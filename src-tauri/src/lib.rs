@@ -101,9 +101,8 @@ struct PtyCwdPayload {
 }
 
 #[tauri::command]
-fn pty_open(
+async fn pty_open(
     app: AppHandle,
-    driver: State<'_, RouterDriver>,
     mute: State<'_, MuteFlag>,
     last: State<'_, LastNotificationPayload>,
     shell: Option<String>,
@@ -145,7 +144,25 @@ fn pty_open(
         tab_id,
         panel_id,
     };
-    let (id, rx) = driver.pty_open(&params).map_err(|e| e.to_string())?;
+    // The whole open runs on the blocking pool (#122, macOS restart freeze):
+    // a daemon-backed panel open is a connect plus three socket round-trips,
+    // each bounded by SECONDS (connect 3 s, request 10 s). As a SYNC command
+    // every one of those bounds landed on the main/UI thread — a slow or
+    // dropped daemon answer froze the whole window right at the relaunch
+    // rebind, panel after panel. Order across panels was never significant
+    // (per-panel open_slots serializes a panel's own concurrent mounts), so
+    // the concurrency is safe; the frontend's invoke contract is unchanged.
+    let (id, rx) = {
+        let state_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            state_app
+                .state::<RouterDriver>()
+                .pty_open(&params)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("pty_open worker failed: {e}"))?
+    }?;
 
     // Drain the PTY's output channel on its own thread and forward each chunk
     // to the renderer. The channel disconnects (loop ends) when the PTY closes.
