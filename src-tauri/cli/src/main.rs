@@ -8,8 +8,19 @@
 //! v1.7.0 TUI will read). `UMUX_CONFIG_DIR` (see store_core::paths) moves the
 //! whole store root — that is how the test suite points the binary at a
 //! tempdir.
+//!
+//! v1.8.0 (#123): one command family — canonical `resource.verb` names
+//! (`workspaces create`, `panes split`, `settings get`) whose v1.6.x short
+//! spellings (`new`, `rm`, `list`, `split`, `config`, …) stay as HIDDEN
+//! aliases of the SAME commands, all routed through one dispatch (nothing
+//! removed; prose behavior byte-identical). Every store command answers
+//! `--json` with the doc/error-object shapes the live commands already use
+//! — exit codes do NOT change between the modes. `agent-context` is
+//! GENERATED from [`COMMAND_TABLE`], the single source of truth the parity
+//! test holds against `--help` and real dispatch.
 
 use clap::{CommandFactory, Parser};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use store_core::cmux_import::{
     apply_import_plan, build_import_preview, build_preview_tree, parse_cmux_sources,
@@ -21,7 +32,7 @@ use store_core::workspace_store::{
 };
 use umux_storestation::protocol::{codes, ErrorObj};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 mod notify;
 
@@ -50,34 +61,93 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// The canonical v1.8.0 command family (#123): `resource.verb` names. The
+/// v1.6.x short spellings live as hidden top-level aliases of the SAME
+/// commands (see [`LegacyStore`]) — one dispatch, one behavior, two ways to
+/// spell it.
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Print the saved workspaces/tabs/panels as JSON
-    List,
-    /// Dump the chosen store as a neutral exchange JSON document (#61; the
-    /// format is documented in the README's Exchange format section)
-    Export {
-        /// Write to FILE instead of stdout
-        #[arg(short = 'o', long = "output", value_name = "FILE")]
-        output: Option<std::path::PathBuf>,
-    },
-    /// Show a desktop notification without the app running (#62)
-    Notify {
-        /// The notification text (passed through as-is)
-        text: String,
-    },
-    /// Import workspaces into the chosen store (#63)
-    Import {
+    /// Workspace commands (create, list, rename, delete, export, import)
+    Workspaces {
         #[command(subcommand)]
-        action: ImportAction,
+        action: WorkspaceAction,
     },
-    /// Create a new empty workspace
-    New { name: String },
-    /// Delete a workspace by name
-    Rm { name: String },
-    /// Rename a workspace
-    Rename { old_name: String, new_name: String },
-    /// Split a workspace's panel layout (side-by-side by default)
+    /// Panel commands (split a workspace's layout)
+    Panes {
+        #[command(subcommand)]
+        action: PaneAction,
+    },
+    /// Settings commands (get, set)
+    Settings {
+        #[command(subcommand)]
+        action: SettingsAction,
+    },
+    // --- the v1.6.x short spellings: aliases of the canonical commands ---
+    // Hidden from --help (the canonical surface is what help teaches); the
+    // agent-context table documents every alias, and the alias-equivalence
+    // suite proves each spelling produces identical outcomes.
+    /// Alias of `workspaces list` (v1.6.x)
+    #[command(hide = true)]
+    List {
+        /// Print the machine-readable document
+        #[arg(long)]
+        json: bool,
+        /// Cap the workspaces list; beyond it `truncated:true` (max 1000)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
+    /// Alias of `workspaces create` (v1.6.x)
+    #[command(hide = true)]
+    New {
+        name: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Alias of `workspaces create`
+    #[command(hide = true)]
+    Create {
+        name: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Alias of `workspaces delete` (v1.6.x)
+    #[command(hide = true)]
+    Rm {
+        name: String,
+        /// Print the machine-readable error object on failure
+        #[arg(long)]
+        json: bool,
+    },
+    /// Alias of `workspaces delete`
+    #[command(hide = true)]
+    Delete {
+        name: String,
+        /// Print the machine-readable error object on failure
+        #[arg(long)]
+        json: bool,
+    },
+    /// Alias of `workspaces rename` (v1.6.x)
+    #[command(hide = true)]
+    Rename {
+        old_name: String,
+        new_name: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Alias of `workspaces rename`
+    #[command(hide = true)]
+    Update {
+        old_name: String,
+        new_name: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Alias of `panes split` (v1.6.x)
+    #[command(hide = true)]
     Split {
         name: String,
         /// Stack the new panes top/bottom instead of side-by-side
@@ -86,11 +156,39 @@ enum Command {
         /// Request side-by-side explicitly (the default)
         #[arg(long)]
         horizontal: bool,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
     },
-    /// Get or set settings
+    /// Alias of `workspaces export` (v1.6.x)
+    #[command(hide = true)]
+    Export {
+        /// Write to FILE instead of stdout
+        #[arg(short = 'o', long = "output", value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+        /// Print the machine-readable error object on failure
+        #[arg(long)]
+        json: bool,
+    },
+    /// Alias of `workspaces import` (v1.6.x)
+    #[command(hide = true)]
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+        /// Print the machine-readable result/error documents
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Alias of `settings get|set` (v1.6.x)
+    #[command(hide = true)]
     Config {
         #[command(subcommand)]
-        action: ConfigAction,
+        action: SettingsAction,
+    },
+    /// Show a desktop notification without the app running (#62)
+    Notify {
+        /// The notification text (passed through as-is)
+        text: String,
     },
     /// Show umux Storestation (daemon) health — offline is a state, not an error (#83)
     Status {
@@ -122,6 +220,100 @@ enum Command {
     },
     /// Print a machine-readable description of this CLI (schema 1, #83)
     AgentContext,
+}
+
+/// The `workspaces` verb family (#123). Every variant carries `--json` (the
+/// v1.8.0 retrofit): success prints a result document, failure prints the
+/// catalog error object — prose behavior without `--json` is untouched.
+#[derive(clap::Subcommand)]
+enum WorkspaceAction {
+    /// Print the saved workspaces/tabs/panels as JSON
+    List {
+        /// Print the machine-readable document (live+saved when the app serves the socket)
+        #[arg(long)]
+        json: bool,
+        /// Cap the workspaces list; beyond it `truncated:true` (default 100 with --json, max 1000)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
+    /// Create a new empty workspace
+    Create {
+        name: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a workspace by name
+    Delete {
+        name: String,
+        /// Print the machine-readable error object on failure
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename a workspace
+    Rename {
+        old_name: String,
+        new_name: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Dump the chosen store as a neutral exchange JSON document (#61; the
+    /// format is documented in the README's Exchange format section)
+    Export {
+        /// Write to FILE instead of stdout
+        #[arg(short = 'o', long = "output", value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+        /// Print the machine-readable error object on failure
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import workspaces into the chosen store (#63)
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+        /// Print the machine-readable result/error documents
+        #[arg(long, global = true)]
+        json: bool,
+    },
+}
+
+/// The `panes` verb family (#123).
+#[derive(clap::Subcommand)]
+enum PaneAction {
+    /// Split a workspace's panel layout (side-by-side by default)
+    Split {
+        name: String,
+        /// Stack the new panes top/bottom instead of side-by-side
+        #[arg(long, conflicts_with = "horizontal")]
+        vertical: bool,
+        /// Request side-by-side explicitly (the default)
+        #[arg(long)]
+        horizontal: bool,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The `settings` verb family (#123) — also the `config` alias's body.
+#[derive(clap::Subcommand)]
+enum SettingsAction {
+    /// Print one setting's value, or every setting as JSON when no key is given
+    Get {
+        key: Option<String>,
+        /// Print the machine-readable document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change one setting
+    Set {
+        key: String,
+        value: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -161,14 +353,6 @@ enum SessionsAction {
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
     },
-}
-
-#[derive(clap::Subcommand)]
-enum ConfigAction {
-    /// Print one setting's value, or every setting as JSON when no key is given
-    Get { key: Option<String> },
-    /// Change one setting
-    Set { key: String, value: String },
 }
 
 #[derive(clap::Subcommand)]
@@ -218,21 +402,82 @@ impl Cli {
     }
 }
 
-/// Whether a subcommand reads or writes a store — only those require
+/// The ONE dispatch mapping (#123): every spelling — canonical
+/// `resource.verb` or v1.6.x alias — lands on the same [`Canonical`]
+/// variant, so aliases cannot drift from their canon.
+enum Canonical {
+    WorkspacesList {
+        json: bool,
+        limit: Option<usize>,
+    },
+    WorkspacesCreate {
+        name: String,
+        json: bool,
+    },
+    WorkspacesDelete {
+        name: String,
+        json: bool,
+    },
+    WorkspacesRename {
+        old_name: String,
+        new_name: String,
+        json: bool,
+    },
+    WorkspacesExport {
+        output: Option<std::path::PathBuf>,
+        json: bool,
+    },
+    WorkspacesImport {
+        action: ImportAction,
+        json: bool,
+    },
+    PanesSplit {
+        name: String,
+        vertical: bool,
+        json: bool,
+    },
+    SettingsGet {
+        key: Option<String>,
+        json: bool,
+    },
+    SettingsSet {
+        key: String,
+        value: String,
+        json: bool,
+    },
+    Notify {
+        text: String,
+    },
+    Status {
+        json: bool,
+    },
+    SessionsList {
+        json: bool,
+        limit: Option<usize>,
+    },
+    Attach {
+        json: bool,
+        dry_run: bool,
+    },
+    CoreSession(CoreSessionAction),
+    AgentContext,
+}
+
+/// Whether a canonical command reads or writes a store — only those require
 /// --desk/--term, so a forgotten flag is refused instead of silently writing
 /// the desktop store. `notify` touches no store (it only talks to the OS
 /// notification system), so it runs without a target; the Storestation commands
 /// (`status`, `sessions list`, `agent-context`) talk to the daemon socket, not
 /// a store (#83, #84).
-fn needs_store(command: &Command) -> bool {
+fn needs_store(command: &Canonical) -> bool {
     !matches!(
         command,
-        Command::Notify { .. }
-            | Command::Status { .. }
-            | Command::Sessions { .. }
-            | Command::Attach { .. }
-            | Command::CoreSession { .. }
-            | Command::AgentContext
+        Canonical::Notify { .. }
+            | Canonical::Status { .. }
+            | Canonical::SessionsList { .. }
+            | Canonical::Attach { .. }
+            | Canonical::CoreSession { .. }
+            | Canonical::AgentContext
     )
 }
 
@@ -251,6 +496,111 @@ fn settings_store_for(target: Target) -> SettingsStore {
         Target::Desk => SettingsStore::new(store_core::paths::settings_path()),
         Target::Term => SettingsStore::new(store_core::paths::term_settings_path()),
     }
+}
+
+// --- v1.8.0 retrofit: --json docs and the error catalog (#123) ---------------
+
+/// Print a `--json` result document — pretty-printed, like every live
+/// command document (`status --json`, `attach --json`).
+fn print_doc(doc: &Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(doc).expect("result documents are always serializable")
+    );
+}
+
+/// The ONE exit path for a failed command in either mode: the catalog error
+/// object (`{code,message,next,retryable}`) on stderr with `--json`, the
+/// exact v1.6.x prose line otherwise (the object's `message` IS that line).
+/// Exit codes are IDENTICAL in both modes — existing scripts keep their `$?`.
+fn fail(json_mode: bool, err: &ErrorObj, exit_code: i32) -> ! {
+    if json_mode {
+        eprintln!("{}", serde_json::to_string(err).expect("error objects serialize"));
+    } else {
+        eprintln!("{}", err.message);
+    }
+    std::process::exit(exit_code);
+}
+
+/// The `workspaces list` limit: `--json` bounds by default (100) because the
+/// machine-readable document is the agents' surface; the prose path without
+/// an explicit `--limit` stays byte-identical to v1.6.x (no truncation, no
+/// marker). Max 1000 — the protocol's bound for every list.
+fn parse_list_limit(limit: Option<usize>, json_mode: bool) -> Result<Option<usize>, ErrorObj> {
+    match limit {
+        None => Ok(if json_mode { Some(100) } else { None }),
+        Some(0) => Err(ErrorObj::new(
+            codes::LIMIT_INVALID,
+            "\"limit\" must be an integer between 1 and 1000",
+            vec!["default is 100 with --json, max is 1000".into()],
+        )),
+        Some(n) if n > 1000 => Err(ErrorObj::new(
+            codes::LIMIT_INVALID,
+            "\"limit\" must be an integer between 1 and 1000",
+            vec!["default is 100 with --json, max is 1000".into()],
+        )),
+        Some(n) => Ok(Some(n)),
+    }
+}
+
+/// Truncate ONE section of a list document to `limit` workspaces: the
+/// workspaces array keeps its FIRST `limit` entries and the interleaved
+/// `order` drops the ids that fell away (groups stay — they are not
+/// truncated). Returns whether anything was cut.
+fn truncate_section(section: &mut Value, limit: usize) -> bool {
+    // The group ids are collected BEFORE the workspaces array is borrowed
+    // mutably (one borrow at a time).
+    let group_ids: HashSet<String> = section
+        .get("groups")
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups
+                .iter()
+                .filter_map(|g| g.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(workspaces) = section.get_mut("workspaces").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    if workspaces.len() <= limit {
+        return false;
+    }
+    let kept: Vec<Value> = workspaces[..limit].to_vec();
+    let kept_ids: HashSet<String> = kept
+        .iter()
+        .filter_map(|w| w.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    *workspaces = kept;
+    if let Some(order) = section.get_mut("order").and_then(Value::as_array_mut) {
+        order.retain(|id| {
+            id.as_str()
+                .map(|s| kept_ids.contains(s) || group_ids.contains(s))
+                .unwrap_or(true)
+        });
+    }
+    true
+}
+
+/// Truncate the list document's `live` and `saved` sections; returns whether
+/// either side was cut (the `truncated` marker covers both).
+fn truncate_sections(doc: &mut Value, limit: usize) -> bool {
+    let mut any = false;
+    for key in ["live", "saved"] {
+        if let Some(section) = doc.get_mut(key) {
+            if section.is_object() {
+                any |= truncate_section(section, limit);
+            }
+        }
+    }
+    any
+}
+
+/// The saved store as a JSON value (what `serialize_config` prints, parsed
+/// back — the stored shape IS the document shape).
+fn saved_store_value(target: Target) -> Value {
+    let text = serialize_config(&workspace_store_for(target).load());
+    serde_json::from_str(&text).expect("the saved store is always valid JSON")
 }
 
 // --- import (#63) ------------------------------------------------------------
@@ -312,23 +662,29 @@ fn cmux_session_path(home: &std::path::Path) -> Option<std::path::PathBuf> {
     candidates.into_iter().next()
 }
 
-/// The `umux import cmux` pipeline: parse → plan → apply through store_core.
-/// A malformed source errors before the store is touched; `--dry-run` prints
-/// the collision-resolved preview tree (the parity golden's shape) and writes
-/// nothing.
+/// The `umux workspaces import cmux` pipeline: parse → plan → apply through
+/// store_core. A malformed source errors before the store is touched;
+/// `--dry-run` prints the collision-resolved preview tree (the parity
+/// golden's shape) and writes nothing.
 #[cfg(not(windows))]
 fn run_cmux_import(
     target: Target,
     config_text: Option<String>,
     session_text: Option<String>,
     dry_run: bool,
+    json_mode: bool,
 ) {
     let plan = match parse_cmux_sources(config_text.as_deref(), session_text.as_deref()) {
         Ok(plan) => plan,
-        Err(message) => {
-            eprintln!("cmux import failed: {message}");
-            std::process::exit(1);
-        }
+        Err(message) => fail(
+            json_mode,
+            &ErrorObj::new(
+                codes::IO_ERROR,
+                format!("cmux import failed: {message}"),
+                vec!["check the cmux source files (--config/--session)".into()],
+            ),
+            1,
+        ),
     };
     let store = workspace_store_for(target);
     let live = store.load();
@@ -344,30 +700,49 @@ fn run_cmux_import(
         return;
     }
     store.save(&planned).expect("save workspace store");
-    println!(
-        "Imported {} workspaces and {} groups from cmux.",
-        plan.workspaces.len(),
-        plan.groups.len()
-    );
+    if json_mode {
+        print_doc(&json!({
+            "imported": {
+                "workspaces": plan.workspaces.len(),
+                "groups": plan.groups.len(),
+            }
+        }));
+    } else {
+        println!(
+            "Imported {} workspaces and {} groups from cmux.",
+            plan.workspaces.len(),
+            plan.groups.len()
+        );
+    }
 }
 
-/// The `umux import umux <file>` restore: the exchange document REPLACES the
-/// chosen store (the round-trip semantic). A malformed document errors
-/// naming the file, store untouched.
-fn run_umux_import(target: Target, file: &std::path::Path, dry_run: bool) {
+/// The `umux workspaces import umux <file>` restore: the exchange document
+/// REPLACES the chosen store (the round-trip semantic). A malformed document
+/// errors naming the file, store untouched.
+fn run_umux_import(target: Target, file: &std::path::Path, dry_run: bool, json_mode: bool) {
     let text = match std::fs::read_to_string(file) {
         Ok(text) => text,
-        Err(e) => {
-            eprintln!("could not read {}: {e}", file.display());
-            std::process::exit(1);
-        }
+        Err(e) => fail(
+            json_mode,
+            &ErrorObj::new(
+                codes::IO_ERROR,
+                format!("could not read {}: {e}", file.display()),
+                vec!["check the path — the file must be an `umux export` document".into()],
+            ),
+            1,
+        ),
     };
     let data = match from_exchange(&text) {
         Ok((_, data)) => data,
-        Err(message) => {
-            eprintln!("{}: {message}", file.display());
-            std::process::exit(1);
-        }
+        Err(message) => fail(
+            json_mode,
+            &ErrorObj::new(
+                codes::BAD_PARAMS,
+                format!("{}: {message}", file.display()),
+                vec!["the file must be an `umux export` exchange document".into()],
+            ),
+            1,
+        ),
     };
     let store = workspace_store_for(target);
     if dry_run {
@@ -385,12 +760,21 @@ fn run_umux_import(target: Target, file: &std::path::Path, dry_run: bool) {
         return;
     }
     store.save(&data).expect("save workspace store");
-    println!(
-        "Imported {} workspaces and {} groups from {}.",
-        data.workspaces.len(),
-        data.groups.len(),
-        file.display()
-    );
+    if json_mode {
+        print_doc(&json!({
+            "imported": {
+                "workspaces": data.workspaces.len(),
+                "groups": data.groups.len(),
+            }
+        }));
+    } else {
+        println!(
+            "Imported {} workspaces and {} groups from {}.",
+            data.workspaces.len(),
+            data.groups.len(),
+            file.display()
+        );
+    }
 }
 
 /// Read one setting by its kebab-case CLI key, or `None` for an unknown key.
@@ -407,7 +791,7 @@ fn settings_get(settings: &Settings, key: &str) -> Option<String> {
     })
 }
 
-/// Strict boolean for `config set` — refuse anything unambiguous shells
+/// Strict boolean for `settings set` — refuse anything unambiguous shells
 /// might still disagree on ("yes", "1", "TRUE") so the file never gains a
 /// surprise value.
 fn parse_bool(value: &str) -> Result<bool, String> {
@@ -518,6 +902,17 @@ fn split_leftmost(
     }
 }
 
+/// The domain error for "no workspace named X" (#123): the catalog code is
+/// new, the MESSAGE is the exact v1.6.x prose line, so without `--json`
+/// nothing changes but with it agents get the enumerated code.
+fn workspace_not_found_error(name: &str) -> ErrorObj {
+    ErrorObj::new(
+        codes::WORKSPACE_NOT_FOUND,
+        format!("no workspace named \"{name}\""),
+        vec!["list the saved workspaces: umux workspaces list --desk --json".into()],
+    )
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Bare `umux` is the "what can this do?" entry: the full command list on
@@ -546,318 +941,548 @@ fn main() {
 
     // Every store-touching subcommand requires a target; the bare launcher
     // (`--term` with no command, v1.7.0's TUI), help and `notify` don't.
-    if cli.command.as_ref().is_some_and(needs_store) {
-        if let Err(hint) = cli.target() {
-            eprintln!("{hint}");
-            std::process::exit(2);
+    // The target probe runs BEFORE the command is moved out of `cli` (one
+    // field move poisons method calls on the rest of the struct).
+    let target_probe = cli.target();
+    let Some(command) = cli.command else {
+        return;
+    };
+    let canonical = canonical(command);
+    if needs_store(&canonical) {
+        if let Err(hint) = target_probe {
+            // The usage refusal in --json mode is the catalog's badParams
+            // object — same exit 2, structured for agents (#123).
+            if cli_command_wants_json(&canonical) {
+                fail(
+                    true,
+                    &ErrorObj::new(codes::BAD_PARAMS, hint, vec!["--desk or --term names which store to use".into()]),
+                    2,
+                );
+            } else {
+                eprintln!("{hint}");
+                std::process::exit(2);
+            }
         }
     }
 
-    let target = cli.target().ok();
+    let target = target_probe.ok();
     let mut ids = Ids::new();
-    match cli.command {
-        Some(Command::List) => {
-            let store = workspace_store_for(target.unwrap());
-            println!("{}", serialize_config(&store.load()));
+    match canonical {
+        Canonical::WorkspacesList { json, limit } => {
+            run_workspaces_list(target.unwrap(), json, limit)
         }
-        Some(Command::Export { output }) => {
-            let store = workspace_store_for(target.unwrap());
-            let json = to_exchange(ExchangeKind::Workspaces, &store.load());
-            match output {
-                Some(path) => {
-                    if let Err(e) = std::fs::write(&path, format!("{json}\n")) {
-                        eprintln!("could not write {}: {e}", path.display());
-                        std::process::exit(1);
-                    }
-                }
-                None => println!("{json}"),
-            }
+        Canonical::WorkspacesCreate { name, json } => {
+            run_workspaces_create(target.unwrap(), name, json, &mut ids)
         }
-        Some(Command::Notify { text }) => {
+        Canonical::WorkspacesDelete { name, json } => {
+            run_workspaces_delete(target.unwrap(), name, json)
+        }
+        Canonical::WorkspacesRename {
+            old_name,
+            new_name,
+            json,
+        } => run_workspaces_rename(target.unwrap(), old_name, new_name, json),
+        Canonical::WorkspacesExport { output, json } => {
+            run_workspaces_export(target.unwrap(), output, json)
+        }
+        Canonical::WorkspacesImport { action, json } => {
+            run_workspaces_import(target.unwrap(), action, json)
+        }
+        Canonical::PanesSplit {
+            name,
+            vertical,
+            json,
+        } => run_panes_split(target.unwrap(), name, vertical, json, &mut ids),
+        Canonical::SettingsGet { key, json } => {
+            run_settings_get(target.unwrap(), key, json)
+        }
+        Canonical::SettingsSet { key, value, json } => {
+            run_settings_set(target.unwrap(), key, value, json)
+        }
+        Canonical::Notify { text } => {
             if let Err(message) = notify::send(&notify::PlatformNotifier, &text) {
                 eprintln!("{message}");
                 std::process::exit(1);
             }
         }
-        Some(Command::Import { action }) => match action {
-            ImportAction::Cmux {
-                dry_run,
-                config,
-                session,
-            } => {
-                // Windows import is deliberately refused (decision
-                // #4 — cmux's own files were never observed there).
-                #[cfg(windows)]
-                {
-                    let _ = (config, session, dry_run);
-                    eprintln!("cmux import is not available on Windows.");
-                    std::process::exit(1);
-                }
-                #[cfg(not(windows))]
-                {
-                    let (config_text, session_text) =
-                        cmux_source_texts(config.as_deref(), session.as_deref());
-                    run_cmux_import(target.unwrap(), config_text, session_text, dry_run);
-                }
-            }
-            ImportAction::Umux { file, dry_run } => {
-                run_umux_import(target.unwrap(), &file, dry_run)
-            }
-        },
-        Some(Command::New { name }) => {
-            let store = workspace_store_for(target.unwrap());
-            let mut data = store.load();
-            // Mirror the app's createWorkspace (src/workspaces.ts): one tab
-            // named "Tab 1" holding one Leaf panel.
-            let panel_id = ids.next();
-            let workspace = Workspace {
-                id: ids.next(),
-                name,
-                panels: vec![],
-                layout: None,
-                tabs: vec![Tab {
-                    id: ids.next(),
-                    layout: Some(LayoutNode::Leaf { id: panel_id }),
-                    name: Some("Tab 1".into()),
-                    pinned: None,
-                    color: None,
-                    // #78 added the per-tab shell; the CLI has no shell picker,
-                    // so a new tab always uses the Settings default.
-                    shell: None,
-                }],
-                pinned: None,
-                group_id: None,
-                color: None,
-            };
-            data.order.push(workspace.id.clone());
-            data.workspaces.push(workspace);
-            store.save(&data).expect("save workspace store");
+        Canonical::Status { json } => {
+            run_status(json);
         }
-        Some(Command::Rename {
-            old_name,
-            new_name,
-        }) => {
-            let store = workspace_store_for(target.unwrap());
-            let mut data = store.load();
-            match data.workspaces.iter_mut().find(|w| w.name == old_name) {
-                Some(workspace) => workspace.name = new_name,
-                None => {
-                    eprintln!("no workspace named \"{old_name}\"");
-                    std::process::exit(1);
-                }
-            }
-            store.save(&data).expect("save workspace store");
+        Canonical::SessionsList { json, limit } => {
+            run_sessions_list(json, limit);
         }
-        Some(Command::Rm { name }) => {
-            let store = workspace_store_for(target.unwrap());
-            let mut data = store.load();
-            match data.workspaces.iter().position(|w| w.name == name) {
-                Some(index) => {
-                    data.workspaces.remove(index);
-                    data.order.retain(|id| {
-                        data.workspaces.iter().any(|w| &w.id == id)
-                    });
-                }
-                None => {
-                    eprintln!("no workspace named \"{name}\"");
-                    std::process::exit(1);
-                }
-            }
-            store.save(&data).expect("save workspace store");
+        Canonical::Attach { json, dry_run } => {
+            run_attach(json, dry_run);
         }
-        Some(Command::Split {
-            name,
-            vertical,
-            ..
-        }) => {
-            let orientation = if vertical {
-                Orientation::Vertical
-            } else {
-                Orientation::Horizontal
-            };
-            let store = workspace_store_for(target.unwrap());
-            let mut data = store.load();
-            let Some(workspace) = data.workspaces.iter_mut().find(|w| w.name == name)
-            else {
-                eprintln!("no workspace named \"{name}\"");
-                std::process::exit(1);
-            };
-            // Pre-#37 legacy workspaces carry their layout at the workspace
-            // level and get migrated to a tab by the app on boot; until then
-            // there is no tab to split, so refuse rather than invent a shape.
-            match workspace.tabs.first_mut() {
-                Some(tab) => match tab.layout.take() {
-                    Some(layout) => {
-                        tab.layout =
-                            Some(split_leftmost(layout, orientation, &mut ids));
-                    }
-                    None => {
-                        // Layoutless tab = a single unseen panel (#37: the
-                        // frontend seeds it on open). Give it its panel, then
-                        // split — "split" ends with two panels, as asked.
-                        let panel_id = ids.next();
-                        tab.layout = Some(split_leftmost(
-                            LayoutNode::Leaf { id: panel_id },
-                            orientation,
-                            &mut ids,
-                        ));
-                    }
-                },
-                None => {
-                    eprintln!(
-                        "workspace \"{name}\" has no tabs yet — open it once in the app, then split"
-                    );
-                    std::process::exit(1);
-                }
-            }
-            store.save(&data).expect("save workspace store");
-        }
-        Some(Command::Config { action }) => {
-            let store = settings_store_for(target.unwrap());
-            let mut settings = store.load();
-            match action {
-                ConfigAction::Get { key } => match key.as_deref() {
-                    Some(k) => match settings_get(&settings, k) {
-                        Some(value) => println!("{value}"),
-                        None => {
-                            eprintln!("unknown setting \"{k}\"");
-                            std::process::exit(1);
-                        }
-                    },
-                    None => println!("{}", serialize_settings(&settings)),
-                },
-                ConfigAction::Set { key, value } => {
-                    if let Err(message) = settings_set(&mut settings, &key, &value) {
-                        eprintln!("{message}");
-                        std::process::exit(1);
-                    }
-                    store.save(&settings).expect("save settings store");
-                }
-            }
-        }
-        Some(Command::Status { json: as_json }) => {
-            run_status(as_json);
-        }
-        Some(Command::Sessions {
-            action: SessionsAction::List { json: as_json, limit },
-        }) => {
-            run_sessions_list(as_json, limit);
-        }
-        Some(Command::Attach { json: as_json, dry_run }) => {
-            run_attach(as_json, dry_run);
-        }
-        Some(Command::CoreSession { action }) => {
+        Canonical::CoreSession(action) => {
             run_core_session(action);
         }
-        Some(Command::AgentContext) => {
+        Canonical::AgentContext => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&agent_context())
                     .expect("agent-context is always serializable")
             );
         }
-        _ => {}
+    }
+}
+
+/// Whether the parsed command's OWN `--json` flag is set — used only for
+/// the pre-dispatch usage refusal (missing --desk/--term), which must speak
+/// the same mode the command would have spoken. Store commands carry the
+/// flag; the non-store commands never reach this gate.
+fn cli_command_wants_json(command: &Canonical) -> bool {
+    match command {
+        Canonical::WorkspacesList { json, .. }
+        | Canonical::WorkspacesCreate { json, .. }
+        | Canonical::WorkspacesDelete { json, .. }
+        | Canonical::WorkspacesRename { json, .. }
+        | Canonical::WorkspacesExport { json, .. }
+        | Canonical::WorkspacesImport { json, .. }
+        | Canonical::PanesSplit { json, .. }
+        | Canonical::SettingsGet { json, .. }
+        | Canonical::SettingsSet { json, .. } => *json,
+        _ => false,
+    }
+}
+
+// --- store command handlers (v1.6.x behavior + the --json retrofit, #123) ----
+
+/// `umux workspaces list` (alias `list`). Without `--json` the output stays
+/// BYTE-IDENTICAL to v1.6.x: the saved store exactly as store_core
+/// serializes it. With `--json` the document gains the two sections of
+/// story 1 (#124): `live` (when the umux app serves the socket; `null`
+/// otherwise) and `saved` — plus the `truncated` marker. `--limit` caps the
+/// workspaces of BOTH sections (default 100 with `--json`, max 1000).
+fn run_workspaces_list(target: Target, json_mode: bool, limit: Option<usize>) {
+    let limit = match parse_list_limit(limit, json_mode) {
+        Ok(limit) => limit,
+        Err(err) => fail(json_mode, &err, 2),
+    };
+
+    if json_mode {
+        // #124: when the umux app serves the socket, the LIVE section comes
+        // from its gateway (the frontend is the single owner of live
+        // state); the saved section is ALWAYS read locally, so the
+        // --desk/--term target contract holds in every world. A gateway
+        // that answers hello but fails the read degrades to live:null —
+        // the honest "nothing live to report" (and the saved read below
+        // still works).
+        let dir = store_core::paths::config_dir();
+        let mut live = Value::Null;
+        if let Ok(mut client) =
+            umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION"))
+        {
+            if client.server_kind() == "app" {
+                if let Ok(result) = client.call("workspaces.list", json!({})) {
+                    live = result.get("live").cloned().unwrap_or(Value::Null);
+                }
+            }
+        }
+        let mut doc = json!({ "live": live, "saved": saved_store_value(target) });
+        let truncated = limit.map(|n| truncate_sections(&mut doc, n)).unwrap_or(false);
+        doc["truncated"] = json!(truncated);
+        print_doc(&doc);
+        return;
+    }
+
+    // Prose path: v1.6.x bytes. Only an explicit --limit changes anything
+    // (a new flag — no existing script passes it).
+    let text = serialize_config(&workspace_store_for(target).load());
+    match limit {
+        None => println!("{text}"),
+        Some(n) => {
+            let mut doc: Value =
+                serde_json::from_str(&text).expect("the saved store is always valid JSON");
+            let truncated = truncate_section(&mut doc, n);
+            doc["truncated"] = json!(truncated);
+            println!(
+                "{}",
+                serde_json::to_string(&doc).expect("the truncated store is always serializable")
+            );
+        }
+    }
+}
+
+/// `umux workspaces create` (aliases `new`, `create`).
+fn run_workspaces_create(target: Target, name: String, json_mode: bool, ids: &mut Ids) {
+    let store = workspace_store_for(target);
+    let mut data = store.load();
+    // Mirror the app's createWorkspace (src/workspaces.ts): one tab
+    // named "Tab 1" holding one Leaf panel.
+    let panel_id = ids.next();
+    let workspace = Workspace {
+        id: ids.next(),
+        name: name.clone(),
+        panels: vec![],
+        layout: None,
+        tabs: vec![Tab {
+            id: ids.next(),
+            layout: Some(LayoutNode::Leaf { id: panel_id }),
+            name: Some("Tab 1".into()),
+            pinned: None,
+            color: None,
+            // #78 added the per-tab shell; the CLI has no shell picker,
+            // so a new tab always uses the Settings default.
+            shell: None,
+        }],
+        pinned: None,
+        group_id: None,
+        color: None,
+    };
+    let workspace_id = workspace.id.clone();
+    data.order.push(workspace.id.clone());
+    data.workspaces.push(workspace);
+    store.save(&data).expect("save workspace store");
+    if json_mode {
+        print_doc(&json!({ "created": { "id": workspace_id, "name": name } }));
+    }
+}
+
+/// `umux workspaces delete` (aliases `rm`, `delete`).
+fn run_workspaces_delete(target: Target, name: String, json_mode: bool) {
+    let store = workspace_store_for(target);
+    let mut data = store.load();
+    match data.workspaces.iter().position(|w| w.name == name) {
+        Some(index) => {
+            let removed = data.workspaces.remove(index);
+            let removed_id = removed.id.clone();
+            data.order.retain(|id| {
+                data.workspaces.iter().any(|w| &w.id == id)
+            });
+            store.save(&data).expect("save workspace store");
+            if json_mode {
+                print_doc(&json!({ "deleted": { "id": removed_id, "name": removed.name } }));
+            }
+        }
+        None => fail(json_mode, &workspace_not_found_error(&name), 1),
+    }
+}
+
+/// `umux workspaces rename` (aliases `rename`, `update`).
+fn run_workspaces_rename(target: Target, old_name: String, new_name: String, json_mode: bool) {
+    let store = workspace_store_for(target);
+    let mut data = store.load();
+    match data.workspaces.iter_mut().find(|w| w.name == old_name) {
+        Some(workspace) => {
+            let id = workspace.id.clone();
+            workspace.name = new_name.clone();
+            store.save(&data).expect("save workspace store");
+            if json_mode {
+                print_doc(&json!({ "renamed": { "id": id, "from": old_name, "to": new_name } }));
+            }
+        }
+        None => fail(json_mode, &workspace_not_found_error(&old_name), 1),
+    }
+}
+
+/// `umux workspaces export` (alias `export`).
+fn run_workspaces_export(target: Target, output: Option<std::path::PathBuf>, json_mode: bool) {
+    let store = workspace_store_for(target);
+    let json_text = to_exchange(ExchangeKind::Workspaces, &store.load());
+    match output {
+        Some(path) => {
+            if let Err(e) = std::fs::write(&path, format!("{json_text}\n")) {
+                fail(
+                    json_mode,
+                    &ErrorObj::new(
+                        codes::IO_ERROR,
+                        format!("could not write {}: {e}", path.display()),
+                        vec![],
+                    ),
+                    1,
+                );
+            }
+        }
+        None => println!("{json_text}"),
+    }
+}
+
+/// `umux workspaces import` (alias `import`).
+fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) {
+    match action {
+        ImportAction::Cmux {
+            dry_run,
+            config,
+            session,
+        } => {
+            // Windows import is deliberately refused (decision
+            // #4 — cmux's own files were never observed there).
+            #[cfg(windows)]
+            {
+                let _ = (config, session, dry_run);
+                fail(
+                    json_mode,
+                    &ErrorObj::new(
+                        codes::IO_ERROR,
+                        "cmux import is not available on Windows.",
+                        vec!["export from cmux on macOS/Linux, then: umux workspaces import umux <file>".into()],
+                    ),
+                    1,
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                let (config_text, session_text) =
+                    cmux_source_texts(config.as_deref(), session.as_deref());
+                run_cmux_import(target, config_text, session_text, dry_run, json_mode);
+            }
+        }
+        ImportAction::Umux { file, dry_run } => {
+            run_umux_import(target, &file, dry_run, json_mode)
+        }
+    }
+}
+
+/// `umux panes split` (alias `split`).
+fn run_panes_split(target: Target, name: String, vertical: bool, json_mode: bool, ids: &mut Ids) {
+    let orientation = if vertical {
+        Orientation::Vertical
+    } else {
+        Orientation::Horizontal
+    };
+    let store = workspace_store_for(target);
+    let mut data = store.load();
+    let Some(workspace) = data.workspaces.iter_mut().find(|w| w.name == name) else {
+        fail(json_mode, &workspace_not_found_error(&name), 1);
+    };
+    // Pre-#37 legacy workspaces carry their layout at the workspace
+    // level and get migrated to a tab by the app on boot; until then
+    // there is no tab to split, so refuse rather than invent a shape.
+    match workspace.tabs.first_mut() {
+        Some(tab) => match tab.layout.take() {
+            Some(layout) => {
+                tab.layout =
+                    Some(split_leftmost(layout, orientation, ids));
+            }
+            None => {
+                // Layoutless tab = a single unseen panel (#37: the
+                // frontend seeds it on open). Give it its panel, then
+                // split — "split" ends with two panels, as asked.
+                let panel_id = ids.next();
+                tab.layout = Some(split_leftmost(
+                    LayoutNode::Leaf { id: panel_id },
+                    orientation,
+                    ids,
+                ));
+            }
+        },
+        None => {
+            fail(
+                json_mode,
+                &ErrorObj::new(
+                    codes::BAD_PARAMS,
+                    format!("workspace \"{name}\" has no tabs yet — open it once in the app, then split"),
+                    vec!["open the workspace once in the app, then split".into()],
+                ),
+                1,
+            );
+        }
+    }
+    store.save(&data).expect("save workspace store");
+    if json_mode {
+        print_doc(&json!({
+            "split": {
+                "workspace": name,
+                "orientation": if vertical { "vertical" } else { "horizontal" },
+            }
+        }));
+    }
+}
+
+/// `umux settings get` (alias `config get`).
+fn run_settings_get(target: Target, key: Option<String>, json_mode: bool) {
+    let store = settings_store_for(target);
+    let settings = store.load();
+    match key.as_deref() {
+        Some(k) => match settings_get(&settings, k) {
+            Some(value) => {
+                if json_mode {
+                    print_doc(&json!({ "key": k, "value": value }));
+                } else {
+                    println!("{value}");
+                }
+            }
+            None => fail(
+                json_mode,
+                &ErrorObj::new(
+                    codes::SETTING_NOT_FOUND,
+                    format!("unknown setting \"{k}\""),
+                    vec![
+                        "settings: notifications-enabled, agent-status-enabled, \
+                         session-restore-enabled, ports-tooltip-enabled, default-launch-mode"
+                            .into(),
+                    ],
+                ),
+                1,
+            ),
+        },
+        None => println!("{}", serialize_settings(&settings)),
+    }
+}
+
+/// `umux settings set` (alias `config set`).
+fn run_settings_set(target: Target, key: String, value: String, json_mode: bool) {
+    let store = settings_store_for(target);
+    let mut settings = store.load();
+    if let Err(message) = settings_set(&mut settings, &key, &value) {
+        // The two refusal shapes of settings_set: an unknown KEY is the
+        // settingNotFound code; a bad VALUE is badParams. The message (the
+        // v1.6.x prose) is identical in both.
+        let code = if message.starts_with("unknown setting") {
+            codes::SETTING_NOT_FOUND
+        } else {
+            codes::BAD_PARAMS
+        };
+        fail(json_mode, &ErrorObj::new(code, message, vec![]), 1);
+    }
+    store.save(&settings).expect("save settings store");
+    if json_mode {
+        print_doc(&json!({ "set": { "key": key, "value": value } }));
     }
 }
 
 // --- umux Storestation (#83) ---------------------------------------------------------
 
-/// `umux status`: one round trip to the daemon socket. Offline is a state —
-/// exit 0 with `{"storestation":{"running":false,…}}`; a LIVE daemon that then fails
-/// the request is the 5 (internal) path.
-fn run_status(as_json: bool) {
+/// `umux status`: one round trip to the socket. Offline is a state —
+/// exit 0 with `{"storestation":{"running":false,…}}`; a LIVE responder that
+/// then fails the request is the 5 (internal) path. #124: whoever answers
+/// names itself in the handshake (`server:"app"` or `"daemon"`), and the
+/// document carries the additive `server`/`serverVersion` fields; the OFFLINE
+/// document is untouched (byte-identical to v1.7.x).
+fn run_status(json_mode: bool) {
     let dir = store_core::paths::config_dir();
     match umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
-        Ok(mut client) => match client.call("storestation.status", serde_json::json!({})) {
-            Ok(result) => {
-                // umux Core (#93): the daemon's core object carries the live
-                // truth; `sleepPrevented` is its held bit flattened into the
-                // status document, `sleepInstruction` the honest limit when
-                // the guarantee is limited. A daemon older than the field
-                // reads as "not held, nothing to instruct" (additive rule).
-                let core_enabled = result
-                    .pointer("/core/enabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let sleep_prevented = result
-                    .pointer("/core/held")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let sleep_instruction = result
-                    .pointer("/core/instruction")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                // umux Core Session (#111): the daemon's core.session rides
-                // along unchanged; a daemon older than the field reads as
-                // "no session" (additive rule — one schema everywhere).
-                let core_session = result.pointer("/core/session").cloned().unwrap_or_else(|| {
-                    serde_json::json!({
-                        "active": false,
-                        "endsAt": null,
-                        "remainingSecs": null,
-                        "lastEndedAt": null,
-                        "lastEndReason": null,
-                    })
-                });
-                let svc = serde_json::json!({
-                    "running": true,
-                    "version": result.get("daemonVersion"),
-                    "pid": result.get("daemonPid"),
-                    "uptimeSeconds": result.get("uptimeSeconds"),
-                    "sessions": result.get("sessions"),
-                    "attachedClients": result.get("attachedClients"),
-                    "dataDir": result.get("dataDir"),
-                    "core": {
-                        "enabled": core_enabled,
-                        "held": sleep_prevented,
-                        "instruction": sleep_instruction,
-                        "session": core_session,
-                    },
-                    "sleepPrevented": sleep_prevented,
-                    "sleepInstruction": sleep_instruction,
-                });
-                if as_json {
-                    let doc = serde_json::json!({
-                        "cliVersion": env!("CARGO_PKG_VERSION"),
-                        "protocol": umux_storestation::protocol::PROTOCOL_VERSION,
-                        "storestation": svc,
+        Ok(mut client) => {
+            // #124: who serves — the app gateway or the daemon. A daemon
+            // hello carries no `server` field and reads as "daemon" (the
+            // additive rule), so every pre-gateway responder keeps its
+            // exact v1.7.x document (plus the two new fields).
+            let server = client.server_kind().to_string();
+            let server_version = client
+                .server_version()
+                .map(str::to_string);
+            match client.call("storestation.status", json!({})) {
+                Ok(result) => {
+                    // umux Core (#93): the daemon's core object carries the live
+                    // truth; `sleepPrevented` is its held bit flattened into the
+                    // status document, `sleepInstruction` the honest limit when
+                    // the guarantee is limited. A responder older than the field
+                    // reads as "not held, nothing to instruct" (additive rule).
+                    let core_enabled = result
+                        .pointer("/core/enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let sleep_prevented = result
+                        .pointer("/core/held")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let sleep_instruction = result
+                        .pointer("/core/instruction")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    // umux Core Session (#111): the daemon's core.session rides
+                    // along unchanged; an older responder reads as "no session"
+                    // (additive rule — one schema everywhere).
+                    let core_session = result.pointer("/core/session").cloned().unwrap_or_else(|| {
+                        json!({
+                            "active": false,
+                            "endsAt": null,
+                            "remainingSecs": null,
+                            "lastEndedAt": null,
+                            "lastEndReason": null,
+                        })
                     });
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&doc)
-                            .expect("status documents are always serializable")
-                    );
-                } else {
-                    println!(
-                        "umux Storestation is running — version {}, pid {}, up {}s, {} sessions",
-                        svc["version"].as_str().unwrap_or("?"),
-                        svc["pid"],
-                        svc["uptimeSeconds"],
-                        svc["sessions"]
-                    );
-                    println!(
-                        "socket: {}",
-                        umux_storestation::transport::endpoint_display(&dir)
-                    );
-                    if svc["core"]["session"]["active"] == Value::Bool(true) {
+                    // The pid is the SERVING side's (app gateway: appPid;
+                    // daemon: daemonPid) — `version` is the serving side's
+                    // version either way (#124).
+                    let version = server_version
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or_else(|| result.get("daemonVersion").cloned().unwrap_or(Value::Null));
+                    let pid = result
+                        .get("appPid")
+                        .cloned()
+                        .unwrap_or_else(|| result.get("daemonPid").cloned().unwrap_or(Value::Null));
+                    let svc = json!({
+                        "running": true,
+                        "version": version,
+                        "pid": pid,
+                        "uptimeSeconds": result.get("uptimeSeconds"),
+                        "sessions": result.get("sessions"),
+                        "attachedClients": result.get("attachedClients"),
+                        "dataDir": result.get("dataDir"),
+                        "core": {
+                            "enabled": core_enabled,
+                            "held": sleep_prevented,
+                            "instruction": sleep_instruction,
+                            "session": core_session,
+                        },
+                        "sleepPrevented": sleep_prevented,
+                        "sleepInstruction": sleep_instruction,
+                        // #124: who serves the socket (+ its version). Older
+                        // clients ignore both; the offline document stays
+                        // byte-identical to v1.7.x (no fields added there).
+                        "server": server,
+                        "serverVersion": server_version,
+                    });
+                    if json_mode {
+                        let doc = json!({
+                            "cliVersion": env!("CARGO_PKG_VERSION"),
+                            "protocol": umux_storestation::protocol::PROTOCOL_VERSION,
+                            "storestation": svc,
+                        });
                         println!(
-                            "Core Session active — {} remaining (endsAt {}).",
-                            svc["core"]["session"]["remainingSecs"],
-                            svc["core"]["session"]["endsAt"]
+                            "{}",
+                            serde_json::to_string_pretty(&doc)
+                                .expect("status documents are always serializable")
                         );
+                    } else if svc["server"] == Value::String("app".into()) {
+                        println!(
+                            "umux app gateway is serving the socket — version {}, pid {}, up {}s",
+                            svc["version"].as_str().unwrap_or("?"),
+                            svc["pid"],
+                            svc["uptimeSeconds"],
+                        );
+                        println!(
+                            "socket: {}",
+                            umux_storestation::transport::endpoint_display(&dir)
+                        );
+                        println!("live reads: umux workspaces list --desk --json");
+                    } else {
+                        println!(
+                            "umux Storestation is running — version {}, pid {}, up {}s, {} sessions",
+                            svc["version"].as_str().unwrap_or("?"),
+                            svc["pid"],
+                            svc["uptimeSeconds"],
+                            svc["sessions"]
+                        );
+                        println!(
+                            "socket: {}",
+                            umux_storestation::transport::endpoint_display(&dir)
+                        );
+                        if svc["core"]["session"]["active"] == Value::Bool(true) {
+                            println!(
+                                "Core Session active — {} remaining (endsAt {}).",
+                                svc["core"]["session"]["remainingSecs"],
+                                svc["core"]["session"]["endsAt"]
+                            );
+                        }
                     }
                 }
+                Err(err) => {
+                    eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
+                    std::process::exit(5);
+                }
             }
-            Err(err) => {
-                eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
-                std::process::exit(5);
-            }
-        },
+        }
         Err(umux_storestation::client::ConnectError::NotRunning { stale }) => {
-            if as_json {
+            if json_mode {
                 // The same Core keys as the running document — a daemon that
-                // is not running holds nothing, by construction (#93).
-                let doc = serde_json::json!({
+                // is not running holds nothing, by construction (#93). This
+                // document is BYTE-IDENTICAL to v1.7.x (#124: the new fields
+                // appear only when something answers).
+                let doc = json!({
                     "cliVersion": env!("CARGO_PKG_VERSION"),
                     "protocol": umux_storestation::protocol::PROTOCOL_VERSION,
                     "storestation": {
@@ -907,23 +1532,27 @@ fn run_status(as_json: bool) {
 /// "daemon off" unambiguous, per the protocol design doc); a LIVE daemon
 /// that then fails the request is the 5 (internal) path. Human output is a
 /// plain line per session; `--json` prints the document.
-fn run_sessions_list(as_json: bool, limit: Option<usize>) {
+///
+/// #124: when the APP gateway serves the socket (Storestation OFF), the
+/// sessions live nowhere — the honest answer is today's offline document
+/// (plus the `server` field naming who answered), exit 0.
+fn run_sessions_list(json_mode: bool, limit: Option<usize>) {
     let dir = store_core::paths::config_dir();
     let mut params = serde_json::Map::new();
     if let Some(n) = limit {
-        params.insert("limit".into(), serde_json::json!(n));
+        params.insert("limit".into(), json!(n));
     }
     match umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
-        Ok(mut client) => match client.call("sessions.list", serde_json::Value::Object(params)) {
-            Ok(result) => {
-                if as_json {
-                    let doc = serde_json::json!({
-                        "storestation": { "running": true },
-                        "sessions": result.get("sessions").cloned().unwrap_or_default(),
-                        "truncated": result
-                            .get("truncated")
-                            .and_then(|t| t.as_bool())
-                            .unwrap_or(false),
+        Ok(mut client) => {
+            if client.server_kind() == "app" {
+                // The app gateway owns no sessions and does not route to
+                // the daemon (#124 scope) — the offline answer, honestly
+                // labeled with who answered.
+                if json_mode {
+                    let doc = json!({
+                        "storestation": { "running": false, "staleSocket": false, "server": "app" },
+                        "sessions": [],
+                        "truncated": false,
                     });
                     println!(
                         "{}",
@@ -931,43 +1560,65 @@ fn run_sessions_list(as_json: bool, limit: Option<usize>) {
                             .expect("session documents are always serializable")
                     );
                 } else {
-                    let sessions = result
-                        .get("sessions")
-                        .and_then(|s| s.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    if sessions.is_empty() {
-                        println!("umux Storestation is running, but owns no sessions.");
-                        return;
-                    }
-                    for session in &sessions {
+                    println!("umux Storestation is not running — no live sessions.");
+                }
+                return;
+            }
+            match client.call("sessions.list", Value::Object(params)) {
+                Ok(result) => {
+                    if json_mode {
+                        let doc = json!({
+                            "storestation": { "running": true },
+                            "sessions": result.get("sessions").cloned().unwrap_or_default(),
+                            "truncated": result
+                                .get("truncated")
+                                .and_then(|t| t.as_bool())
+                                .unwrap_or(false),
+                        });
                         println!(
-                            "{}\t{}\t{}\t{}x{}\tattached:{}",
-                            session["id"].as_str().unwrap_or("?"),
-                            session["title"].as_str().unwrap_or("?"),
-                            session["cwd"].as_str().unwrap_or("?"),
-                            session["cols"],
-                            session["rows"],
-                            session["attachedClients"],
+                            "{}",
+                            serde_json::to_string_pretty(&doc)
+                                .expect("session documents are always serializable")
                         );
-                    }
-                    let truncated = result
-                        .get("truncated")
-                        .and_then(|t| t.as_bool())
-                        .unwrap_or(false);
-                    if truncated {
-                        println!("(list truncated — pass --limit N to see more)");
+                    } else {
+                        let sessions = result
+                            .get("sessions")
+                            .and_then(|s| s.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        if sessions.is_empty() {
+                            println!("umux Storestation is running, but owns no sessions.");
+                            return;
+                        }
+                        for session in &sessions {
+                            println!(
+                                "{}\t{}\t{}\t{}x{}\tattached:{}",
+                                session["id"].as_str().unwrap_or("?"),
+                                session["title"].as_str().unwrap_or("?"),
+                                session["cwd"].as_str().unwrap_or("?"),
+                                session["cols"],
+                                session["rows"],
+                                session["attachedClients"],
+                            );
+                        }
+                        let truncated = result
+                            .get("truncated")
+                            .and_then(|t| t.as_bool())
+                            .unwrap_or(false);
+                        if truncated {
+                            println!("(list truncated — pass --limit N to see more)");
+                        }
                     }
                 }
+                Err(err) => {
+                    eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
+                    std::process::exit(5);
+                }
             }
-            Err(err) => {
-                eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
-                std::process::exit(5);
-            }
-        },
+        }
         Err(umux_storestation::client::ConnectError::NotRunning { stale }) => {
-            if as_json {
-                let doc = serde_json::json!({
+            if json_mode {
+                let doc = json!({
                     "storestation": { "running": false, "staleSocket": stale },
                     "sessions": [],
                     "truncated": false,
@@ -1033,6 +1684,17 @@ fn format_core_session_duration(secs: u64) -> String {
     parts.join(" ")
 }
 
+/// The offline refusal for the daemon-required live commands when the APP
+/// gateway answers instead (#124): the sessions/core machinery lives in the
+/// daemon, and the gateway neither serves nor routes to it. The catalog's
+/// storestationNotRunning object — honest about who answered — exit 3.
+fn app_gateway_not_daemon_error() -> ErrorObj {
+    let mut err = umux_storestation::client::ConnectError::NotRunning { stale: false }
+        .to_error_obj();
+    err.message = "the umux app gateway serves the socket, but Storestation (the daemon) is not running.".into();
+    err
+}
+
 /// `umux core-session start|extend|stop` (#111): one round trip to the daemon
 /// socket, same rules as every live command — Storestation REQUIRED (the
 /// session lives in the daemon; spawning one from here would be a second,
@@ -1045,14 +1707,14 @@ fn run_core_session(action: CoreSessionAction) {
         {
             Ok(secs) => (
                 "core.session.start",
-                serde_json::json!({ "durationSecs": secs }),
+                json!({ "durationSecs": secs }),
                 json,
             ),
             Err(message) => {
                 eprintln!(
                     "{}",
-                    serde_json::to_string(&umux_storestation::protocol::ErrorObj::new(
-                        umux_storestation::protocol::codes::BAD_PARAMS,
+                    serde_json::to_string(&ErrorObj::new(
+                        codes::BAD_PARAMS,
                         message,
                         vec!["example: umux core-session start 90m".into()],
                     ))
@@ -1065,14 +1727,14 @@ fn run_core_session(action: CoreSessionAction) {
         {
             Ok(secs) => (
                 "core.session.extend",
-                serde_json::json!({ "durationSecs": secs }),
+                json!({ "durationSecs": secs }),
                 json,
             ),
             Err(message) => {
                 eprintln!(
                     "{}",
-                    serde_json::to_string(&umux_storestation::protocol::ErrorObj::new(
-                        umux_storestation::protocol::codes::BAD_PARAMS,
+                    serde_json::to_string(&ErrorObj::new(
+                        codes::BAD_PARAMS,
                         message,
                         vec!["example: umux core-session extend 30m".into()],
                     ))
@@ -1081,7 +1743,7 @@ fn run_core_session(action: CoreSessionAction) {
                 std::process::exit(2);
             }
         },
-        CoreSessionAction::Stop { json } => ("core.session.stop", serde_json::json!({}), json),
+        CoreSessionAction::Stop { json } => ("core.session.stop", json!({}), json),
     };
 
     let dir = store_core::paths::config_dir();
@@ -1090,7 +1752,20 @@ fn run_core_session(action: CoreSessionAction) {
         "cli",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(client) => client,
+        Ok(client) => {
+            if client.server_kind() == "app" {
+                // #124: the app gateway serves — no daemon, no sessions.
+                let err = app_gateway_not_daemon_error();
+                if as_json {
+                    eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
+                } else {
+                    eprintln!("{}", err.message);
+                    eprintln!("note: umux Core Session lives in the daemon — start it first: umux-storestation run");
+                }
+                std::process::exit(3);
+            }
+            client
+        }
         Err(umux_storestation::client::ConnectError::NotRunning { stale }) => {
             if stale {
                 umux_storestation::server::cleanup(&dir);
@@ -1121,7 +1796,7 @@ fn run_core_session(action: CoreSessionAction) {
             // session half (the pinned core.session fields). A daemon older
             // than the field reads as "no session" (additive rule).
             let session = result.get("session").cloned().unwrap_or_else(|| {
-                serde_json::json!({
+                json!({
                     "active": false,
                     "endsAt": null,
                     "remainingSecs": null,
@@ -1312,7 +1987,7 @@ fn run_attach(as_json: bool, dry_run: bool) {
         if as_json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                serde_json::to_string_pretty(&json!({
                     "resolvedPath": app.display().to_string(),
                 }))
                 .expect("dry-run document is always serializable")
@@ -1325,11 +2000,10 @@ fn run_attach(as_json: bool, dry_run: bool) {
 
     // Storestation must be alive — offline is exit 3 with the catalog error
     // (plus the PATH lookup hint, #104: a shadowing CLI copy is the most
-    // common reason attach "does not work").
+    // common reason attach "does not work"). #124: an APP gateway on the
+    // socket is not Storestation — the same honest refusal.
     let dir = store_core::paths::config_dir();
-    if let Err(e) = umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION"))
-    {
-        let err = attach_offline_error(e.to_error_obj());
+    let attach_refusal = |err: ErrorObj, exit_code: i32| -> ! {
         if as_json {
             eprintln!("{}", serde_json::to_string(&err).expect("error objects serialize"));
         } else {
@@ -1338,7 +2012,17 @@ fn run_attach(as_json: bool, dry_run: bool) {
                 eprintln!("  - {step}");
             }
         }
-        std::process::exit(3);
+        std::process::exit(exit_code);
+    };
+    match umux_storestation::client::Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
+        // The app gateway serves the socket, but the DAEMON does not —
+        // attach exists to bring you back to live sessions (#124).
+        Ok(client) if client.server_kind() == "app" => {
+            attach_refusal(app_gateway_not_daemon_error(), 3)
+        }
+        // The daemon answered — proceed to the launch below.
+        Ok(_) => {}
+        Err(e) => attach_refusal(attach_offline_error(e.to_error_obj()), 3),
     }
 
     let mut child = match std::process::Command::new(&app).spawn() {
@@ -1373,13 +2057,13 @@ fn run_attach(as_json: bool, dry_run: bool) {
     };
     if as_json {
         let doc = if already_running {
-            serde_json::json!({
+            json!({
                 "launched": false,
                 "reason": "alreadyRunning",
                 "focused": true,
             })
         } else {
-            serde_json::json!({ "launched": true, "appPid": app_pid })
+            json!({ "launched": true, "appPid": app_pid })
         };
         println!(
             "{}",
@@ -1399,10 +2083,245 @@ fn run_attach(as_json: bool, dry_run: bool) {
 /// approaching the protocol's 15 s attach budget.
 const ATTACH_ALREADY_RUNNING_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+// --- the command table (#123, story 9) ----------------------------------------
+//
+// The single source of truth for the documented surface: `agent-context` is
+// GENERATED from this table, and the `agent_context_parity` test holds the
+// table against `--help` (clap) and real dispatch — the three cannot drift.
+// Adding a command = one clap variant, one Canonical variant, one dispatch
+// arm, ONE row here.
+
+/// How a command answers `--json` — `Always` is agent-context's own
+/// "json is the only output" pin.
+#[derive(Clone, Copy, PartialEq)]
+enum JsonSupport {
+    Yes,
+    No,
+    Always,
+}
+
+/// One row of the command table: the canonical name, every spelling that
+/// resolves to it (the v1.6.x short forms included), and what an agent
+/// needs to know to call it.
+struct CmdSpec {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    class: &'static str,
+    json: JsonSupport,
+    limit_default: Option<usize>,
+    limit_max: Option<usize>,
+    dry_run: bool,
+    notes: &'static [&'static str],
+}
+
+const COMMAND_TABLE: &[CmdSpec] = &[
+    CmdSpec {
+        name: "workspaces list",
+        aliases: &["list"],
+        class: "read",
+        json: JsonSupport::Yes,
+        limit_default: Some(100),
+        limit_max: Some(1000),
+        dry_run: false,
+        notes: &[
+            "exits 0 with the saved store when nothing is alive — offline is a state, not an error",
+            "--json: {live, saved, truncated} — live comes from the umux app gateway when it serves the socket, null otherwise (#124)",
+            "--limit caps the workspaces of both sections (default 100 with --json, max 1000)",
+        ],
+    },
+    CmdSpec {
+        name: "workspaces create",
+        aliases: &["new", "create"],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "writes the saved store (needs --desk/--term); creates one tab (\"Tab 1\") with one panel",
+            "--json: {created: {id, name}}; without --json the v1.6.x silent success is unchanged",
+        ],
+    },
+    CmdSpec {
+        name: "workspaces delete",
+        aliases: &["rm", "delete"],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "deletes by NAME (first match); unknown name exits 1 with workspaceNotFound in --json mode",
+            "--json: {deleted: {id, name}}",
+        ],
+    },
+    CmdSpec {
+        name: "workspaces rename",
+        aliases: &["rename", "update"],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "renames by NAME (first match); unknown name exits 1 with workspaceNotFound in --json mode",
+            "--json: {renamed: {id, from, to}}",
+        ],
+    },
+    CmdSpec {
+        name: "workspaces export",
+        aliases: &["export"],
+        class: "read",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "prints the exchange document (-o FILE writes it); the restore is `workspaces import umux`",
+        ],
+    },
+    CmdSpec {
+        name: "workspaces import",
+        aliases: &["import"],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "cmux: imports cmux's saved files (dry-run prints the plan; not available on Windows)",
+            "umux <file>: REPLACES the chosen store with the exchange document",
+            "--json: {imported: {workspaces, groups}}; failures are catalog error objects",
+        ],
+    },
+    CmdSpec {
+        name: "panes split",
+        aliases: &["split"],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "splits the first tab's layout 50/50 (--vertical stacks top/bottom; default side-by-side)",
+            "a workspace with no tabs refuses (open it once in the app first) — exit 1",
+        ],
+    },
+    CmdSpec {
+        name: "settings get",
+        aliases: &["config get"],
+        class: "read",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "one key prints its value; no key prints every setting as JSON",
+            "unknown key exits 1 with settingNotFound in --json mode",
+        ],
+    },
+    CmdSpec {
+        name: "settings set",
+        aliases: &["config set"],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "booleans are strict true/false; default-launch-mode is gui|tui",
+            "unknown key exits 1 with settingNotFound, invalid value with badParams (--json mode)",
+        ],
+    },
+    CmdSpec {
+        name: "status",
+        aliases: &[],
+        class: "read",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "exits 0 when Storestation is offline — offline is a state, not an error",
+            "--json carries server/serverVersion naming who serves the socket: app gateway or daemon (#124)",
+        ],
+    },
+    CmdSpec {
+        name: "sessions list",
+        aliases: &[],
+        class: "read",
+        json: JsonSupport::Yes,
+        limit_default: Some(100),
+        limit_max: Some(1000),
+        dry_run: false,
+        notes: &[
+            "exits 0 with an empty list when Storestation is offline — offline is a state, not an error",
+        ],
+    },
+    CmdSpec {
+        name: "attach",
+        aliases: &[],
+        class: "bootstrap",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: true,
+        notes: &[
+            "requires Storestation running — offline exits 3 with storestationNotRunning",
+            "launches the desktop app beside the CLI (umux-app); a second launch focuses the existing window (single-instance)",
+        ],
+    },
+    CmdSpec {
+        name: "core-session",
+        aliases: &[],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "requires Storestation running — offline exits 3 with storestationNotRunning",
+            "start/extend take <n>{s|m|h} (no suffix = seconds); a session may span at most 24h from its start",
+            "start is refused with coreConflict while umux Core is ON (and core on while a session is live); refusals exit 5 with the code on stderr",
+        ],
+    },
+    CmdSpec {
+        name: "notify",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::No,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "posts a desktop notification without the app running; touches no store",
+        ],
+    },
+    CmdSpec {
+        name: "agent-context",
+        aliases: &[],
+        class: "read",
+        json: JsonSupport::Always,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[],
+    },
+];
+
+fn json_support_value(json: JsonSupport) -> Value {
+    match json {
+        JsonSupport::Yes => Value::Bool(true),
+        JsonSupport::No => Value::Bool(false),
+        JsonSupport::Always => Value::String("always".into()),
+    }
+}
+
 /// The machine-readable self-description (schema 1, per the protocol design
-/// doc). It MUST stay in lockstep with the real `--help` surface — the
-/// `agent_context_parity` test enforces both directions, so any new command
-/// or exit-code change that skips this table fails the suite.
+/// doc). GENERATED from [`COMMAND_TABLE`] (#123, story 9) — the command
+/// entries are the table rows verbatim; the `agent_context_parity` test
+/// holds this output against `--help` and real dispatch, so the documented
+/// surface cannot drift from the real one.
 fn agent_context() -> serde_json::Value {
     serde_json::json!({
         "schema": 1,
@@ -1436,52 +2355,127 @@ fn agent_context() -> serde_json::Value {
             umux_storestation::protocol::codes::CORE_CONFLICT,
             umux_storestation::protocol::codes::SESSION_CAP_EXCEEDED,
             umux_storestation::protocol::codes::NO_ACTIVE_SESSION,
+            umux_storestation::protocol::codes::CORE_RETIRED,
+            umux_storestation::protocol::codes::WORKSPACE_NOT_FOUND,
+            umux_storestation::protocol::codes::SETTING_NOT_FOUND,
         ],
-        // The live surface. `sessions list` joined at phase 2 (#84),
-        // `attach` joins at phase 5 — each phase extends this table WITH
-        // its parity test.
-        "commands": [
-            {
-                "name": "status",
-                "class": "read",
-                "json": true,
-                "notes": ["exits 0 when Storestation is offline — offline is a state, not an error"],
-            },
-            {
-                "name": "sessions list",
-                "class": "read",
-                "json": true,
-                "limitDefault": 100,
-                "limitMax": 1000,
-                "notes": ["exits 0 with an empty list when Storestation is offline — offline is a state, not an error"],
-            },
-            {
-                "name": "attach",
-                "class": "bootstrap",
-                "json": true,
-                "dryRun": true,
-                "notes": [
-                    "requires Storestation running — offline exits 3 with storestationNotRunning",
-                    "launches the desktop app beside the CLI (umux-app); a second launch focuses the existing window (single-instance)",
-                ],
-            },
-            {
-                "name": "core-session",
-                "class": "mutate",
-                "json": true,
-                "notes": [
-                    "requires Storestation running — offline exits 3 with storestationNotRunning",
-                    "start/extend take <n>{s|m|h} (no suffix = seconds); a session may span at most 24h from its start",
-                    "start is refused with coreConflict while umux Core is ON (and core on while a session is live); refusals exit 5 with the code on stderr",
-                ],
-            },
-            {
-                "name": "agent-context",
-                "class": "read",
-                "json": "always",
-            },
-        ],
+        // Generated from COMMAND_TABLE — every canonical command WITH its
+        // aliases (#123: the whole surface, old spellings included).
+        "commands": COMMAND_TABLE
+            .iter()
+            .map(|spec| {
+                let mut entry = json!({
+                    "name": spec.name,
+                    "aliases": spec.aliases,
+                    "class": spec.class,
+                    "json": json_support_value(spec.json),
+                });
+                if let Some(n) = spec.limit_default {
+                    entry["limitDefault"] = json!(n);
+                }
+                if let Some(n) = spec.limit_max {
+                    entry["limitMax"] = json!(n);
+                }
+                if spec.dry_run {
+                    entry["dryRun"] = json!(true);
+                }
+                if !spec.notes.is_empty() {
+                    entry["notes"] = json!(spec.notes);
+                }
+                entry
+            })
+            .collect::<Vec<Value>>(),
     })
+}
+
+/// Map a parsed command onto the canonical dispatch (#123). EVERY spelling —
+/// the canonical `resource.verb` path and each v1.6.x alias — lands on the
+/// same [`Canonical`] variant here; the handlers below see one shape only.
+fn canonical(command: Command) -> Canonical {
+    match command {
+        // Canonical resource families.
+        Command::Workspaces { action } => match action {
+            WorkspaceAction::List { json, limit } => Canonical::WorkspacesList { json, limit },
+            WorkspaceAction::Create { name, json } => Canonical::WorkspacesCreate { name, json },
+            WorkspaceAction::Delete { name, json } => Canonical::WorkspacesDelete { name, json },
+            WorkspaceAction::Rename {
+                old_name,
+                new_name,
+                json,
+            } => Canonical::WorkspacesRename {
+                old_name,
+                new_name,
+                json,
+            },
+            WorkspaceAction::Export { output, json } => {
+                Canonical::WorkspacesExport { output, json }
+            }
+            WorkspaceAction::Import { action, json } => {
+                Canonical::WorkspacesImport { action, json }
+            }
+        },
+        Command::Panes { action } => match action {
+            PaneAction::Split {
+                name,
+                vertical,
+                horizontal: _,
+                json,
+            } => Canonical::PanesSplit {
+                name,
+                vertical,
+                json,
+            },
+        },
+        Command::Settings { action } | Command::Config { action } => match action {
+            SettingsAction::Get { key, json } => Canonical::SettingsGet { key, json },
+            SettingsAction::Set { key, value, json } => {
+                Canonical::SettingsSet { key, value, json }
+            }
+        },
+        // v1.6.x short spellings — the SAME commands, second spelling.
+        Command::List { json, limit } => Canonical::WorkspacesList { json, limit },
+        Command::New { name, json } | Command::Create { name, json } => {
+            Canonical::WorkspacesCreate { name, json }
+        }
+        Command::Rm { name, json } | Command::Delete { name, json } => {
+            Canonical::WorkspacesDelete { name, json }
+        }
+        Command::Rename {
+            old_name,
+            new_name,
+            json,
+        }
+        | Command::Update {
+            old_name,
+            new_name,
+            json,
+        } => Canonical::WorkspacesRename {
+            old_name,
+            new_name,
+            json,
+        },
+        Command::Split {
+            name,
+            vertical,
+            horizontal: _,
+            json,
+        } => Canonical::PanesSplit {
+            name,
+            vertical,
+            json,
+        },
+        Command::Export { output, json } => Canonical::WorkspacesExport { output, json },
+        Command::Import { action, json } => Canonical::WorkspacesImport { action, json },
+        // Global commands keep their names.
+        Command::Notify { text } => Canonical::Notify { text },
+        Command::Status { json } => Canonical::Status { json },
+        Command::Sessions {
+            action: SessionsAction::List { json, limit },
+        } => Canonical::SessionsList { json, limit },
+        Command::Attach { json, dry_run } => Canonical::Attach { json, dry_run },
+        Command::CoreSession { action } => Canonical::CoreSession(action),
+        Command::AgentContext => Canonical::AgentContext,
+    }
 }
 
 #[cfg(test)]
@@ -1507,6 +2501,57 @@ mod core_session_duration {
             assert!(parse_core_session_duration(bad).is_err(), "'{bad}' is refused");
         }
         assert!(parse_core_session_duration("99999999999999999999h").is_err());
+    }
+}
+
+#[cfg(test)]
+mod list_limit {
+    use super::*;
+
+    // The retrofit's bound: --json caps at 100 when no --limit is given;
+    // the prose path without --limit stays unbounded (v1.6.x bytes).
+    #[test]
+    fn the_json_default_is_100_and_prose_has_no_default() {
+        assert_eq!(parse_list_limit(None, true), Ok(Some(100)));
+        assert_eq!(parse_list_limit(None, false), Ok(None));
+        assert_eq!(parse_list_limit(Some(2), false), Ok(Some(2)));
+    }
+
+    // Beyond the protocol's max (or zero) is the enumerated limitInvalid.
+    #[test]
+    fn out_of_bounds_limits_are_limit_invalid() {
+        for bad in [Some(0), Some(1001), Some(usize::MAX)] {
+            let err = parse_list_limit(bad, false).unwrap_err();
+            assert_eq!(err.code, codes::LIMIT_INVALID, "{bad:?} is refused");
+        }
+    }
+
+    // Truncation keeps the FIRST n workspaces and drops exactly their order
+    // entries — groups and their order entries survive untouched.
+    #[test]
+    fn truncation_keeps_first_n_and_prunes_order() {
+        let mut section = json!({
+            "workspaces": [
+                { "id": "a", "name": "one" },
+                { "id": "b", "name": "two" },
+                { "id": "c", "name": "three" },
+            ],
+            "groups": [ { "id": "g1", "name": "grp" } ],
+            "order": ["g1", "a", "b", "c"],
+        });
+        assert!(truncate_section(&mut section, 2));
+        assert_eq!(section["workspaces"].as_array().unwrap().len(), 2);
+        // a and b stay (the first two), c's order entry goes, the group's stays.
+        assert_eq!(section["order"], json!(["g1", "a", "b"]));
+    }
+
+    // A list under the limit is untouched (and the marker must then be
+    // false, not a lie).
+    #[test]
+    fn truncation_under_the_limit_is_a_no_op() {
+        let mut section = json!({ "workspaces": [ { "id": "a" } ], "order": ["a"] });
+        assert!(!truncate_section(&mut section, 100));
+        assert_eq!(section["workspaces"].as_array().unwrap().len(), 1);
     }
 }
 
@@ -1563,7 +2608,7 @@ mod attach_resolution {
     }
 
     // The shipped-macOS layout: `umux-app` beside the CLI (inside the
-    // bundle) wins before the standalone-bundle fallbacks.
+    // bundle) wins over the bundle fallbacks.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_binary_beside_the_cli_wins_over_the_bundle_fallbacks() {
@@ -1628,5 +2673,16 @@ mod attach_resolution {
             assert!(hint.contains("which -a umux"));
             assert!(!hint.contains("where umux"));
         }
+    }
+
+    // #124: the app-gateway-not-daemon refusal stays the catalog's offline
+    // error (storestationNotRunning), only its message names who answered —
+    // exit code and code stay in the documented shapes.
+    #[test]
+    fn app_gateway_refusal_keeps_the_offline_code() {
+        let err = app_gateway_not_daemon_error();
+        assert_eq!(err.code, codes::STORESTATION_NOT_RUNNING);
+        let message = err.message.clone();
+        assert!(message.contains("app gateway"), "{message}");
     }
 }

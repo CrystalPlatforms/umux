@@ -358,6 +358,13 @@ impl DaemonDriver {
     ///   the newer daemon is left running (no downgrade attempt).
     pub fn connect() -> Result<Self, DaemonConnectError> {
         let client = Self::open_client()?;
+        // #124: the APP's own gateway answering the socket is not the
+        // daemon — it serves no session ops, so a daemon-backed driver
+        // pointed at it would fail every open. The honest outcome is
+        // Offline (opens fall back in-process), never a gate card.
+        if client.server_kind() == "app" {
+            return Err(DaemonConnectError::Offline);
+        }
         let verdict = umux_storestation::gate::classify_daemon_version(
             client.daemon_version(),
             env!("CARGO_PKG_VERSION"),
@@ -1041,15 +1048,21 @@ impl RouterDriver {
             "desktop",
             env!("CARGO_PKG_VERSION"),
         ) {
-            if let Ok(result) = client.call("storestation.status", serde_json::json!({})) {
-                doc["running"] = serde_json::json!(true);
-                doc["version"] = result.get("daemonVersion").cloned().unwrap_or_default();
-                doc["sessions"] = result.get("sessions").cloned().unwrap_or_default();
-                doc["attachedClients"] =
-                    result.get("attachedClients").cloned().unwrap_or_default();
-                doc["core"] = result.get("core").cloned().unwrap_or_else(|| {
-                    serde_json::json!({ "enabled": false, "held": false, "instruction": null })
-                });
+            // #124: the APP gateway answering the socket is not the daemon —
+            // this card describes DAEMON health, so a gateway answer leaves
+            // the daemon facts untouched (running stays false; the gateway
+            // names itself in `umux status --json` instead).
+            if client.server_kind() != "app" {
+                if let Ok(result) = client.call("storestation.status", serde_json::json!({})) {
+                    doc["running"] = serde_json::json!(true);
+                    doc["version"] = result.get("daemonVersion").cloned().unwrap_or_default();
+                    doc["sessions"] = result.get("sessions").cloned().unwrap_or_default();
+                    doc["attachedClients"] =
+                        result.get("attachedClients").cloned().unwrap_or_default();
+                    doc["core"] = result.get("core").cloned().unwrap_or_else(|| {
+                        serde_json::json!({ "enabled": false, "held": false, "instruction": null })
+                    });
+                }
             }
         }
         doc

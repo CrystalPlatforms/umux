@@ -3123,6 +3123,37 @@ export function WorkspaceShell() {
     (panelId: string) => applySignal(panelId, 'resize'),
     [applySignal],
   )
+
+  // --- Socket gateway bridge (#124, v1.8.0) ---------------------------------
+  //
+  // While the daemon is absent, the Rust gateway serves `workspaces.list`
+  // to the CLI — and THIS component is the single owner of live state. The
+  // `gateway_live_state_request` event carries a request id; the answer
+  // invoke hands the CURRENT state back through refs (never a stale render
+  // closure). A missing answer times out Rust-side; nothing to retry here.
+  const statusesRef = useRef(statuses)
+  statusesRef.current = statuses
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    listen<{ id: number }>('gateway_live_state_request', (event) => {
+      const s = stateRef.current
+      invoke('gateway_live_state_respond', {
+        id: event.payload.id,
+        state: { workspaces: s.workspaces, groups: s.groups, order: s.order },
+        agentStates: statusesRef.current,
+      }).catch((e) => console.error('gateway_live_state_respond failed:', e))
+    })
+      .then((un) => {
+        if (cancelled) un()
+        else unlisten = un
+      })
+      .catch((e) => console.error('gateway_live_state_request listener failed:', e))
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [])
   // Command-submitted cwd refresh (#44): the branch label must follow the
   // shell's LIVE directory — after `cd ..` out of a repository, waiting for
   // the 20s periodic tick left the old branch hanging on the row. Enter is

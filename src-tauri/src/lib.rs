@@ -3,6 +3,9 @@ pub mod analytics;
 // LaunchAgent / systemd unit) — pure artifact generators + per-OS install.
 pub mod autostart;
 pub mod cmux_import;
+// #124 (v1.8.0): the app's socket gateway — probe/bind/release loop and
+// the live-state bridge to the frontend.
+pub mod gateway_service;
 pub mod git_branch;
 pub mod listening_ports;
 pub mod notification_service;
@@ -1475,6 +1478,11 @@ async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String>
         // the router reads an AtomicBool, never the disk.
         app.state::<RouterDriver>()
             .set_daemon_enabled(settings.storestation.daemon_enabled);
+        // The gateway loop's mirror (#124): with the toggle OFF the app may
+        // bind the socket (lazily, once the daemon is really gone); with it
+        // ON the loop never grabs the socket from the daemon.
+        gateway_service::GatewayService::global()
+            .set_daemon_enabled(settings.storestation.daemon_enabled);
         Ok(())
     })
     .await
@@ -1504,8 +1512,27 @@ pub(crate) fn spawn_daemon_if_absent() -> Result<bool, String> {
         umux_storestation::client::Client::connect(dir, "desktop", env!("CARGO_PKG_VERSION"))
             .is_ok()
     };
-    if probe(&dir) {
-        return Ok(false); // somebody else's daemon — use it, spawn nothing
+    // #124: what answers the probe matters. The APP's own gateway serving
+    // the socket is NOT "a daemon is running" — the gateway releases the
+    // bind (suspend) and the daemon spawns into the freed path. A real
+    // daemon answering stays somebody else's daemon — use it, spawn nothing.
+    match umux_storestation::client::Client::connect(&dir, "desktop", env!("CARGO_PKG_VERSION")) {
+        Ok(client) if client.server_kind() == "app" => {
+            gateway_service::GatewayService::global().suspend_for_daemon();
+            // Wait for the release to land (serve exits within one accept
+            // tick) so the daemon never races an app bind for the path —
+            // bounded; a stuck gateway just falls through and the flow
+            // reports honestly below.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while probe(&dir) {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        Ok(_) => return Ok(false), // somebody else's daemon — use it, spawn nothing
+        Err(_) => {}               // nothing answers — spawn below
     }
     let bin = std::env::current_exe()
         .ok()
@@ -1575,6 +1602,9 @@ async fn storestation_status(app: AppHandle) -> Result<serde_json::Value, String
 /// unverified attempt rolls the engine state back and returns Err — the
 /// switch stays OFF and the UI never lies.
 fn enable_and_verify(driver: &RouterDriver) -> Result<serde_json::Value, String> {
+    // #124: while this flow runs, the app's gateway must stay off the
+    // socket — the daemon being enabled owns it from here on.
+    gateway_service::GatewayService::global().suspend_for_daemon();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut first_pass = true;
     loop {
@@ -1592,6 +1622,9 @@ fn enable_and_verify(driver: &RouterDriver) -> Result<serde_json::Value, String>
         }
         if std::time::Instant::now() >= deadline {
             driver.reset_daemon_connection();
+            // The enable failed — the gateway owes the user its live reads
+            // again (#124): lift the suspension so the loop rebinds.
+            gateway_service::GatewayService::global().resume();
             return Err(
                 "the umux Storestation daemon did not stay up after being enabled — try the \
                  toggle again (it may have raced a shutdown that was still in progress)"
@@ -1613,6 +1646,11 @@ async fn storestation_set_enabled(
             enable_and_verify(&driver)
         } else {
             driver.disable_daemon()?;
+            // #124: the daemon is gone — the gateway may take the socket
+            // back (lazily; the loop probes on its own cadence).
+            let gateway = gateway_service::GatewayService::global();
+            gateway.set_daemon_enabled(false);
+            gateway.resume();
             Ok(driver.storestation_status())
         }
     })
@@ -2011,6 +2049,12 @@ pub fn run() {
     // socket connection, so a daemon that is not up yet never blocks boot.
     let router = RouterDriver::new(initial_settings.storestation.daemon_enabled);
 
+    // The socket gateway's daemon mirror (#124): the loop must never grab
+    // the socket while the Storestation toggle is ON — seed it from the
+    // persisted setting before anything can bind.
+    gateway_service::GatewayService::global()
+        .set_daemon_enabled(initial_settings.storestation.daemon_enabled);
+
     let builder = tauri::Builder::default();
     // #117 follow-up: the toast click launches `umux://…` — own the scheme
     // before anything else. Release-only (see register_notification_scheme).
@@ -2087,6 +2131,7 @@ pub fn run() {
             banner_take_pending,
             load_settings,
             save_settings,
+            gateway_service::gateway_live_state_respond,
             storestation_status,
             storestation_set_enabled,
             storestation_set_autostart,
@@ -2262,10 +2307,23 @@ pub fn run() {
                     Err(e) => log::warn!("[banner] window build failed: {e}"),
                 }
             }
+            // #124: the socket gateway's ownership loop — the app serves the
+            // local socket whenever the daemon does not answer (probe first,
+            // bind if absent). One thread for the whole app lifetime.
+            gateway_service::GatewayService::spawn(app.handle().clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // The gateway's socket/pid files are ours to clean on the clean
+            // exit path (the daemon's rule, #124); a crash leaves them for
+            // the next prepare on either side to sweep.
+            if let tauri::RunEvent::Exit = event {
+                gateway_service::GatewayService::global().stop_for_exit();
+                umux_storestation::gateway::cleanup(&config_dir());
+            }
+        });
 }
 
 #[cfg(test)]

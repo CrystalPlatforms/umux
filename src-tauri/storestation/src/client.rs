@@ -76,6 +76,30 @@ pub fn hello_daemon_version(handshake_result: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Pure: WHO serves the socket, from the handshake result. The app gateway
+/// (#124) answers hello with `server:"app"` (+ `serverVersion`); the daemon
+/// carries no such field, and a MISSING field therefore reads as `"daemon"`
+/// — the additive rule: every pre-gateway responder is the daemon. Unknown
+/// values pass through verbatim so callers can treat them as generic.
+pub fn hello_server_kind(handshake_result: &Value) -> String {
+    handshake_result
+        .get("server")
+        .and_then(Value::as_str)
+        .unwrap_or("daemon")
+        .to_string()
+}
+
+/// Pure: the SERVING side's version from the handshake result —
+/// `serverVersion` when the reply carries it (the app gateway), otherwise
+/// the daemon's `daemonVersion` (every daemon hello, old and new).
+pub fn hello_server_version(handshake_result: &Value) -> Option<String> {
+    handshake_result
+        .get("serverVersion")
+        .and_then(Value::as_str)
+        .or_else(|| handshake_result.get("daemonVersion").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
 /// Connect WITHOUT the handshake — the liveness probe `server::prepare`
 /// uses to decide single-instance conflicts.
 pub fn raw_connect(config_dir: &Path) -> std::io::Result<transport::ClientStream> {
@@ -91,6 +115,13 @@ pub struct Client {
     /// reply did not carry a usable one). The version gate reads it at the
     /// driver choke point (#102).
     daemon_version: Option<String>,
+    /// WHO answered the handshake (#124): `"app"` when the desktop gateway
+    /// serves the socket, `"daemon"` otherwise (missing field = older
+    /// daemon — the additive rule, see [`hello_server_kind`]).
+    server_kind: String,
+    /// The SERVING side's version (`serverVersion`, falling back to the
+    /// daemon's `daemonVersion`) — what `umux status --json` reports.
+    server_version: Option<String>,
 }
 
 impl Client {
@@ -109,6 +140,8 @@ impl Client {
             stream,
             next_id: 1,
             daemon_version: None,
+            server_kind: "daemon".into(),
+            server_version: None,
         };
         // The hello phase is special: a connection that dies before ONE
         // response byte is the offline state, not a mid-session failure
@@ -144,8 +177,11 @@ impl Client {
                 }
             }
         };
-        client.daemon_version =
-            response.get("result").and_then(hello_daemon_version);
+        if let Some(result) = response.get("result") {
+            client.daemon_version = hello_daemon_version(result);
+            client.server_kind = hello_server_kind(result);
+            client.server_version = hello_server_version(result);
+        }
         decode_response(response).map_err(ConnectError::Protocol)?;
         Ok(client)
     }
@@ -153,6 +189,18 @@ impl Client {
     /// The daemon version the handshake reported (`None` = it did not).
     pub fn daemon_version(&self) -> Option<&str> {
         self.daemon_version.as_deref()
+    }
+
+    /// WHO serves the socket (#124): `"app"` (the desktop gateway) or
+    /// `"daemon"` — a missing hello field reads as daemon (additive rule).
+    pub fn server_kind(&self) -> &str {
+        &self.server_kind
+    }
+
+    /// The serving side's version (`serverVersion`, or the daemon's
+    /// `daemonVersion` on every daemon hello).
+    pub fn server_version(&self) -> Option<&str> {
+        self.server_version.as_deref()
     }
 
     /// One request → one response. A data frame (not expected before the
@@ -274,6 +322,10 @@ pub struct PersistentClient {
     /// The `daemonVersion` the handshake result carried (`None` = it did
     /// not). The version gate reads it at the driver choke point (#102).
     daemon_version: Option<String>,
+    /// WHO answered the handshake (#124) — see the one-shot `Client`.
+    server_kind: String,
+    /// The SERVING side's version — see the one-shot `Client`.
+    server_version: Option<String>,
 }
 
 struct PersistentInner {
@@ -334,7 +386,14 @@ impl PersistentClient {
                 }
             }
         };
-        let daemon_version = response.get("result").and_then(hello_daemon_version);
+        let (daemon_version, server_kind, server_version) = match response.get("result") {
+            Some(result) => (
+                hello_daemon_version(result),
+                hello_server_kind(result),
+                hello_server_version(result),
+            ),
+            None => (None, "daemon".to_string(), None),
+        };
         decode_response(response).map_err(ConnectError::Protocol)?;
 
         let pending: Arc<PendingMap> = Arc::new(StdMutex::new(HashMap::new()));
@@ -362,12 +421,25 @@ impl PersistentClient {
             dead,
             reader_shutdown: Some(shutdown_tx),
             daemon_version,
+            server_kind,
+            server_version,
         })
     }
 
     /// The daemon version the handshake reported (`None` = it did not).
     pub fn daemon_version(&self) -> Option<&str> {
         self.daemon_version.as_deref()
+    }
+
+    /// WHO serves the socket (#124): `"app"` or `"daemon"` (missing hello
+    /// field = daemon, the additive rule).
+    pub fn server_kind(&self) -> &str {
+        &self.server_kind
+    }
+
+    /// The serving side's version.
+    pub fn server_version(&self) -> Option<&str> {
+        self.server_version.as_deref()
     }
 
     /// Whether the connection is known-dead (the daemon went away). A dead

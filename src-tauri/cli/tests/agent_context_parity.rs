@@ -1,18 +1,19 @@
-//! Parity between `umux agent-context` and the real CLI surface (#83). The
-//! agent-context table is the machine-readable contract for agents; the
-//! `--help` output is the human one. This test enforces BOTH directions so
-//! the two layers cannot drift: every command the table documents must
-//! exist on the CLI (and be listed by `--help`), the exit-code catalog must
-//! stay 0/2/3/4/5, and the error list must name codes from the wire catalog.
+//! Parity between `umux agent-context` and the real CLI surface (#83, whole
+//! surface since the v1.8.0 retrofit #123). The agent-context table is the
+//! machine-readable contract for agents; the `--help` output is the human
+//! one. This test enforces BOTH directions so the layers cannot drift: every
+//! command (and every alias) the table documents must exist on the CLI, the
+//! exit-code catalog must stay 0/2/3/4/5, and the error list must name codes
+//! from the wire catalog.
 //!
-//! Assumptions (state-before-RED, #83):
+//! Assumptions (state-before-RED, #83 + #123):
 //! - `umux agent-context` prints ONE JSON document, schema 1, on stdout,
 //!   exit 0 — it reads nothing, touches no store.
-//! - Phase 1's command table is exactly `status` + `agent-context`;
-//!   `sessions list` joins at phase 2 and `attach` at phase 5 — when a
-//!   phase adds a command, it extends this table WITH this test.
-//! - The `daemon` field names the sibling `umux-storestation` binary — checked to
-//!   exist so the documented daemon is never a fiction.
+//! - Since #123 the command table covers the WHOLE surface — the canonical
+//!   `resource.verb` commands AND their v1.6.x aliases — and is generated
+//!   from one in-code table (story 9: the surface cannot drift).
+//! - The `daemon` field names the sibling `umux-storestation` binary —
+//!   checked to exist so the documented daemon is never a fiction.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,10 +46,10 @@ fn storestation_bin() -> PathBuf {
     candidate
 }
 
-/// The full v1 error catalog from plans/umux-storestation-cli-protocol.md —
-/// phase 2 documents ALL of it (clients treat future additions as generic;
-/// `badParams` joined at phase 2 with the session ops).
-const ERROR_CATALOG: [&str; 13] = [
+/// The v1 error catalog — the daemon's wire codes plus the two offline CLI
+/// codes the retrofit added (#123). Clients treat future additions as
+/// generic; new codes join here WITH their feature.
+const ERROR_CATALOG: [&str; 16] = [
     "storestationNotRunning",
     "storestationAlreadyRunning",
     "staleSocket",
@@ -64,6 +65,31 @@ const ERROR_CATALOG: [&str; 13] = [
     "coreConflict",
     "sessionCapExceeded",
     "noActiveSession",
+    // macOS Core retirement (#113, story 147).
+    "coreRetired",
+    // The v1.8.0 offline retrofit (#123): the store commands' domain codes.
+    "workspaceNotFound",
+    "settingNotFound",
+];
+
+/// The whole v1.8.0 canonical surface (#123) — every entry must ship AND be
+/// documented: name → its aliases.
+const SURFACE: [(&str, [&str; 3]); 15] = [
+    ("workspaces list", ["list", "", ""]),
+    ("workspaces create", ["new", "create", ""]),
+    ("workspaces delete", ["rm", "delete", ""]),
+    ("workspaces rename", ["rename", "update", ""]),
+    ("workspaces export", ["export", "", ""]),
+    ("workspaces import", ["import", "", ""]),
+    ("panes split", ["split", "", ""]),
+    ("settings get", ["config get", "", ""]),
+    ("settings set", ["config set", "", ""]),
+    ("status", ["", "", ""]),
+    ("sessions list", ["", "", ""]),
+    ("attach", ["", "", ""]),
+    ("core-session", ["", "", ""]),
+    ("notify", ["", "", ""]),
+    ("agent-context", ["", "", ""]),
 ];
 
 #[test]
@@ -132,15 +158,50 @@ fn agent_context_matches_the_help_surface() {
         );
     }
 
-    // PARITY, direction 2 (phase-2 instance): the three NEW-style commands
-    // the CLI actually ships must be in the table. Legacy v1.6.x commands
-    // join the table at their v1.8.0 retrofit and are deliberately absent
-    // now; `sessions list` joined at phase 2 (#84), `attach` joins at 5.
-    for name in ["status", "sessions list", "agent-context"] {
+    // PARITY, direction 2 (#123): the WHOLE canonical surface is documented
+    // — every family and verb, the old globals included. An undocumented
+    // command is exactly the drift story 9 exists to prevent.
+    assert_eq!(commands.len(), SURFACE.len(), "the table covers the whole surface");
+    for (name, _) in SURFACE {
         assert!(
             commands.iter().any(|c| c == name),
             "the table must document \"{name}\" while it ships"
         );
+    }
+
+    // PARITY, direction 3 (#123): every ALIAS the table declares parses on
+    // the real CLI — hidden from --help by design, but always dispatchable.
+    // (The alias-equivalence suite proves the behavior matches; here we pin
+    // the existence.)
+    for (name, aliases) in SURFACE {
+        let entry = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("the table lists \"{name}\""));
+        let documented: Vec<String> = entry["aliases"]
+            .as_array()
+            .expect("aliases is an array on every entry")
+            .iter()
+            .map(|v| v.as_str().expect("aliases are strings").to_string())
+            .collect();
+        for expected in aliases {
+            if expected.is_empty() {
+                continue;
+            }
+            assert!(
+                documented.iter().any(|a| a == expected),
+                "\"{name}\" must document its alias \"{expected}\""
+            );
+            let first = expected.split(' ').next().unwrap();
+            let (_, alias_code) = run(&[first, "--help"]);
+            assert_eq!(
+                alias_code,
+                Some(0),
+                "the alias \"{expected}\" of \"{name}\" must parse on the real CLI"
+            );
+        }
     }
 
     // The exit-code catalog is documented in BOTH binaries' --help (the

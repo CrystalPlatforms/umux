@@ -67,6 +67,13 @@ pub mod codes {
     // at the daemon — the ONE gate no client can bypass; the message points
     // at `core-session start`.
     pub const CORE_RETIRED: &str = "coreRetired";
+    // v1.8.0 CLI retrofit (#123): the offline store commands answer with the
+    // same `{code,message,next,retryable}` object in `--json` mode — these
+    // two name the domain refusals the prose errors used to carry. Emitted
+    // by the CLI only (the store is the CLI's offline domain); wire peers
+    // treat unknown codes as generic, per the additive catalog rule.
+    pub const WORKSPACE_NOT_FOUND: &str = "workspaceNotFound";
+    pub const SETTING_NOT_FOUND: &str = "settingNotFound";
 }
 
 /// The one error shape shared by the CLI `--json` output and the wire

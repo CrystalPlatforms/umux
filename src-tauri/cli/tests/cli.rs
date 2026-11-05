@@ -78,6 +78,11 @@ fn version_reports_the_app_version() {
 // Assumption: bare `umux` (no arguments) is the "what can this do?" entry
 // point — it prints the command list on STDOUT and exits 0 (a deliberate
 // choice, friendlier than git's usage-to-stderr exit 1).
+//
+// #123: the help teaches the CANONICAL `resource.verb` families; the v1.6.x
+// short spellings stay as hidden aliases (the alias-equivalence suite proves
+// they behave identically), so help lists `workspaces`/`panes`/`settings`
+// where it used to list `list`/`new`/`rm`/`rename`/`split`/`config`.
 #[test]
 fn no_arguments_prints_every_command() {
     let store = tempfile::tempdir().unwrap();
@@ -85,10 +90,20 @@ fn no_arguments_prints_every_command() {
     let (stdout, stderr, code) = run(store.path(), &[]);
 
     assert_eq!(code, Some(0), "stderr: {stderr}");
-    for command in ["list", "new", "rm", "rename", "split", "config"] {
+    for command in [
+        "workspaces", "panes", "settings", "status", "sessions", "attach",
+        "core-session", "notify", "agent-context",
+    ] {
         assert!(
             stdout.contains(command),
             "help must list `{command}`; stdout was:\n{stdout}"
+        );
+    }
+    // The canonical verbs are visible under their resource families.
+    for verb in ["create", "delete", "rename", "export", "import", "split", "get", "set"] {
+        assert!(
+            stdout.contains(verb),
+            "help must list the verb `{verb}`; stdout was:\n{stdout}"
         );
     }
 }

@@ -26,6 +26,11 @@
 //!   killed first — story 110's clean stop).
 //! - [`client`] — the client side the `umux` CLI uses today and the desktop
 //!   app's daemon-client driver will use in phase 4.
+//! - [`gateway`] — the desktop app's socket gateway (#124, v1.8.0): the app
+//!   serves the SAME protocol on the SAME socket when the daemon is absent
+//!   (probe first, bind if absent) — hello gains the additive
+//!   `server`/`serverVersion` fields; read-only ops (`storestation.status`
+//!   app variant, `workspaces.list`) bridge to the app's live state.
 //! - [`gate`] — the daemon version gate (v1.7.6 P2, #102): the pure
 //!   (daemon version, app version) → verdict classification the driver
 //!   applies to the hello handshake at its one choke point.
@@ -41,6 +46,7 @@ pub mod client;
 pub mod console;
 pub mod core;
 pub mod gate;
+pub mod gateway;
 pub mod notify;
 pub mod protocol;
 pub mod registry;
