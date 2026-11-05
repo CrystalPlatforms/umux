@@ -42,3 +42,10 @@ vite.config.d.ts
 pnpm-lock.yaml
 pnpm-workspace.yaml
 src-tauri/binaries/
+
+# /brag video output
+brag-output/
+brag-output-*/
+
+# Content drafts (WRITES skills, local only)
+/CrystalPlatforms-umux/
