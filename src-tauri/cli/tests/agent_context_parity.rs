@@ -81,9 +81,9 @@ const ERROR_CATALOG: [&str; 22] = [
     "storeWriteRefused",
 ];
 
-/// The whole v1.8.0 canonical surface (#123) — every entry must ship AND be
-/// documented: name → its aliases.
-const SURFACE: [(&str, [&str; 3]); 51] = [
+/// The whole v1.8.0 canonical surface (#123 + #128) — every entry must ship
+/// AND be documented: name → its aliases.
+const SURFACE: [(&str, [&str; 3]); 63] = [
     ("workspaces list", ["list", "", ""]),
     ("workspaces create", ["new", "create", ""]),
     ("workspaces delete", ["rm", "delete", ""]),
@@ -116,6 +116,10 @@ const SURFACE: [(&str, [&str; 3]); 51] = [
     ("tabs reorder", ["", "", ""]),
     ("tabs move", ["", "", ""]),
     ("tabs separate", ["", "", ""]),
+    // The #128 tooltip/label reads and the fullscreen chrome-hide.
+    ("tabs ports", ["", "", ""]),
+    ("tabs branches", ["", "", ""]),
+    ("tabs fullscreen", ["", "", ""]),
     ("panes split", ["split", "", ""]),
     ("panes close", ["", "", ""]),
     ("panes resize", ["", "", ""]),
@@ -123,7 +127,17 @@ const SURFACE: [(&str, [&str; 3]); 51] = [
     ("panes focus", ["", "", ""]),
     ("settings get", ["config get", "", ""]),
     ("settings set", ["config set", "", ""]),
-    ("settings open", ["", "", ""]),
+    ("settings open", ["open settings", "", ""]),
+    // The #128 system actions.
+    ("update check", ["", "", ""]),
+    ("update install", ["", "", ""]),
+    ("reset", ["", "", ""]),
+    ("open folder", ["", "", ""]),
+    ("open port", ["", "", ""]),
+    ("open settings", ["", "", ""]),
+    ("window close", ["", "", ""]),
+    ("window minimize", ["", "", ""]),
+    ("window toggle-maximize", ["", "", ""]),
     ("status", ["", "", ""]),
     ("sessions list", ["", "", ""]),
     ("sessions write", ["", "", ""]),
@@ -246,6 +260,40 @@ fn agent_context_matches_the_help_surface() {
                 alias_code,
                 Some(0),
                 "the alias \"{expected}\" of \"{name}\" must parse on the real CLI"
+            );
+        }
+    }
+
+    // PARITY, direction 4 (#128): the worked examples ride REAL commands —
+    // every step's command family must parse on the live CLI, so an example
+    // can never document a spelling the dispatch would refuse. The
+    // `<tabId>` placeholders are skipped (they are the argument, not the
+    // command).
+    let examples = doc["examples"]
+        .as_array()
+        .expect("agent-context carries worked examples (#128)");
+    assert!(
+        examples.len() >= 4,
+        "the final shape covers inspect / layout / steering / system"
+    );
+    for story in examples {
+        let steps = story["steps"]
+            .as_array()
+            .expect("every example carries its steps");
+        assert!(!steps.is_empty(), "an empty example helps nobody");
+        for step in steps {
+            let line = step.as_str().expect("steps are command lines");
+            let first = line
+                .split_whitespace()
+                .next()
+                .expect("a step names its binary");
+            assert_eq!(first, "umux", "every step drives umux: {line}");
+            let family = line.split_whitespace().nth(1).expect("a step names a command");
+            let (_, fam_code) = run(&[family, "--help"]);
+            assert_eq!(
+                fam_code,
+                Some(0),
+                "the example \"{line}\" must ride a real command family"
             );
         }
     }

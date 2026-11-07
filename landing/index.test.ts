@@ -236,15 +236,14 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expectTileImg(/session restore/i, "umux-session.png");
         expectTileImg(/import from cmux/i, "umux-cmux.png");
 
-        // Exactly two tiles stay imageless (2026-10-02, Adam): herdr (coming
-        // soon) and SSH panels — its placeholder shot was pulled, the card
-        // moved to the end of the list right before herdr.
+        // Exactly ONE tile stays imageless (2026-11-07, Adam): the Live CLI
+        // tile — a terminal story with no screenshot. The SSH and herdr
+        // tiles were removed at his direction (2026-11-07).
         const imgTiles = features.filter((f) => f.querySelector("img"));
-        expect(imgTiles, "every tile except ssh/herdr must carry a screenshot").toHaveLength(
-            features.length - 2,
+        expect(imgTiles, "every tile except live-cli must carry a screenshot").toHaveLength(
+            features.length - 1,
         );
-        expect(byHeading(/herdr/i)?.querySelector("img")).toBeNull();
-        expect(byHeading(/ssh panels/i)?.querySelector("img")).toBeNull();
+        expect(byHeading(/live cli/i)?.querySelector("img")).toBeNull();
 
         const media = [hero, ...doc.querySelectorAll(".feature img")];
         for (const img of media) {
@@ -257,18 +256,19 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(html).not.toMatch(/demo\.gif|screenshot-(linux|macos|windows)\.png/);
     });
 
-    it("leads with the one-line pitch and the ten feature tiles", () => {
-        // Hero pitch + ten tiles (2026-10-08, v1.7.5 state): workspaces &
-        // panels, embedded terminal (shipped since v0.1 — its old "coming
-        // soon" badge was wrong), agent status & notifications, sessions
+    it("leads with the one-line pitch and the nine feature tiles", () => {
+        // Hero pitch + nine tiles (2026-11-07, v1.8.0 state): workspaces &
+        // panels, embedded terminal, agent status & notifications, sessions
         // that outlive the window (Storestation), Always-On (umux Core),
-        // in-app updates, session restore, import from cmux (shipped),
-        // SSH panels and import from herdr (the only still-unbuilt one).
+        // in-app updates, session restore, import from cmux, and Live CLI
+        // (new — ships with v1.8.0). The SSH and herdr tiles were removed at
+        // Adam's direction (2026-11-07) — they must never return as tiles
+        // (herdr lives on in the roadmap's planned ladder instead).
         const doc = parse();
         expect(doc.querySelector("h1")?.textContent ?? "").toMatch(/terminal workspace/i);
 
         const features = [...doc.querySelectorAll(".feature")];
-        expect(features, "expected ten feature tiles").toHaveLength(10);
+        expect(features, "expected nine feature tiles").toHaveLength(9);
         const text = features
             .map((f) => f.textContent?.toLowerCase() ?? "")
             .join("\n");
@@ -278,21 +278,24 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(text).toMatch(/notification/);
         expect(text).toMatch(/session restore/);
         expect(text).toMatch(/import from cmux/);
-        expect(text).toMatch(/import from herdr/);
         expect(text).toMatch(/embedded terminal/);
-        expect(text).toMatch(/ssh/);
         expect(text).toMatch(/in-app updates/);
         expect(text).toMatch(/storestation/);
         expect(text).toMatch(/always-on/);
-        // Unbuilt features must say so up front on their tiles.
-        const byHeading = (re: RegExp) =>
-            features.find((f) => re.test(f.querySelector("h2")?.textContent ?? ""));
-        expect(byHeading(/herdr/i)?.textContent ?? "").toMatch(/coming soon/i);
+        expect(text).toMatch(/live cli/);
+        // The removed tiles must never come back.
+        expect(text).not.toMatch(/import from herdr/);
+        expect(text).not.toMatch(/ssh panels/);
+        expect(text).not.toMatch(/coming soon/);
         // Regression guard: the embedded terminal shipped long ago (xterm.js,
         // v0.1) — the "coming soon" badge it once carried must never return.
+        const byHeading = (re: RegExp) =>
+            features.find((f) => re.test(f.querySelector("h2")?.textContent ?? ""));
         expect(byHeading(/embedded terminal/i)?.textContent ?? "").not.toMatch(
             /coming soon/i,
         );
+        // The Live CLI tile SHIPS with v1.8.0 — it must never grow the badge.
+        expect(byHeading(/live cli/i)?.textContent ?? "").not.toMatch(/coming soon/i);
     });
 
     it("renders link-preview meta (Open Graph / Twitter card)", () => {
@@ -453,15 +456,6 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         expect(text).toMatch(/--dry-run/);
     });
 
-    it("is upfront that the CLI cannot live-control a running app yet", () => {
-        // The CLI manages the saved store only; live control of a running app
-        // is roadmap (future version). The section must set that expectation
-        // so nobody installs the CLI expecting a remote control.
-        const doc = parse();
-        const text = doc.querySelector("section.install-cli")?.textContent ?? "";
-        expect(text).toMatch(/future version/i);
-    });
-
     it("closes with a final call-to-action pointing at the downloads", () => {
         // After all the content, a closing band with one primary download
         // button (JS swaps it to the visitor's platform) and a GitHub link.
@@ -492,6 +486,50 @@ describe("umux landing page (Issue #35, Phase 11)", () => {
         const style = doc.querySelector("style")?.textContent ?? "";
         expect(style).toMatch(/\.js \.reveal\s*\{/);
         expect(style).toContain("prefers-reduced-motion: reduce");
+    });
+});
+
+// --- Live CLI tile (#129, v1.8.0) -------------------------------------------
+// NOTE: the tile describes the SHIPPED surface — it goes live with the
+// v1.8.0 release (landing changes are gated: shown to the PO first, pushed
+// at release time; docs always describe the latest released version).
+
+describe("umux landing page — Live CLI tile (Issue #129, v1.8.0)", () => {
+    it("carries the Live CLI tile as the features grid's last tile", () => {
+        // Adam's placement call: the tile joined before herdr (2026-11-07),
+        // and herdr + SSH were removed right after — Live CLI closes the
+        // grid.
+        const doc = parse();
+        const features = [...doc.querySelectorAll(".feature")];
+        const liveIdx = features.findIndex((f) =>
+            /live cli/i.test(f.querySelector("h2")?.textContent ?? ""),
+        );
+        expect(liveIdx, "the Live CLI tile is missing").toBeGreaterThanOrEqual(0);
+        expect(liveIdx).toBe(features.length - 1);
+    });
+
+    it("presents the tile like the other icon tiles: imageless, agent-context named", () => {
+        const doc = parse();
+        const features = [...doc.querySelectorAll(".feature")];
+        const tile = features.find((f) =>
+            /live cli/i.test(f.querySelector("h2")?.textContent ?? ""),
+        )!;
+        expect(tile.querySelector("img"), "the tile stays imageless (no screenshot exists)").toBeNull();
+        expect(tile.querySelector(".feature-head svg"), "an icon like the SSH tile").toBeTruthy();
+        const text = (tile.textContent ?? "").toLowerCase();
+        expect(text).toMatch(/agent-context/);
+        // The socket security note stays on the tile.
+        expect(text).toMatch(/no auth/);
+        expect(text).toMatch(/no network listener/);
+        // Not a "coming soon" — the feature ships with v1.8.0.
+        expect(text).not.toMatch(/coming soon/i);
+    });
+
+    it("points the install-cli note at the tile without a dead anchor", () => {
+        const doc = parse();
+        const text = doc.querySelector("section.install-cli")?.textContent ?? "";
+        expect(text.toLowerCase()).toMatch(/running app live/);
+        expect(text.toLowerCase()).toMatch(/live cli tile/);
     });
 });
 

@@ -86,13 +86,8 @@ import {
   type Workspace,
   type WorkspaceState,
 } from './workspaces'
-import { applyGatewayOp, resolveSendTarget } from './gatewayOps'
-import {
-  applySettingByKey,
-  readAllSettings,
-  readSettingByKey,
-  SETTING_KEYS,
-} from './settings'
+import { applyGatewayOp } from './gatewayOps'
+import { handleLiveOp, type LiveOpDeps } from './liveOps'
 import {
   computeSidebarDrop,
   computeTabDrop,
@@ -3161,14 +3156,43 @@ export function WorkspaceShell() {
       unlisten?.()
     }
   }, [])
-  // Live MUTATIONS (#125) + the live I/O surface (#127): the gateway
-  // forwards every op that is not its own health or the composed list. The
-  // layout ops run the SAME pure ops the UI uses (through gatewayOps), so a
-  // CLI command cannot land anywhere a click could not; tabs.send writes
-  // through the same pty path keystrokes take; settings.set goes through
-  // the SAME applySettings a toggle click calls. ok answers persist (the
-  // existing save path); errors answer the enumerated object verbatim (the
-  // gateway forwards it to the CLI).
+  // Live MUTATIONS (#125) + the live I/O surface (#127/#128): the gateway
+  // forwards every op that is not its own health or the composed list.
+  // The layout ops run the SAME pure ops the UI uses (through gatewayOps),
+  // so a CLI command cannot land anywhere a click could not; every
+  // inherently-live op — terminal I/O, the session mapping, the #128
+  // system actions — is answered by src/liveOps.ts through these injected
+  // deps (the real Tauri adapters), so the whole catalog stays drivable by
+  // the parity suite without a running app. ok answers persist (the
+  // existing save path); errors answer the enumerated object verbatim.
+  const liveDeps: LiveOpDeps = {
+    invoke: <T,>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args),
+    state: () => stateRef.current,
+    settings: () => settingsRef.current,
+    liveShell: (panelId) => (panelId == null ? null : ptyIdsRef.current.get(panelId) ?? null),
+    applySettingPatch: (patch) => applySettingsRef.current(patch),
+    relaunch: () => void relaunch(),
+    window: () => getCurrentWindow(),
+    openPath: (path) => openPath(path),
+    revealItemInDir: (path) => revealItemInDir(path),
+    openUrl: (url) => openUrl(url),
+    updaterApi: defaultUpdaterApi,
+    setFullscreen: (tabId) => {
+      // The tab menu's own toggle, reachable from the gateway: the SAME
+      // transient state the menu sets (ESC and the guard effects keep
+      // working — the CLI cannot wedge the mode into an invalid state).
+      if (tabId == null) {
+        setFullscreenTab(null)
+        return
+      }
+      for (const ws of stateRef.current.workspaces) {
+        if (ws.tabs?.some((t) => t.id === tabId)) {
+          setFullscreenTab({ workspaceId: ws.id, tabId })
+          return
+        }
+      }
+    },
+  }
   useEffect(() => {
     let cancelled = false
     let unlisten: (() => void) | undefined
@@ -3177,231 +3201,10 @@ export function WorkspaceShell() {
         console.error('gateway_op_respond failed:', e),
       )
     }
-    const opErr = (code: string, message: string, next: string[] = []) => ({
-      ok: false,
-      error: { code, message, next, retryable: false },
-    })
-    // The non-layout ops (#127): reads and side-effect commands that do not
-    // fit the pure state-op machine. Returns true when handled.
-    const handleLiveOp = (id: number, op: string, p: Record<string, unknown>): boolean => {
-      const strParam = (k: string): string | null =>
-        typeof p[k] === 'string' && (p[k] as string) !== '' ? (p[k] as string) : null
-      const liveShell = (panelId: string | null) => {
-        if (panelId == null) return null
-        return ptyIdsRef.current.get(panelId) ?? null
-      }
-      switch (op) {
-        case 'tabs.send': {
-          const tabId = strParam('tab')
-          const text = typeof p['text'] === 'string' ? (p['text'] as string) : ''
-          if (tabId == null || text === '') {
-            answer(id, opErr('badParams', 'params need "tab" (a tab id) and non-empty "text"'))
-            return true
-          }
-          // The SAME resolution the op-mapping suite pins (focused panel of
-          // the active tab; the tab's first panel otherwise).
-          const target = resolveSendTarget(stateRef.current, tabId)
-          if (target == null) {
-            answer(
-              id,
-              opErr(
-                'tabNotFound',
-                `no tab with id "${tabId}"`,
-                ['tab ids come from umux workspaces list --json or a create echo'],
-              ),
-            )
-            return true
-          }
-          const panelId = target.panelId
-          const entry = liveShell(panelId)
-          if (entry == null) {
-            answer(
-              id,
-              opErr(
-                'paneNotFound',
-                'that tab has no live shell to write to (open its workspace first)',
-                ['open the workspace: umux workspaces open --json'],
-              ),
-            )
-            return true
-          }
-          // "lands in that panel's shell and executes": a bare command gets
-          // its Enter. Multi-line input passes through verbatim.
-          const data = text.endsWith('\n') ? text : `${text}\n`
-          invoke(entry.kind === 'ssh' ? 'ssh_write' : 'pty_write', {
-            id: entry.id,
-            data,
-          })
-            .then(() =>
-              answer(id, {
-                ok: true,
-                result: { sent: { tab: target.tabId, panel: panelId } },
-              }),
-            )
-            .catch((e) => answer(id, opErr('ioError', String(e))))
-          return true
-        }
-        case 'settings.get': {
-          const key = strParam('key')
-          const s = settingsRef.current
-          if (key == null) {
-            answer(id, { ok: true, result: { settings: readAllSettings(s) } })
-            return true
-          }
-          const value = readSettingByKey(s, key)
-          if (value == null) {
-            answer(
-              id,
-              opErr('settingNotFound', `unknown setting "${key}"`, [
-                `settings: ${SETTING_KEYS.join(', ')}`,
-              ]),
-            )
-            return true
-          }
-          answer(id, { ok: true, result: { key, value } })
-          return true
-        }
-        case 'settings.set': {
-          const key = strParam('key')
-          const value = typeof p['value'] === 'string' ? (p['value'] as string) : ''
-          if (key == null) {
-            answer(id, opErr('badParams', 'params need "key" and "value"'))
-            return true
-          }
-          const outcome = applySettingByKey(key, value)
-          if (!outcome.ok) {
-            answer(id, { ok: false, error: outcome.error })
-            return true
-          }
-          // The SAME path a toggle click takes — outcomes cannot diverge.
-          applySettingsRef.current(outcome.patch)
-          answer(id, { ok: true, result: { set: { key, value: outcome.value } } })
-          return true
-        }
-        case 'settings.open': {
-          invoke('open_settings_file')
-            .then(() => answer(id, { ok: true, result: { opened: true } }))
-            .catch((e) => answer(id, opErr('ioError', String(e))))
-          return true
-        }
-        case 'sessions.list': {
-          // The app's LIVE panels — one row per mounted shell (the daemon
-          // counterpart lists its registry sessions; same idea, same owner).
-          const s = stateRef.current
-          const sessions: unknown[] = []
-          for (const ws of s.workspaces) {
-            const tabs = ws.tabs ?? []
-            for (let i = 0; i < tabs.length; i++) {
-              const tab = tabs[i]
-              for (const panelId of leafIds(tab.layout)) {
-                if (!ptyIdsRef.current.has(panelId)) continue
-                const cwd =
-                  ws.panels?.find((pn) => pn.id === panelId)?.workingDirectory ?? null
-                sessions.push({
-                  id: panelId,
-                  title: tab.name ?? `Tab ${i + 1}`,
-                  cwd,
-                  workspace: ws.name,
-                  workspaceId: ws.id,
-                  tabId: tab.id,
-                  cols: null,
-                  rows: null,
-                  attachedClients: 0,
-                })
-              }
-            }
-          }
-          answer(id, { ok: true, result: { sessions, truncated: false } })
-          return true
-        }
-        case 'sessions.write': {
-          const panelId = strParam('id')
-          const data = typeof p['data'] === 'string' ? (p['data'] as string) : ''
-          const entry = liveShell(panelId)
-          if (entry == null || data === '') {
-            answer(id, opErr('sessionNotFound', `no live panel with id "${panelId ?? ''}"`, ['list the live panels: umux sessions list --json']))
-            return true
-          }
-          invoke(entry.kind === 'ssh' ? 'ssh_write' : 'pty_write', { id: entry.id, data })
-            .then(() => answer(id, { ok: true, result: { written: true } }))
-            .catch((e) => answer(id, opErr('ioError', String(e))))
-          return true
-        }
-        case 'sessions.resize': {
-          const panelId = strParam('id')
-          const cols = typeof p['cols'] === 'number' ? p['cols'] : null
-          const rows = typeof p['rows'] === 'number' ? p['rows'] : null
-          const entry = liveShell(panelId)
-          if (entry == null || cols == null || rows == null) {
-            answer(id, opErr('sessionNotFound', `no live panel with id "${panelId ?? ''}"`, ['list the live panels: umux sessions list --json']))
-            return true
-          }
-          invoke(entry.kind === 'ssh' ? 'ssh_resize' : 'pty_resize', { id: entry.id, cols, rows })
-            .then(() => answer(id, { ok: true, result: { resized: true } }))
-            .catch((e) => answer(id, opErr('ioError', String(e))))
-          return true
-        }
-        case 'sessions.kill': {
-          const panelId = strParam('id')
-          const entry = liveShell(panelId)
-          if (entry == null) {
-            answer(id, opErr('sessionNotFound', `no live panel with id "${panelId ?? ''}"`, ['list the live panels: umux sessions list --json']))
-            return true
-          }
-          invoke(entry.kind === 'ssh' ? 'ssh_close' : 'pty_close', { id: entry.id })
-            .then(() => answer(id, { ok: true, result: { killed: true } }))
-            .catch((e) => answer(id, opErr('ioError', String(e))))
-          return true
-        }
-        case 'sessions.status': {
-          const panelId = strParam('id')
-          const entry = liveShell(panelId)
-          if (entry == null) {
-            answer(id, opErr('sessionNotFound', `no live panel with id "${panelId ?? ''}"`, []))
-            return true
-          }
-          answer(id, {
-            ok: true,
-            result: { id: panelId, kind: entry.kind, attachedClients: 0 },
-          })
-          return true
-        }
-        case 'sessions.create': {
-          // The app spawns terminals through the UI, never headless — the
-          // guidance IS the answer (issue #127).
-          answer(
-            id,
-            opErr(
-              'badParams',
-              'the umux app does not spawn headless sessions — create terminals through the UI or the CLI against the app',
-              ['open a terminal: umux tabs create --workspace <name>', 'bring the daemon world back: umux attach'],
-            ),
-          )
-          return true
-        }
-        case 'sessions.subscribe':
-        case 'sessions.unsubscribe': {
-          // Streaming a live panel's output runs over the daemon's registry
-          // — the app gateway has no stream to hand out, and pretending
-          // otherwise would leave the subscriber silent forever.
-          answer(
-            id,
-            opErr(
-              'badParams',
-              'live-panel streaming requires the daemon — bring it back with umux attach',
-              ['bring the daemon world back: umux attach'],
-            ),
-          )
-          return true
-        }
-        default:
-          return false
-      }
-    }
     listen<{ id: number; op: string; params?: unknown }>('gateway_op_request', (event) => {
       const { id, op, params } = event.payload
       const p = (params ?? {}) as Record<string, unknown>
-      if (handleLiveOp(id, op, p)) return
+      if (handleLiveOp(liveDeps, id, op, p)) return
       const outcome = applyGatewayOp(stateRef.current, op, p, () => crypto.randomUUID())
       if (outcome.ok) {
         persist(outcome.state)

@@ -429,6 +429,78 @@ umux notify "build finished"        # desktop notification, no app needed
 
 ---
 
+## Live CLI (v1.8.0)
+
+Everything above works **offline** (nothing running). Since v1.8.0 the same `umux` binary also drives the **live app**: when umux is open, layout changes, terminal I/O and the system actions execute in the running app and you see the result immediately — no restart, no double entry.
+
+### The three worlds
+
+Every command answers in exactly one of three worlds, and you never have to guess which:
+
+| World | What it means | What happens |
+| --- | --- | --- |
+| **App alive** | the umux window is open | the command runs **live** — the UI updates instantly |
+| **Daemon only** | umux Storestation is ON but the app is closed | app-domain commands refuse (`appNotRunning`, see `umux attach`); session and Storestation commands keep working |
+| **Nothing alive** | no app, no daemon | the offline behavior — saved definitions only (`--desk`/`--term` required, exactly as always) |
+
+A few commands are **live-only** by nature — there is no offline answer to give: `tabs send`, `update check/install`, `open …`, `window …`, `tabs ports/branches` (exit 3 when nothing can serve them). `umux reset` is special: live it resets and relaunches through the app; offline it wipes both store files (`workspaces.json`, `settings.json`) but **only with `--yes`** — without it you get the enumerated refusal.
+
+Single-writer guarantee: while the app or daemon is alive, the CLI never writes the store files behind its back — every mutation rides the socket to the side that owns the live state.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | ok — "offline" answers from `status`/`workspaces list` are a state, not an error |
+| `2` | usage (missing flag, bad params, `reset` without `--yes`) |
+| `3` | required target unreachable (`attach` offline; live-only commands with nothing alive; `appNotRunning`) |
+| `4` | conflict (daemon already running) |
+| `5` | internal/unexpected |
+
+Every `--json` failure prints ONE error object: `{"code","message","next":[…],"retryable"}` — `code` from the documented catalog, `next` naming what to do about it.
+
+### Driving umux from scripts and agents
+
+`umux agent-context` prints the whole surface as ONE machine-readable document (every command, alias, limit, plus worked examples) — point your agent at it instead of this README. Three shapes it covers:
+
+Inspect what is running (all of it is safe offline except the two live reads):
+
+```bash
+umux status --json                  # who serves the socket ("app" or "daemon") and its version
+umux workspaces list --json         # live + saved state (live when the app is open)
+umux sessions list --json           # the live panels
+umux tabs ports <tabId> --json      # the tab's listening ports — the tooltip's data (app open)
+umux tabs branches <tabId> --json   # the tab's git branch labels — the sidebar's data (app open)
+```
+
+Drive the layout (live when the app is open; offline it saves the definitions):
+
+```bash
+umux workspaces create myproject --json          # → {"created":{"id":…,"tabId":…,"panelId":…}}
+umux tabs create --workspace myproject --json    # another tab in it
+umux panes split --workspace myproject --vertical --json
+umux workspaces color myproject red
+umux groups create web --json
+```
+
+Steer a terminal and the system (live-only — the app must be open):
+
+```bash
+umux tabs send <tabId> "cargo test" --json   # lands in that tab's shell and executes
+umux open port <tabId> 5173                  # the browser opens http://localhost:5173
+umux open folder /home/me/myproject          # the file manager opens it
+umux update check --json                     # the Settings row's result, on your CLI
+umux window minimize                         # the header menu's minimize
+```
+
+Created ids are echoed in every result document — that is how one command's output becomes the next command's `<tabId>`.
+
+### The socket (security note)
+
+The live CLI talks to the app/daemon over **one local, per-user transport** — a Unix socket with `0600` permissions, or a per-user named pipe on Windows. There is **no auth, no token, and no network listener** — nothing ever binds a TCP port; another machine cannot reach it, and on your machine the socket belongs to your user alone. Its path derives from the config directory, so `UMUX_CONFIG_DIR` isolates store, socket and sessions together (that is how tests stay hermetic).
+
+---
+
 ## Updates
 
 umux keeps itself current through **GitHub Releases only** — there is no update server (zero-cost policy). The flow:

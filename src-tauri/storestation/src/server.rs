@@ -96,12 +96,19 @@ const FORWARD_BUDGET: Duration = Duration::from_secs(10);
 /// single owner of live layout state), which the daemon forwards to the
 /// registered executor instead of executing. Everything else — sessions,
 /// Core, Storestation lifecycle — stays daemon-domain, executed here.
+/// #128 grows the surface: the system actions (update, reset, open, window)
+/// execute in the app too — the same openers, updater and window the UI
+/// uses — so the daemon routes them to the executor like the layout ops.
 fn is_app_domain(op: &str) -> bool {
     op.starts_with("workspaces.")
         || op.starts_with("groups.")
         || op.starts_with("tabs.")
         || op.starts_with("panes.")
         || op.starts_with("settings.")
+        || op.starts_with("update.")
+        || op.starts_with("reset.")
+        || op.starts_with("open.")
+        || op.starts_with("window.")
 }
 
 impl ServeState {

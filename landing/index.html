@@ -478,18 +478,10 @@
     </div>
     <div class="feature reveal">
       <div class="feature-head">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        <h2>SSH panels</h2>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <h2>Live CLI</h2>
       </div>
-      <p>Open a panel on a remote machine over SSH using your local agent and keys — remote panels look and behave exactly like local ones. Linux and macOS today; Windows is on the roadmap.</p>
-    </div>
-    <div class="feature reveal">
-      <div class="feature-head">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-        <h2>Import from herdr</h2>
-        <span class="soon">Coming soon</span>
-      </div>
-      <p>On the roadmap: the same one-step import for herdr — workspaces, layout and agent sessions carried over, so switching costs you nothing.</p>
+      <p>The same <code>umux</code> command also controls the running app. Every layout change, terminal write, update check and window action takes effect live, as soon as you run the command. It all goes over one local socket. There is no auth and no network listener, so nothing is reachable from the network. For scripts and agents, <code>umux agent-context</code> prints the whole surface as one machine-readable document they can read to see what is available.</p>
     </div>
   </section>
 
@@ -505,7 +497,7 @@
         </div>
         <pre><span class="prompt" aria-hidden="true">$ </span><code>curl -fsSL https://raw.githubusercontent.com/CrystalPlatforms/umux/main/install.sh | sh</code></pre>
       </div>
-      <p class="note">Look before you leap: append <code>-- --dry-run</code> to preview what it would do. The CLI manages umux's saved store — it can't control a running app live yet; that's on the roadmap for a future version. macOS and Linux (x86_64). The desktop installers already carry the CLI too — details in the <a href="https://github.com/CrystalPlatforms/umux#umux-on-your-path" target="_blank" rel="noopener">README</a>.</p>
+      <p class="note">Look before you leap: append <code>-- --dry-run</code> to preview what it would do. Since v1.8.0 the CLI drives the running app live too — see the Live CLI tile below. macOS and Linux (x86_64). The desktop installers already carry the CLI too — details in the <a href="https://github.com/CrystalPlatforms/umux#umux-on-your-path" target="_blank" rel="noopener">README</a>.</p>
     </div>
   </section>
 

@@ -203,6 +203,49 @@ export function resolveSendTarget(
   return null
 }
 
+/// The layout op catalog (#125) — every op [`applyGatewayOp`] serves, named
+/// once for the parity fixture suite: the fixture holds this list against
+/// the plan's UI inventory, and the suite probes each entry through the
+/// real switch (an entry that answers unknownOp fails the suite, so the
+/// list cannot drift from the dispatch).
+export const LAYOUT_OPS: ReadonlyArray<string> = [
+  'workspaces.create',
+  'workspaces.rename',
+  'workspaces.delete',
+  'workspaces.close',
+  'workspaces.open',
+  'workspaces.pin',
+  'workspaces.unpin',
+  'workspaces.color',
+  'workspaces.move',
+  'workspaces.reorder',
+  'groups.create',
+  'groups.rename',
+  'groups.delete',
+  'groups.unpack',
+  'groups.pin',
+  'groups.unpin',
+  'groups.color',
+  'groups.move',
+  'groups.collapse',
+  'groups.expand',
+  'tabs.create',
+  'tabs.open',
+  'tabs.close',
+  'tabs.rename',
+  'tabs.pin',
+  'tabs.unpin',
+  'tabs.color',
+  'tabs.reorder',
+  'tabs.move',
+  'tabs.separate',
+  'panes.split',
+  'panes.close',
+  'panes.focus',
+  'panes.zoom',
+  'panes.resize',
+]
+
 /// The op catalog (#125). `params` is the request's params object verbatim;
 /// the answer is either the new state + result doc (echoing ids) or the
 /// enumerated error. genId is injected so tests are deterministic.

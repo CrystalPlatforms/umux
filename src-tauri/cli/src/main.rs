@@ -151,15 +151,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Alias of `workspaces rename`
-    #[command(hide = true)]
-    Update {
-        old_name: String,
-        new_name: String,
-        /// Print the machine-readable result document
-        #[arg(long)]
-        json: bool,
-    },
     /// Alias of `panes split` (v1.6.x — the workspace name stays required,
     /// exactly the v1.6.x contract)
     #[command(hide = true)]
@@ -233,8 +224,123 @@ enum Command {
         #[command(subcommand)]
         action: CoreSessionAction,
     },
+    /// App update commands (#128): the Settings row's updater, through the
+    /// gateway. LIVE-ONLY — offline or daemon-only exits 3.
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+    /// Factory reset (#128): with the app alive — reset + relaunch through
+    /// the gateway (the Settings arm's semantics); offline — removes both
+    /// store files after an explicit --yes.
+    Reset {
+        /// Confirm the offline wipe (refused without it)
+        #[arg(long)]
+        yes: bool,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// System openers (#128): the same openers the UI uses — a folder in
+    /// the file manager, a port's URL in the browser, settings.json in the
+    /// editor. LIVE-ONLY — offline or daemon-only exits 3.
+    Open {
+        #[command(subcommand)]
+        action: OpenAction,
+    },
+    /// Window actions (#128): the header menu's minimize / toggle-maximize
+    /// / close, on the umux window. LIVE-ONLY — offline or daemon-only
+    /// exits 3.
+    Window {
+        #[command(subcommand)]
+        action: WindowAction,
+    },
     /// Print a machine-readable description of this CLI (schema 1, #83)
     AgentContext,
+}
+
+/// The `update` verb family (#128): the same updater the Settings row
+/// drives, exposed through the gateway. `check` mirrors the row's settled
+/// result; `install` downloads + applies and reports the relaunch honestly
+/// (the answer describes it, the app performs it). The v1.6.x RENAME alias
+/// (`update <old> <new>`) rides along hidden as the external catch — the
+/// shapes cannot collide (the verbs take no positional, the rename takes
+/// exactly two).
+#[derive(clap::Subcommand)]
+enum UpdateAction {
+    /// Check for an update (the Settings row's result)
+    Check {
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download + apply the update; umux relaunches afterwards
+    Install {
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// The v1.6.x rename alias: `update <old> <new>` — hidden from help,
+    /// dispatched to `workspaces rename`.
+    #[command(external_subcommand, hide = true)]
+    Legacy(Vec<String>),
+}
+
+/// The `open` verb family (#128): one op per UI opener.
+#[derive(clap::Subcommand)]
+enum OpenAction {
+    /// Open a folder in the system file manager (the folder line's
+    /// double-click; a refused CONTENTS view falls back to revealing it)
+    Folder {
+        /// The folder path to open
+        target: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open a port's http://localhost URL in the system browser (the
+    /// tooltip's port click)
+    Port {
+        /// The tab whose tooltip the port belongs to
+        tab: String,
+        /// The port number (1–65535)
+        #[arg(value_name = "PORT")]
+        port: u16,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open settings.json in the system editor (the Settings footnote;
+    /// alias of `settings open`)
+    Settings {
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The `window` verb family (#128): the header menu's window actions.
+#[derive(clap::Subcommand)]
+enum WindowAction {
+    /// Close the umux window
+    Close {
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Minimize the umux window
+    Minimize {
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Toggle maximize/restore on the umux window
+    #[command(name = "toggle-maximize")]
+    ToggleMaximize {
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The `workspaces` verb family (#123). Every variant carries `--json` (the
@@ -569,6 +675,37 @@ enum TabAction {
         #[arg(long)]
         json: bool,
     },
+    /// The tab's listening ports — the tooltip's data (#128). LIVE-ONLY:
+    /// ports come from the live shells, offline or daemon-only exits 3.
+    Ports {
+        /// The tab id (from a create echo or the list document)
+        tab: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// The tab's git branch labels — the sidebar's data (#128), one entry
+    /// per panel with the focused flag. LIVE-ONLY.
+    Branches {
+        /// The tab id (from a create echo or the list document)
+        tab: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fullscreen chrome-hide on one tab — the tab menu's mode (#128):
+    /// sidebar and tab bars hide, the active panel's surface fills the
+    /// window. LIVE-ONLY (transient view state).
+    Fullscreen {
+        /// "on" to enter the mode, "off" to leave it
+        #[arg(value_name = "ON|OFF")]
+        mode: String,
+        /// The tab id (from a create echo or the list document)
+        tab: String,
+        /// Print the machine-readable result document
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The `panes` verb family (#123): split a workspace's layout. `panes close`
@@ -808,10 +945,40 @@ impl Cli {
             (true, false) => Ok(Target::Desk),
             (false, true) => Ok(Target::Term),
             // clap already rejects --desk --term via conflicts_with; this arm
-            // keeps target() total for the neither-flag case.
-            _ => Err("add --desk or --term"),
+            // keeps target() total for the neither-flag case. The legacy
+            // `update` rename alias's flags ride INSIDE the external capture
+            // (clap never sees them as globals), so main parks them here
+            // BEFORE the probe — consulted only when neither real flag was
+            // parsed.
+            _ => match LEGACY_TARGET.load(std::sync::atomic::Ordering::SeqCst) {
+                1 => Ok(Target::Desk),
+                2 => Ok(Target::Term),
+                _ => Err("add --desk or --term"),
+            },
         }
     }
+}
+
+/// The target flag the legacy `update <old> <new>` alias carried inside the
+/// external capture (0 none / 1 desk / 2 term). One process = one command,
+/// so a static cannot leak across runs.
+static LEGACY_TARGET: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The flags the legacy alias's capture carries: (json, target-code).
+/// main scans for the target BEFORE moving `cli.command` (the probe must
+/// see it); [`canonical`] scans again for the json mode.
+fn legacy_alias_flags(args: &[String]) -> (bool, u8) {
+    let mut json = false;
+    let mut target = 0u8;
+    for a in args {
+        match a.as_str() {
+            "--json" => json = true,
+            "--desk" | "--desktop" => target = 1,
+            "--term" | "--terminal" => target = 2,
+            _ => {}
+        }
+    }
+    (json, target)
 }
 
 /// The ONE dispatch mapping (#123): every spelling — canonical
@@ -983,6 +1150,54 @@ enum Canonical {
     SettingsOpen {
         json: bool,
     },
+    // --- #128 system actions (live-only, full 1:1 with the UI) ---
+    UpdateCheck {
+        json: bool,
+    },
+    UpdateInstall {
+        json: bool,
+    },
+    OpenFolder {
+        target: String,
+        json: bool,
+    },
+    OpenPort {
+        tab: String,
+        port: u16,
+        json: bool,
+    },
+    // `open settings` = the SAME canonical command as `settings open`
+    // (one opener, two spellings).
+    WindowClose {
+        json: bool,
+    },
+    WindowMinimize {
+        json: bool,
+    },
+    WindowToggleMaximize {
+        json: bool,
+    },
+    TabsPorts {
+        tab: String,
+        json: bool,
+    },
+    TabsBranches {
+        tab: String,
+        json: bool,
+    },
+    // The tab menu's fullscreen chrome-hide (#128, plan Appendix) — a
+    // transient view state, so live-only.
+    TabsFullscreen {
+        on: bool,
+        tab: String,
+        json: bool,
+    },
+    // --- #128 factory reset: three worlds — live through the gateway
+    // (reset + relaunch), offline with an explicit --yes ---
+    ResetRun {
+        yes: bool,
+        json: bool,
+    },
     WorkspacesExport {
         output: Option<std::path::PathBuf>,
         json: bool,
@@ -1078,6 +1293,10 @@ fn needs_store(command: &Canonical) -> bool {
             | Canonical::Attach { .. }
             | Canonical::CoreSession { .. }
             | Canonical::AgentContext
+            // #128 reset: the offline half acts on the CONFIG ROOT (both
+            // store files — the same files `reset_all` wipes), not on one
+            // --desk/--term store, so no target flag is asked for.
+            | Canonical::ResetRun { .. }
     )
 }
 
@@ -1134,15 +1353,34 @@ fn is_layout(command: &Canonical) -> bool {
     )
 }
 
-/// The inherently-live commands (#127): tabs send writes into a LIVE shell
-/// and settings open uses the app's opener — no offline answer exists.
-/// Routing: app alive → live through the gateway; daemon-only or nothing
-/// alive → exit 3 with the `umux attach` hint.
+/// The inherently-live commands (#127/#128): tabs send writes into a LIVE
+/// shell, settings open uses the app's opener, and the #128 system actions
+/// (update, open, window, the tabs ports/branches reads) run the app's own
+/// updater/openers/window API/tooltip queries — no offline answer exists
+/// for any of them. Routing: app alive → live through the gateway;
+/// daemon-only or nothing alive → exit 3 with the `umux attach` hint.
 fn is_live_only(command: &Canonical) -> bool {
     matches!(
         command,
-        Canonical::TabsSend { .. } | Canonical::SettingsOpen { .. }
+        Canonical::TabsSend { .. }
+            | Canonical::SettingsOpen { .. }
+            | Canonical::UpdateCheck { .. }
+            | Canonical::UpdateInstall { .. }
+            | Canonical::OpenFolder { .. }
+            | Canonical::OpenPort { .. }
+            | Canonical::WindowClose { .. }
+            | Canonical::WindowMinimize { .. }
+            | Canonical::WindowToggleMaximize { .. }
+            | Canonical::TabsPorts { .. }
+            | Canonical::TabsBranches { .. }
+            | Canonical::TabsFullscreen { .. }
     )
+}
+
+/// The #128 factory reset: its own three-worlds route (live through the
+/// gateway; offline with --yes).
+fn is_reset(command: &Canonical) -> bool {
+    matches!(command, Canonical::ResetRun { .. })
 }
 
 /// The #127 sessions verbs (write/resize/kill/status/subscribe/create —
@@ -1802,11 +2040,25 @@ fn layout_request(command: &Canonical) -> (&'static str, Value) {
     }
 }
 
-/// The (op, params) the LIVE-ONLY commands (#127) carry to the gateway.
+/// The (op, params) the LIVE-ONLY commands (#127/#128) carry to the gateway.
 fn live_only_request(command: &Canonical) -> (&'static str, Value) {
     match command {
         Canonical::TabsSend { tab, text, .. } => ("tabs.send", json!({ "tab": tab, "text": text })),
         Canonical::SettingsOpen { .. } => ("settings.open", json!({})),
+        Canonical::UpdateCheck { .. } => ("update.check", json!({})),
+        Canonical::UpdateInstall { .. } => ("update.install", json!({})),
+        Canonical::OpenFolder { target, .. } => ("open.folder", json!({ "target": target })),
+        Canonical::OpenPort { tab, port, .. } => {
+            ("open.port", json!({ "tab": tab, "port": port }))
+        }
+        Canonical::WindowClose { .. } => ("window.close", json!({})),
+        Canonical::WindowMinimize { .. } => ("window.minimize", json!({})),
+        Canonical::WindowToggleMaximize { .. } => ("window.toggle-maximize", json!({})),
+        Canonical::TabsPorts { tab, .. } => ("tabs.ports", json!({ "tab": tab })),
+        Canonical::TabsBranches { tab, .. } => ("tabs.branches", json!({ "tab": tab })),
+        Canonical::TabsFullscreen { on, tab, .. } => {
+            ("tabs.fullscreen", json!({ "tab": tab, "on": on }))
+        }
         _ => unreachable!("live_only_request on a non-live-only command"),
     }
 }
@@ -1939,6 +2191,16 @@ fn layout_json(command: &Canonical) -> bool {
         | Canonical::SettingsSet { json, .. }
         | Canonical::TabsSend { json, .. }
         | Canonical::SettingsOpen { json, .. }
+        | Canonical::UpdateCheck { json, .. }
+        | Canonical::UpdateInstall { json, .. }
+        | Canonical::OpenFolder { json, .. }
+        | Canonical::OpenPort { json, .. }
+        | Canonical::WindowClose { json, .. }
+        | Canonical::WindowMinimize { json, .. }
+        | Canonical::WindowToggleMaximize { json, .. }
+        | Canonical::TabsPorts { json, .. }
+        | Canonical::TabsBranches { json, .. }
+        | Canonical::TabsFullscreen { json, .. }
         | Canonical::SessionsWrite { json, .. }
         | Canonical::SessionsResize { json, .. }
         | Canonical::SessionsKill { json, .. }
@@ -2140,6 +2402,76 @@ fn live_prose_line(op: &str, result: &Value) -> String {
             "Session {} created.",
             result.get("id").and_then(Value::as_str).unwrap_or("?")
         ),
+        // --- #128 system actions ------------------------------------------
+        "update.check" => {
+            let state = result.pointer("/update/state").and_then(Value::as_str).unwrap_or("");
+            match state {
+                "available" => format!(
+                    "Update available: {} (install it: umux update install).",
+                    result.pointer("/update/version").and_then(Value::as_str).unwrap_or("?")
+                ),
+                "up-to-date" => "umux is up to date.".into(),
+                "no-release" => "No update information was published yet.".into(),
+                "error" => result
+                    .pointer("/update/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("update check failed")
+                    .to_string(),
+                _ => "Checked for updates.".into(),
+            }
+        }
+        "update.install" => match result.get("installed").and_then(Value::as_bool) {
+            Some(true) => format!(
+                "Update {} installed — umux relaunches in a moment.",
+                result.get("version").and_then(Value::as_str).unwrap_or("?")
+            ),
+            _ => "umux is up to date — nothing to install.".into(),
+        },
+        "reset.run" => "umux was reset — it relaunches first-run clean in a moment.".into(),
+        "open.folder" => format!(
+            "Opened \"{}\" in the file manager.",
+            result.get("opened").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "open.port" => format!(
+            "Opened {} in the browser.",
+            result.get("opened").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "window.close" => "Closing the umux window.".into(),
+        "window.minimize" => "Window minimized.".into(),
+        "window.toggle-maximize" => "Window maximize toggled.".into(),
+        "tabs.ports" => match result.get("ports").and_then(Value::as_array) {
+            Some(ports) if ports.is_empty() => "No listening ports on the tab.".into(),
+            Some(ports) => format!(
+                "Listening ports: {}.",
+                ports
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            ),
+            _ => "No listening ports on the tab.".into(),
+        },
+        "tabs.branches" => {
+            let panels = result.get("panels").and_then(Value::as_array);
+            let names: Vec<String> = panels
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|p| p.get("branch").and_then(Value::as_str))
+                        .map(|b| b.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if names.is_empty() {
+                "No branch labels on the tab.".into()
+            } else {
+                format!("Branches: {}.", names.join(", "))
+            }
+        }
+        "tabs.fullscreen" => match result.pointer("/fullscreen/on").and_then(Value::as_bool) {
+            Some(true) => "Tab entered fullscreen — the chrome hides.".into(),
+            _ => "Fullscreen left — the chrome is back.".into(),
+        },
         other => format!("{other} done."),
     }
 }
@@ -2703,6 +3035,77 @@ fn run_live_required(command: &Canonical) {
                 ),
                 3,
             )
+        }
+    }
+}
+
+/// The #128 factory reset, three worlds: with the app alive the reset
+/// rides the gateway (the Settings arm's exact semantics — wipe everything,
+/// the app relaunches itself); with only the daemon alive the refusal is
+/// the appNotRunning object (the app performs the reset); offline the CLI
+/// is the only writer, so an explicit `--yes` removes BOTH store files
+/// (workspaces.json + settings.json — the files `reset_all` wipes) and
+/// their absence is refused with the enumerated object, exit 2.
+fn run_reset(command: &Canonical) {
+    let Canonical::ResetRun { yes, json: json_mode } = command else {
+        unreachable!("run_reset on a non-reset command")
+    };
+    match probe_world() {
+        World::App(mut client) => match client.call("reset.run", json!({})) {
+            Ok(result) => {
+                if *json_mode {
+                    print_doc(&result);
+                } else {
+                    println!("{}", live_prose_line("reset.run", &result));
+                }
+            }
+            Err(err) => {
+                let code = exit_code_for(&err);
+                fail(*json_mode, &err, code);
+            }
+        },
+        World::Daemon(_) => {
+            let err = app_not_running_error();
+            fail(*json_mode, &err, 3);
+        }
+        World::Unreachable(err) => {
+            let code = exit_code_for(&err);
+            fail(*json_mode, &err, code);
+        }
+        World::Offline { stale } => {
+            if stale {
+                umux_storestation::server::cleanup(&store_core::paths::config_dir());
+            }
+            if !yes {
+                fail(
+                    *json_mode,
+                    &ErrorObj::new(
+                        codes::BAD_PARAMS,
+                        "umux reset removes BOTH store files (workspaces.json and settings.json) — pass --yes to confirm; every workspace definition and setting is gone.",
+                        vec![
+                            "review what is saved first: umux workspaces list --json".into(),
+                            "confirm the wipe: umux reset --yes".into(),
+                        ],
+                    ),
+                    2,
+                );
+            }
+            if let Err(e) = store_core::paths::reset_store_files(&store_core::paths::config_dir()) {
+                fail(
+                    *json_mode,
+                    &ErrorObj::new(
+                        codes::IO_ERROR,
+                        format!("reset failed: {e}"),
+                        vec![],
+                    ),
+                    1,
+                );
+            }
+            if *json_mode {
+                print_doc(&json!({ "reset": true, "relaunchScheduled": false }));
+            } else {
+                println!("umux was reset — the next launch boots first-run clean.");
+            }
         }
     }
 }
@@ -3816,8 +4219,16 @@ fn main() {
 
     // Every store-touching subcommand requires a target; the bare launcher
     // (`--term` with no command, v1.7.0's TUI), help and `notify` don't.
-    // The target probe runs BEFORE the command is moved out of `cli` (one
-    // field move poisons method calls on the rest of the struct).
+    // The probe runs BEFORE the command moves out of `cli` — but AFTER the
+    // legacy `update` alias's captured flags are parked (they are invisible
+    // to clap, so the probe alone would miss them).
+    if let Some(Command::Update {
+        action: UpdateAction::Legacy(args),
+    }) = cli.command.as_ref()
+    {
+        let (_, target) = legacy_alias_flags(args);
+        LEGACY_TARGET.store(target, std::sync::atomic::Ordering::SeqCst);
+    }
     let target_probe = cli.target();
     let Some(command) = cli.command else {
         return;
@@ -3854,6 +4265,10 @@ fn main() {
     }
     if is_live_only(&canonical) {
         run_live_required(&canonical);
+        return;
+    }
+    if is_reset(&canonical) {
+        run_reset(&canonical);
         return;
     }
     if is_sessions(&canonical) {
@@ -4729,17 +5144,23 @@ const APP_BINARY_STEM: &str = "umux-app";
 /// `tauri.conf.json` → `build.devUrl`. The dev binary beside a target-dir
 /// CLI has THIS server baked in; spawned while it does not answer it shows
 /// a blank white webview (the 2026-09-21 macOS HITL report), so the dev
-/// artifact is only ever resolved while the dev server is up.
-const DEV_SERVER: &str = "127.0.0.1:5173";
+/// artifact is only ever resolved while the dev server is up. Only the
+/// PORT is pinned here — the HOST varies: Vite binds whichever loopback
+/// stack the machine gives it, and on the 2026-11-05 Windows dev machine
+/// it took the IPv6-only `[::1]` side, which the old IPv4-only probe never
+/// saw (issue #130). Both loopback stacks are probed.
+const DEV_SERVER_PORT: u16 = 5173;
 
 fn dev_server_running() -> bool {
-    use std::net::TcpStream;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream};
     use std::time::Duration;
-    DEV_SERVER
-        .parse::<std::net::SocketAddr>()
-        .ok()
-        .and_then(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(150)).ok())
-        .is_some()
+    let candidates = [
+        SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), DEV_SERVER_PORT),
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), DEV_SERVER_PORT),
+    ];
+    candidates
+        .iter()
+        .any(|addr| TcpStream::connect_timeout(addr, Duration::from_millis(150)).is_ok())
 }
 
 /// Resolve the desktop app's executable, given where THIS CLI lives (passed
@@ -5365,6 +5786,45 @@ const COMMAND_TABLE: &[CmdSpec] = &[
         ],
     },
     CmdSpec {
+        name: "tabs ports",
+        aliases: &[],
+        class: "read",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): the tab's listening ports — the SAME ascending deduplicated list the tooltip shows (LOCAL panels only)",
+            "offline or daemon-only → exit 3 with the umux attach hint; --json: {tab, ports: []}",
+        ],
+    },
+    CmdSpec {
+        name: "tabs branches",
+        aliases: &[],
+        class: "read",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): the tab's git branch labels — one entry per panel with the focused flag, the SAME mapping the sidebar renders",
+            "offline or daemon-only → exit 3 with the umux attach hint; --json: {tab, panels: [{panelId, branch, focused}]}",
+        ],
+    },
+    CmdSpec {
+        name: "tabs fullscreen",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): the tab menu's fullscreen chrome-hide — sidebar and tab bars hide, the active panel fills the window; `on` enters it, `off` leaves (Esc)",
+            "a TRANSIENT view state — nothing is persisted; offline or daemon-only → exit 3",
+        ],
+    },
+    CmdSpec {
         name: "settings get",
         aliases: &["config get"],
         class: "read",
@@ -5394,7 +5854,7 @@ const COMMAND_TABLE: &[CmdSpec] = &[
     },
     CmdSpec {
         name: "settings open",
-        aliases: &[],
+        aliases: &["open settings"],
         class: "action",
         json: JsonSupport::Yes,
         limit_default: None,
@@ -5403,6 +5863,123 @@ const COMMAND_TABLE: &[CmdSpec] = &[
         notes: &[
             "LIVE-ONLY (#127): opens settings.json in the system editor through the running app",
             "offline or daemon-only → exit 3 with the umux attach hint",
+        ],
+    },
+    CmdSpec {
+        name: "update check",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): the Settings row's own updater, through the gateway — the settled result mirrors the row (up-to-date / available / no-release / offline / not-configured)",
+            "--json: {update: {state, version?}}; offline or daemon-only → exit 3",
+        ],
+    },
+    CmdSpec {
+        name: "update install",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): downloads + applies the update the check offers, then umux RELAUNCHES — the answer describes the relaunch, the app performs it",
+            "up-to-date installs nothing: --json {installed: false}; offline or daemon-only → exit 3",
+        ],
+    },
+    CmdSpec {
+        name: "reset",
+        aliases: &[],
+        class: "mutate",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "three worlds (#128): app alive → reset + relaunch through the gateway (the Settings arm's semantics); daemon-only → exit 3 appNotRunning",
+            "offline: WITHOUT --yes an enumerated refusal (exit 2); WITH --yes both store files (workspaces.json + settings.json) are removed — everything is gone",
+        ],
+    },
+    CmdSpec {
+        name: "open folder",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): opens a folder in the system file manager — the folder line's double-click (a refused contents view falls back to revealing it)",
+            "--json: {opened: path}; offline or daemon-only → exit 3",
+        ],
+    },
+    CmdSpec {
+        name: "open port",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): opens http://localhost:PORT in the system browser — the tooltip's port click (the click's clipboard copy is a UI convenience the CLI skips)",
+            "--json: {opened: url, tab}; offline or daemon-only → exit 3",
+        ],
+    },
+    CmdSpec {
+        name: "open settings",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "the SAME opener as `settings open` (one canonical command, two spellings) — settings.json in the system editor",
+            "LIVE-ONLY: offline or daemon-only → exit 3 with the umux attach hint",
+        ],
+    },
+    CmdSpec {
+        name: "window close",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): closes the umux window — the header menu's close",
+            "--json: {closing: true}; offline or daemon-only → exit 3",
+        ],
+    },
+    CmdSpec {
+        name: "window minimize",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): minimizes the umux window — the header menu's minimize",
+            "--json: {minimized: true}; offline or daemon-only → exit 3",
+        ],
+    },
+    CmdSpec {
+        name: "window toggle-maximize",
+        aliases: &[],
+        class: "action",
+        json: JsonSupport::Yes,
+        limit_default: None,
+        limit_max: None,
+        dry_run: false,
+        notes: &[
+            "LIVE-ONLY (#128): toggles maximize/restore on the umux window — the header menu's maximize button",
+            "--json: {toggled: true}; offline or daemon-only → exit 3",
         ],
     },
     CmdSpec {
@@ -5691,6 +6268,51 @@ fn agent_context() -> serde_json::Value {
                 entry
             })
             .collect::<Vec<Value>>(),
+        // The final shape (#128, story 9): worked examples on top of the
+        // whole catalog. Every step is a REAL command line the dispatch
+        // accepts — the parity suite holds the list against the table, so
+        // an example can never document a command that does not exist.
+        "examples": [
+            {
+                "story": "inspect what is running",
+                "steps": [
+                    "umux status --json",
+                    "umux workspaces list --json",
+                    "umux sessions list --json",
+                    "umux tabs ports <tabId> --json",
+                    "umux tabs branches <tabId> --json",
+                ],
+            },
+            {
+                "story": "drive the layout",
+                "steps": [
+                    "umux workspaces create projekt --json",
+                    "umux tabs create --workspace projekt --json",
+                    "umux panes split --workspace projekt --vertical --json",
+                    "umux workspaces color projekt red --json",
+                    "umux groups create web --json",
+                ],
+            },
+            {
+                "story": "steer a terminal",
+                "steps": [
+                    "umux tabs send <tabId> \"cargo test\" --json",
+                    "umux open port <tabId> 5173 --json",
+                    "umux open folder /home/me/projekt --json",
+                    "umux open settings --json",
+                ],
+            },
+            {
+                "story": "keep umux healthy",
+                "steps": [
+                    "umux update check --json",
+                    "umux update install --json",
+                    "umux attach --dry-run",
+                    // Destructive — the notes on `reset` say what dies.
+                    "umux reset --yes --json",
+                ],
+            },
+        ],
     })
 }
 
@@ -5816,6 +6438,24 @@ fn canonical(command: Command) -> Canonical {
                 Canonical::TabsMove { tabs, workspace, json }
             }
             TabAction::Separate { tab, json } => Canonical::TabsSeparate { tab, json },
+            // #128: the tooltip/label reads — live-only.
+            TabAction::Ports { tab, json } => Canonical::TabsPorts { tab, json },
+            TabAction::Branches { tab, json } => Canonical::TabsBranches { tab, json },
+            TabAction::Fullscreen { mode, tab, json } => match mode.as_str() {
+                "on" => Canonical::TabsFullscreen { on: true, tab, json },
+                "off" => Canonical::TabsFullscreen { on: false, tab, json },
+                other => {
+                    fail(
+                        json,
+                        &ErrorObj::new(
+                            codes::BAD_PARAMS,
+                            format!("fullscreen mode is \"on\" or \"off\", got \"{other}\""),
+                            vec!["usage: umux tabs fullscreen on|off <tabId>".to_string()],
+                        ),
+                        2,
+                    )
+                }
+            },
         },
         Command::Panes { action } => match action {
             PaneAction::Split {
@@ -5851,11 +6491,6 @@ fn canonical(command: Command) -> Canonical {
             Canonical::WorkspacesDelete { name, json }
         }
         Command::Rename {
-            old_name,
-            new_name,
-            json,
-        }
-        | Command::Update {
             old_name,
             new_name,
             json,
@@ -5926,6 +6561,56 @@ fn canonical(command: Command) -> Canonical {
         },
         Command::Attach { json, dry_run } => Canonical::Attach { json, dry_run },
         Command::CoreSession { action } => Canonical::CoreSession(action),
+        // --- #128 system actions -----------------------------------------
+        Command::Update { action } => match action {
+            UpdateAction::Check { json } => Canonical::UpdateCheck { json },
+            UpdateAction::Install { json } => Canonical::UpdateInstall { json },
+            UpdateAction::Legacy(args) => {
+                // The v1.6.x rename alias: `update <old> <new>`. Trailing
+                // flags land INSIDE the external capture — the helper peels
+                // them (main already parked the target); anything but
+                // exactly two names is usage.
+                let (json, _) = legacy_alias_flags(&args);
+                let names: Vec<&str> = args
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|a| !a.starts_with("--"))
+                    .collect();
+                if names.len() == 2 {
+                    Canonical::WorkspacesRename {
+                        old_name: names[0].to_string(),
+                        new_name: names[1].to_string(),
+                        json,
+                    }
+                } else {
+                    fail(
+                        json,
+                        &ErrorObj::new(
+                            codes::BAD_PARAMS,
+                            "usage: umux update <old> <new> (the v1.6.x rename alias) — or umux update check / umux update install (the updater, #128)".to_string(),
+                            vec![
+                                "the canonical rename spelling: umux workspaces rename <old> <new>".into(),
+                            ],
+                        ),
+                        2,
+                    )
+                }
+            }
+        },
+        Command::Reset { yes, json } => Canonical::ResetRun { yes, json },
+        Command::Open { action } => match action {
+            OpenAction::Folder { target, json } => Canonical::OpenFolder { target, json },
+            OpenAction::Port { tab, port, json } => Canonical::OpenPort { tab, port, json },
+            // ONE opener, two spellings: `open settings` IS `settings open`.
+            OpenAction::Settings { json } => Canonical::SettingsOpen { json },
+        },
+        Command::Window { action } => match action {
+            WindowAction::Close { json } => Canonical::WindowClose { json },
+            WindowAction::Minimize { json } => Canonical::WindowMinimize { json },
+            WindowAction::ToggleMaximize { json } => {
+                Canonical::WindowToggleMaximize { json }
+            }
+        },
         Command::AgentContext => Canonical::AgentContext,
     }
 }

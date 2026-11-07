@@ -178,6 +178,48 @@ Unknown op / bad params → enumerated error; connection stays open.
 
 **Bounds & timeouts** — lists: default limit 100 (max 1000, `truncated:true` beyond); data frames ≤ 64 KiB; client defaults: connect 3 s, request 10 s, attach app-launch wait 15 s.
 
+## Socket protocol v1 — the v1.8.0 additive extension (issues #123–#128)
+
+Everything below is ADDITIVE to protocol v1: same framing, same handshake shape, same error objects, same exit codes. Older clients keep working; unknown codes are treated as generic by contract.
+
+### Hello gains `server` / `serverVersion` (#124)
+
+Only the **app gateway's** hello carries the two additive fields — its result is `{proto, server:"app", serverVersion, appPid}`. The daemon's hello is UNCHANGED (`{proto, daemonVersion, daemonPid}`): it carries neither field, and every client reads a missing `server` as `"daemon"` — the additive rule, so a v1.7.0 daemon needs no change and a v1.7.0 client ignores the fields.
+
+- `server`: `"app" | "daemon"` — who answers the socket ("whoever is alive", PO 2026-10-27).
+- `serverVersion`: the serving side's version — `umux status --json` reports both fields additively (`server`/`serverVersion`); the version gate compares against WHOEVER answers.
+
+### The app gateway (#124)
+
+The desktop app serves the SAME socket when the daemon is absent (Storestation OFF or the daemon crashed): probe → bind if free → serve; bind failure → client-only. Storestation ON: the app releases the bind BEFORE the daemon starts (Windows `first_pipe_instance` forbids double-bind), re-binds after a confirmed daemon shutdown, takes over on a detected daemon crash, and **never hands back automatically** — the daemon returns only through the explicit ON flow. The gateway reuses the storestation crate's protocol/transport/socketpath/client code; stale-socket cleanup follows the daemon's rules; `umux-storestation stop` against an app-served socket answers honestly (stopped:false, the reason names the app) and never kills the app. Dev builds serve too (the socket is not single-instance).
+
+### The daemon as router — executor registration + forward frames (#126)
+
+When the daemon serves, it executes its own domain (sessions, Core, lifecycle) and **forwards app-domain ops** to the registered desktop client:
+
+- Registration: a desktop client says `{"v":1,"op":"hello","params":{"client":"desktop","executor":true}}` — the hello's `executor:true` capability registers the connection as the gateway executor (one slot; a fresh registration replaces a stale one). No registration op — the capability rides the handshake.
+- Forward frames: an app-domain request is re-sent as a PLAIN control request over the EXECUTOR's connection, with a daemon-minted id (`{"id":<forwardId>,"op":…,"params":…}`) — the executor answers it like any op — and the daemon maps `<forwardId>` → the CLI request's id server-side, relaying the executor's answer VERBATIM. A wedged executor is watched: past the 10 s budget the CLI gets the enumerated `ioError` ("did not answer within 10 s").
+- No registered executor → the enumerated `appNotRunning` error (exit 3 at the CLI; `next` names `umux attach`). An executor dying mid-command fails every forward it owes with `appNotRunning` — no CLI hang.
+- App-domain prefixes: `workspaces.` `groups.` `tabs.` `panes.` `settings.` (layout + settings, #125/#127) and, since #128, `update.` `reset.` `open.` `window.` (the system actions). Everything else stays daemon-domain.
+
+### The v1.8.0 op catalog
+
+**Gateway-served itself (#124):** `storestation.status` (app variant: its own health + `server`/`serverVersion`, `sessions: 0`) and `workspaces.list` (`{live, saved}` — live state FROM the frontend, saved from the read-only store load).
+
+**Layout mutations (#125)** — executed by the frontend's pure op machine (`src/gatewayOps.ts`), the SAME ops the UI actions call: `workspaces.create|delete|rename|close|open|pin|unpin|color|move|reorder`, `groups.create|rename|delete|unpack|pin|unpin|color|move|collapse|expand`, `tabs.create|open|close|rename|pin|unpin|color|reorder|move|separate`, `panes.split|close|resize|zoom|focus`. Results echo entity ids (`{created:{id,…}}`, `{closed:[…]}`) so automation chains commands. Params mirror the CLI flags (camelCase); unknown targets answer `<kind>NotFound`.
+
+**Live I/O (#127):** `tabs.send` `{tab, text}` (the keystrokes path; a bare line gets its Enter), `settings.get|set|open` (the UI toggle's exact path — outcomes cannot diverge), and the sessions surface: `sessions.list` (the app's live panels when the app serves; the daemon's registry when the daemon serves) and `sessions.write|resize|kill|status|subscribe|unsubscribe|create` — daemon wire ops (`session.write` carries BASE64) when the daemon serves, live-panel mapping through the gateway when the app serves; `sessions.create` at the app answers with guidance (the app spawns terminals through the UI, never headless); subscribe/unsubscribe at the app answer with guidance (streaming is the daemon's registry).
+
+**System actions (#128, full 1:1 with the UI, PO 2026-11-02):** `update.check` / `update.install` (the Settings row's own updater; install answers `{installed:true, version, relaunchScheduled:true}` and the app relaunches after the grace window — the answer describes the relaunch, the app performs it), `reset.run` (the Settings arm's semantics: wipe every state file, relaunch), `open.folder` `{target}` (the folder line's double-click: contents view, reveal fallback), `open.port` `{tab, port}` (the tooltip's port click → `http://localhost:PORT`; the click's clipboard copy is a UI convenience the op skips), `open.settings` (≡ `settings.open`), `window.minimize|toggle-maximize|close` (the header menu; close answers first, closes after the grace), and the inspect reads `tabs.ports` `{tab}` (the tooltip's ascending deduplicated list, LOCAL panels only) and `tabs.branches` `{tab}` (the sidebar's per-panel labels with the focused flag).
+
+### `appNotRunning` (#125)
+
+The daemon-only refusal for every app-domain op: `{code:"appNotRunning", message:"umux Storestation is running, but the umux app is not — live layout state lives in the app.", next:["bring the app back: umux attach"], retryable:false}` — exit 3. Commands that inherently need a live target (`tabs send`, the openers, the window actions) refuse the same way offline (code `storestationNotRunning`), exit 3.
+
+### CLI routing (three worlds, PO 2026-10-27 + 2026-11-02)
+
+App alive → live through the socket; daemon-only → app-domain commands refuse (`appNotRunning`, exit 3) while daemon-domain commands keep working; nothing alive → the offline half — the v1.6.x store behavior byte-identically, with the `--desk`/`--term` requirement KEPT, and the single-writer probe refusing any offline store write while the app or daemon answers. The offline-only exception of #128: `umux reset --yes` (nothing is alive, so the CLI IS the single writer — it removes both store files exactly like the app's `reset_all`).
+
 ## Findings (self-audit, sorted by severity)
 
 ### Friction — P2/P6: existing v1.6.x commands (`list`, `export`, `new`, `rm`, …)
