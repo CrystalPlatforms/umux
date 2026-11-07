@@ -13,7 +13,7 @@
     "postinstall": "patch-package"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-clipboard-manager": "2.3.3",
     "@tauri-apps/plugin-opener": "^2.5.5",
     "@tauri-apps/plugin-process": "^2.3.1",
