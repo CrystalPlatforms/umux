@@ -2196,6 +2196,10 @@ pub fn run() {
         // Issue #72: clicking a listening port opens http://localhost:{port}
         // in the system browser (open-url); copy stays on the frontend.
         .plugin(tauri_plugin_opener::init())
+        // #HITL-2026-11-07: the system clipboard read/write for the terminal —
+        // the webview clipboard API is isolated on Wayland (WebKitGTK), so
+        // Ctrl+Shift+C/V fall back to the OS-level clipboard through it.
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Window geometry persistence (quickupdate 2026-09-18): size, position,
         // maximized and fullscreen are saved when the app exits and restored at
         // window creation — while the splash is still up and the main window is

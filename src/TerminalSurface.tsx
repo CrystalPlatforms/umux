@@ -164,7 +164,15 @@ export function TerminalSurface({
       const action = clipboardAction(event)
       if (action === 'copy') {
         const selection = term.getSelection()
-        if (selection) void navigator.clipboard.writeText(selection)
+        if (selection) {
+          // The OS-level clipboard FIRST (HITL 2026-11-07, the Wayland
+          // report: WebKitGTK's webview clipboard is ISOLATED from the
+          // system one — text copied here was invisible to other apps).
+          // The webview API stays as the fallback, so Windows/macOS
+          // behavior is unchanged when the plugin is unreachable.
+          invoke<string>('plugin:clipboard-manager|write_text', { contents: selection })
+            .catch(() => void navigator.clipboard?.writeText(selection))
+        }
         return false
       }
       if (action === 'paste') {
@@ -179,14 +187,24 @@ export function TerminalSurface({
         // leaves plain Ctrl+V as the paste path — the key is swallowed
         // either way.
         event.preventDefault()
+        const pluginPaste = () =>
+          invoke<string>('plugin:clipboard-manager|read_text', {})
+            .then((text) => {
+              if (text) term.paste(text)
+            })
+            .catch((err: unknown) =>
+              console.error('paste failed (Ctrl+V still works):', err),
+            )
         navigator.clipboard
           ?.readText()
           .then((text) => {
+            // Empty does NOT mean "empty clipboard" on Wayland — WebKitGTK
+            // answers with "" for any SYSTEM clipboard content it cannot
+            // see, so an empty answer falls through to the OS-level read.
             if (text) term.paste(text)
+            else void pluginPaste()
           })
-          .catch((err: unknown) =>
-            console.error('paste failed (Ctrl+V still works):', err),
-          )
+          .catch(() => void pluginPaste())
         return false
       }
       return true
