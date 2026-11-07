@@ -74,11 +74,32 @@ pub mod codes {
     // treat unknown codes as generic, per the additive catalog rule.
     pub const WORKSPACE_NOT_FOUND: &str = "workspaceNotFound";
     pub const SETTING_NOT_FOUND: &str = "settingNotFound";
+    // v1.8.0 three-worlds routing (#125): a layout command that reached the
+    // DAEMON (Storestation ON, app closed) — the app owns live layout state,
+    // so the daemon refuses and `next` names `umux attach`. Additive catalog:
+    // older clients treat the unknown code as a generic error.
+    pub const APP_NOT_RUNNING: &str = "appNotRunning";
+    // #125 groups.delete on a non-empty group without the subtree
+    // confirmation — the message names `--subtree` (the CLI spelling of the
+    // UI's confirm dialog).
+    pub const GROUP_NOT_EMPTY: &str = "groupNotEmpty";
+    // #125 addressing codes for the id-addressed entities (tabs and panes
+    // carry no names; workspaces/groups keep workspaceNotFound /
+    // groupNotFound-style refusals through their existing catalog entries).
+    pub const TAB_NOT_FOUND: &str = "tabNotFound";
+    pub const PANE_NOT_FOUND: &str = "paneNotFound";
+    pub const GROUP_NOT_FOUND: &str = "groupNotFound";
+    // #125 single-writer guarantee (story 7): an offline WRITE path (import)
+    // that probed a LIVE socket — the store is owned by whoever serves, so
+    // the file write is refused instead of racing it.
+    pub const STORE_WRITE_REFUSED: &str = "storeWriteRefused";
 }
 
 /// The one error shape shared by the CLI `--json` output and the wire
-/// protocol: `{code, message, next, retryable}`.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+/// protocol: `{code, message, next, retryable}`. Deserialize exists so the
+/// app's gateway bridge (#125) can decode the frontend's error answers
+/// verbatim — the wire always carried the same shape.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct ErrorObj {
     pub code: String,
     pub message: String,

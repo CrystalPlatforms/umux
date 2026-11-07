@@ -12,12 +12,13 @@
 //! path — and the catalog grows the real session ops. Clean stop kills
 //! every owned shell before the socket/pid cleanup runs (story 110).
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -57,6 +58,162 @@ pub struct ServeState {
     /// and-forget thread can own a copy; tests inject a recorder instead
     /// of popping real toasts.
     notifier: Arc<dyn Fn(&str, &str) + Send + Sync>,
+    /// The registered gateway executor (#126): the desktop app's persistent
+    /// connection that executes app-domain ops (workspaces/groups/tabs/
+    /// panes/settings) on the daemon's behalf. `None` = the app is not
+    /// connected — app-domain ops answer `appNotRunning`.
+    executor: Mutex<Option<ExecutorSlot>>,
+    /// Forward-id mint for app-domain requests wrapped to the executor.
+    forward_ids: AtomicU64,
+    /// Executor-connection sequence — a replaced slot (a fresh app
+    /// connection) must never unregister or complete a PREDECESSOR's
+    /// forwards, so every slot carries the sequence it was minted under.
+    executor_seq: AtomicU64,
+}
+
+/// One registered executor connection (#126).
+pub struct ExecutorSlot {
+    /// The executor connection's outbound queue — forwarded requests ride
+    /// the same serialized writer every response uses.
+    outbound: Sender<Outbound>,
+    /// forward-id → the waiting CLI request (its id and its connection's
+    /// outbound queue). The executor's answer is re-addressed here.
+    pending: Arc<Mutex<HashMap<u64, PendingForward>>>,
+    /// The [`ServeState::executor_seq`] value this slot was minted under.
+    seq: u64,
+}
+
+struct PendingForward {
+    cli_id: u64,
+    cli_outbound: Sender<Outbound>,
+}
+
+/// How long the daemon waits for the registered executor's answer before
+/// failing the forwarded request (the protocol's request budget).
+const FORWARD_BUDGET: Duration = Duration::from_secs(10);
+
+/// The app-domain op prefixes (#126): ops the FRONTEND owns (the UI is the
+/// single owner of live layout state), which the daemon forwards to the
+/// registered executor instead of executing. Everything else — sessions,
+/// Core, Storestation lifecycle — stays daemon-domain, executed here.
+fn is_app_domain(op: &str) -> bool {
+    op.starts_with("workspaces.")
+        || op.starts_with("groups.")
+        || op.starts_with("tabs.")
+        || op.starts_with("panes.")
+        || op.starts_with("settings.")
+}
+
+impl ServeState {
+    /// Wrap an app-domain request into a forward frame to the registered
+    /// executor (#126). `true` = forwarded (the answer will be relayed when
+    /// the executor responds; nothing is sent to the CLI now). `false` =
+    /// nothing to forward — the caller answers (no executor registered or
+    /// the executor slot died).
+    fn forward_app_domain(&self, request: &Request, cli_outbound: &Sender<Outbound>) -> bool {
+        let mut guard = self.executor.lock().expect("executor lock");
+        let Some(slot) = guard.as_ref() else {
+            // No executor — the daemon-only refusal (#125/#126), answered
+            // here so the op never reaches the daemon's own dispatch.
+            let err = app_not_connected_error();
+            let _ = cli_outbound.send(Outbound::Control(response_err(request.id, &err)));
+            return true;
+        };
+        let fid = self.forward_ids.fetch_add(1, Ordering::SeqCst) + 1;
+        slot.pending.lock().expect("forward pending lock").insert(
+            fid,
+            PendingForward {
+                cli_id: request.id,
+                cli_outbound: cli_outbound.clone(),
+            },
+        );
+        let frame = json!({
+            "id": fid,
+            "op": request.op,
+            "params": request.params,
+        });
+        let sent = slot.outbound.send(Outbound::Control(frame)).is_ok();
+        let pending = Arc::clone(&slot.pending);
+        if !sent {
+            // The executor's writer is gone — the reader will notice too;
+            // unregister here so the NEXT request answers honestly.
+            *guard = None;
+            let err = app_not_connected_error();
+            let _ = cli_outbound.send(Outbound::Control(response_err(request.id, &err)));
+            return true;
+        }
+        drop(guard);
+        // The watchdog: a wedged frontend must not leave the CLI's request
+        // hanging past the protocol budget. Removing the pending entry is
+        // the claim — a late executor answer finds nothing and is dropped.
+        std::thread::Builder::new()
+            .name("umux-forward-watchdog".into())
+            .spawn(move || {
+                std::thread::sleep(FORWARD_BUDGET);
+                let mut pending = pending.lock().expect("forward pending lock");
+                if let Some(p) = pending.remove(&fid) {
+                    let err = ErrorObj::new(
+                        codes::IO_ERROR,
+                        "the umux app did not answer the forwarded command within 10 s",
+                        vec!["check the umux app window is responsive, then retry".into()],
+                    );
+                    let _ = p
+                        .cli_outbound
+                        .send(Outbound::Control(response_err(p.cli_id, &err)));
+                }
+            })
+            .ok();
+        true
+    }
+
+    /// Relay an executor's answer to the waiting CLI connection (#126): the
+    /// forward-id is re-addressed to the CLI's request id and the envelope
+    /// rides the CLI connection's own outbound queue (one serialized writer
+    /// per connection, as everywhere).
+    fn complete_forward(&self, envelope: &Value) {
+        let Some(fid) = envelope.get("id").and_then(Value::as_u64) else {
+            return;
+        };
+        let pending = {
+            let guard = self.executor.lock().expect("executor lock");
+            guard.as_ref().map(|s| Arc::clone(&s.pending))
+        };
+        if let Some(pending) = pending {
+            if let Some(p) = pending.lock().expect("forward pending lock").remove(&fid) {
+                let mut relayed = envelope.clone();
+                relayed["id"] = json!(p.cli_id);
+                let _ = p.cli_outbound.send(Outbound::Control(relayed));
+            }
+        }
+    }
+
+    /// Unregister THIS executor connection and fail every forward it owes —
+    /// the honest end when the app dies mid-command (the CLI learns
+    /// `appNotRunning`, the same code an absent executor answers with).
+    /// Only the slot minted under `seq` goes; a REPLACEMENT executor (a
+    /// fresh app connection) stays untouched.
+    fn unregister_executor(&self, seq: u64) {
+        let slot = self.executor.lock().expect("executor lock").take_if(|s| s.seq == seq);
+        if let Some(slot) = slot {
+            let err = app_not_connected_error();
+            let mut pending = slot.pending.lock().expect("forward pending lock");
+            for (_, p) in pending.drain() {
+                let _ = p
+                    .cli_outbound
+                    .send(Outbound::Control(response_err(p.cli_id, &err)));
+            }
+        }
+    }
+}
+
+/// The refusal for an app-domain op with no registered executor (#126) —
+/// the daemon-only world's honest answer, `next` naming the way back.
+fn app_not_connected_error() -> ErrorObj {
+    ErrorObj::new(
+        codes::APP_NOT_RUNNING,
+        "no umux app is connected to execute app-domain commands.",
+        vec!["bring the app back: umux attach".into()],
+    )
 }
 
 #[derive(Debug)]
@@ -119,6 +276,9 @@ pub fn prepare_with_notifier(
             )))),
             core: Mutex::new(core::CoreState::restore(config_dir)),
             notifier,
+            executor: Mutex::new(None),
+            forward_ids: AtomicU64::new(1),
+            executor_seq: AtomicU64::new(0),
         }),
     })
 }
@@ -308,6 +468,10 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
     });
 
     let mut handshaked = false;
+    // Set at hello when the client declares itself the gateway executor
+    // (#126): its control frames are then ANSWERS to forwarded requests,
+    // and its death unregisters the executor slot and fails the forwards.
+    let mut executor_seq: Option<u64> = None;
     loop {
         let frame = match read_frame(&mut reader) {
             Ok(frame) => frame,
@@ -316,7 +480,7 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
             Err(FrameError::Timeout) => continue,
             // Clean close or a garbage peer — both just end this connection.
             Err(FrameError::Closed) | Err(FrameError::Malformed(_)) | Err(FrameError::TooLarge) => {
-                return;
+                break;
             }
         };
         let value = match frame {
@@ -334,6 +498,15 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
                 continue;
             }
         };
+
+        // The executor's answers (#126): a control frame carrying "ok" on an
+        // executor connection is a RESPONSE to a forwarded request, not a
+        // new request — relay it before the request parsing ever sees it.
+        if executor_seq.is_some() && value.get("ok").is_some() {
+            state.complete_forward(&value);
+            continue;
+        }
+
         let request = match parse_request(&value) {
             Ok(request) => request,
             Err(err) => {
@@ -359,6 +532,20 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
                 return;
             }
             handshaked = true;
+            // The executor capability at hello (#126): the desktop app's
+            // persistent connection declares itself with
+            // `{"params":{"executor":true}}` and becomes THE executor — the
+            // daemon routes every app-domain op to it. A fresh executor
+            // REPLACES a stale slot (a restarted app's new connection).
+            if request.params.get("executor").and_then(Value::as_bool) == Some(true) {
+                let seq = state.executor_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                *state.executor.lock().expect("executor lock") = Some(ExecutorSlot {
+                    outbound: outbound.clone(),
+                    pending: Arc::new(Mutex::new(HashMap::new())),
+                    seq,
+                });
+                executor_seq = Some(seq);
+            }
             let result = json!({
                 "proto": protocol::PROTOCOL_VERSION,
                 "daemonVersion": state.daemon_version,
@@ -366,6 +553,27 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
             });
             let _ = outbound.send(Outbound::Control(response_ok(request.id, result)));
             continue;
+        }
+
+        // An executor connection sends no ops of its own after hello (it
+        // only answers) — anything else is refused, the connection stays.
+        if executor_seq.is_some() {
+            let err = ErrorObj::new(
+                codes::UNKNOWN_OP,
+                "this connection is the gateway executor — it answers forwarded requests, it does not send ops",
+                vec![],
+            );
+            let _ = outbound.send(Outbound::Control(response_err(request.id, &err)));
+            continue;
+        }
+
+        // App-domain ops (#126) forward to the registered executor; the
+        // answer comes back asynchronously through complete_forward. With
+        // no executor, forward_app_domain answers appNotRunning directly.
+        if is_app_domain(&request.op) {
+            if state.forward_app_domain(&request, &outbound) {
+                continue;
+            }
         }
 
         let shutting_down = request.op == "storestation.shutdown";
@@ -380,6 +588,11 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
         if shutting_down {
             return; // ack delivered — this client is done, the loop winds down
         }
+    }
+    // A dead executor connection unregisters its slot and fails every
+    // forward it still owes (the CLI learns appNotRunning, never a hang).
+    if let Some(seq) = executor_seq {
+        state.unregister_executor(seq);
     }
 }
 

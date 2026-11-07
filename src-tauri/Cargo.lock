@@ -5218,6 +5218,7 @@ dependencies = [
 name = "umux"
 version = "1.7.7"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "serde_json",
  "store_core",

@@ -139,7 +139,9 @@ fn handshake_status_and_unknown_op_leaves_the_connection_open() {
 
     let response = exchange(&mut stream, json!({ "id": 3, "op": "workspaces.list" }));
     assert_eq!(response["ok"], false);
-    assert_eq!(response["error"]["code"], "unknownOp");
+    // #126: workspaces.* is APP-domain — the daemon (no executor registered
+    // here) answers the three-worlds refusal, not the old unknownOp.
+    assert_eq!(response["error"]["code"], "appNotRunning");
 
     // Still open: a well-formed op answers normally on the SAME connection.
     let response = exchange(&mut stream, json!({ "id": 4, "op": "storestation.status" }));

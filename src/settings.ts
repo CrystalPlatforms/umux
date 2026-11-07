@@ -95,3 +95,167 @@ export function coerceSettings(raw: unknown): Settings {
     },
   }
 }
+
+// --- CLI-facing settings surface (#127, v1.8.0 phase 5a) ---------------------
+//
+// One mapping between the CLI's kebab-case keys and the Settings fields, so
+// `umux settings set` and the UI toggle CANNOT diverge: both go through
+// applySettingByKey (the gateway op turns its patch into the SAME
+// applySettings call a click uses). The daemon-domain switches (Storestation
+// enable/autostart, Core, Core Session) are NOT here on purpose — they are
+// daemon-owned state served by the existing `storestation`/`core`/
+// `core-session` commands, and a settings key would suggest the app owned
+// them.
+
+/// The app-domain keys the CLI surface covers, kebab-case.
+export const SETTING_KEYS: ReadonlyArray<string> = [
+  'notifications-enabled',
+  'agent-status-enabled',
+  'session-restore-enabled',
+  'ports-tooltip-enabled',
+  'default-launch-mode',
+  'show-tab-branch',
+  'show-tab-folders',
+  'default-shell',
+  'sidebar-width',
+]
+
+export type SettingError = {
+  code: string
+  message: string
+  next: string[]
+}
+
+export type SettingPatchOutcome =
+  | { ok: true; patch: Partial<Settings>; value: string }
+  | { ok: false; error: SettingError }
+
+const strictBool = (value: string): boolean | null =>
+  value === 'true' ? true : value === 'false' ? false : null
+
+/// Validate + coerce one `settings set` (the UI toggle's twin). The error
+/// codes mirror the CLI catalog: an unknown key is settingNotFound, a bad
+/// value is badParams.
+export function applySettingByKey(
+  key: string,
+  value: string,
+): SettingPatchOutcome {
+  const badValue = (message: string): SettingPatchOutcome => ({
+    ok: false,
+    error: { code: 'badParams', message, next: [] },
+  })
+  switch (key) {
+    case 'notifications-enabled':
+    case 'agent-status-enabled':
+    case 'session-restore-enabled':
+    case 'ports-tooltip-enabled': {
+      const flag = strictBool(value)
+      if (flag == null) {
+        return badValue(`invalid value "${value}" for a boolean setting — use true or false`)
+      }
+      const camel = {
+        'notifications-enabled': 'notificationsEnabled',
+        'agent-status-enabled': 'agentStatusEnabled',
+        'session-restore-enabled': 'sessionRestoreEnabled',
+        'ports-tooltip-enabled': 'portsTooltipEnabled',
+      }[key] as keyof Settings
+      return { ok: true, patch: { [camel]: flag } as Partial<Settings>, value }
+    }
+    case 'default-launch-mode': {
+      if (value !== 'gui' && value !== 'tui') {
+        return badValue(`invalid launch mode "${value}" — use gui or tui`)
+      }
+      return { ok: true, patch: { defaultLaunchMode: value }, value }
+    }
+    case 'show-tab-branch':
+    case 'show-tab-folders': {
+      const flag = strictBool(value)
+      if (flag == null) {
+        return badValue(`invalid value "${value}" for a boolean setting — use true or false`)
+      }
+      return key === 'show-tab-branch'
+        ? { ok: true, patch: { showTabBranch: flag }, value }
+        : { ok: true, patch: { showTabFolders: flag }, value }
+    }
+    case 'default-shell': {
+      // "auto" (case-insensitive) clears back to the fallback chain; any
+      // non-blank string is a shell path / custom command, verbatim.
+      const trimmed = value.trim()
+      if (trimmed.toLowerCase() === 'auto') {
+        return { ok: true, patch: { defaultShell: null }, value: 'auto' }
+      }
+      if (trimmed === '') {
+        return {
+          ok: false,
+          error: {
+            code: 'badParams',
+            message: 'default-shell needs a shell path/command, or "auto"',
+            next: [],
+          },
+        }
+      }
+      return { ok: true, patch: { defaultShell: trimmed }, value: trimmed }
+    }
+    case 'sidebar-width': {
+      // "auto" (case-insensitive) clears back to the CSS default, mirroring
+      // the CLI's offline writer.
+      if (value.trim().toLowerCase() === 'auto') {
+        return { ok: true, patch: { sidebarWidth: null }, value: 'auto' }
+      }
+      const n = Number(value)
+      if (!Number.isInteger(n) || n <= 0) {
+        return {
+          ok: false,
+          error: {
+            code: 'badParams',
+            message: `invalid value "${value}" for sidebar-width — a whole number of pixels`,
+            next: [],
+          },
+        }
+      }
+      return { ok: true, patch: { sidebarWidth: n }, value: String(n) }
+    }
+    default:
+      return {
+        ok: false,
+        error: {
+          code: 'settingNotFound',
+          message: `unknown setting "${key}"`,
+          next: [`settings: ${SETTING_KEYS.join(', ')}`],
+        },
+      }
+  }
+}
+
+/// Read one key for `settings get` — the stringified value the CLI prints,
+/// or null for an unknown key (the caller answers settingNotFound).
+export function readSettingByKey(settings: Settings, key: string): string | null {
+  switch (key) {
+    case 'notifications-enabled':
+      return String(settings.notificationsEnabled)
+    case 'agent-status-enabled':
+      return String(settings.agentStatusEnabled)
+    case 'session-restore-enabled':
+      return String(settings.sessionRestoreEnabled)
+    case 'ports-tooltip-enabled':
+      return String(settings.portsTooltipEnabled)
+    case 'default-launch-mode':
+      return settings.defaultLaunchMode
+    case 'show-tab-branch':
+      return String(settings.showTabBranch)
+    case 'show-tab-folders':
+      return String(settings.showTabFolders)
+    case 'default-shell':
+      return settings.defaultShell ?? 'auto'
+    case 'sidebar-width':
+      return settings.sidebarWidth == null ? 'auto' : String(settings.sidebarWidth)
+    default:
+      return null
+  }
+}
+
+/// Every app-domain key with its current value — the `settings get` (no key)
+/// document.
+export function readAllSettings(settings: Settings): Record<string, string> {
+  return Object.fromEntries(SETTING_KEYS.map((k) => [k, readSettingByKey(settings, k) ?? '']))
+}

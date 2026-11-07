@@ -159,20 +159,42 @@ fn cmd_run() -> i32 {
 fn cmd_stop(json: bool) -> i32 {
     let dir = store_core::paths::config_dir();
     match Client::connect(&dir, "cli", env!("CARGO_PKG_VERSION")) {
-        Ok(mut client) => match client.call("storestation.shutdown", serde_json::json!({})) {
-            Ok(_) => {
+        Ok(mut client) => {
+            // The pinned handover rule (#126): when the umux APP serves the
+            // socket (Storestation OFF, or the app took over after a daemon
+            // crash), `stop` never kills the app — the honest answer names
+            // who actually serves, and does nothing.
+            if client.server_kind() == "app" {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "stopped": true })).unwrap());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "stopped": false,
+                            "server": "app",
+                            "reason": "the umux app gateway serves the socket — Storestation (the daemon) is not running, and the app is never killed by stop",
+                        }))
+                        .unwrap()
+                    );
                 } else {
-                    println!("umux Storestation stopped.");
+                    println!("the umux app serves the socket — nothing to stop (the daemon is not running; the app stays open).");
                 }
-                0
+                return 0;
             }
-            Err(err) => {
-                print_error(&err);
-                5
+            match client.call("storestation.shutdown", serde_json::json!({})) {
+                Ok(_) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "stopped": true })).unwrap());
+                    } else {
+                        println!("umux Storestation stopped.");
+                    }
+                    0
+                }
+                Err(err) => {
+                    print_error(&err);
+                    5
+                }
             }
-        },
+        }
         Err(ConnectError::NotRunning { stale }) => {
             // Idempotent: offline is not a failure. Stale leftovers are
             // cleaned on the way out, same as a daemon start would.

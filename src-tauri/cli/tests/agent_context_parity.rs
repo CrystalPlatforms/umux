@@ -49,7 +49,7 @@ fn storestation_bin() -> PathBuf {
 /// The v1 error catalog — the daemon's wire codes plus the two offline CLI
 /// codes the retrofit added (#123). Clients treat future additions as
 /// generic; new codes join here WITH their feature.
-const ERROR_CATALOG: [&str; 16] = [
+const ERROR_CATALOG: [&str; 22] = [
     "storestationNotRunning",
     "storestationAlreadyRunning",
     "staleSocket",
@@ -70,22 +70,68 @@ const ERROR_CATALOG: [&str; 16] = [
     // The v1.8.0 offline retrofit (#123): the store commands' domain codes.
     "workspaceNotFound",
     "settingNotFound",
+    // The three-worlds routing + layout mutations (#125): the daemon-only
+    // refusal, the group subtree confirmation, the id-addressed entities,
+    // and the single-writer import refusal.
+    "appNotRunning",
+    "groupNotEmpty",
+    "groupNotFound",
+    "tabNotFound",
+    "paneNotFound",
+    "storeWriteRefused",
 ];
 
 /// The whole v1.8.0 canonical surface (#123) — every entry must ship AND be
 /// documented: name → its aliases.
-const SURFACE: [(&str, [&str; 3]); 15] = [
+const SURFACE: [(&str, [&str; 3]); 51] = [
     ("workspaces list", ["list", "", ""]),
     ("workspaces create", ["new", "create", ""]),
     ("workspaces delete", ["rm", "delete", ""]),
     ("workspaces rename", ["rename", "update", ""]),
+    // The #125 three-worlds mutations.
+    ("workspaces close", ["", "", ""]),
+    ("workspaces open", ["", "", ""]),
+    ("workspaces pin", ["", "", ""]),
+    ("workspaces color", ["", "", ""]),
+    ("workspaces move", ["", "", ""]),
+    ("workspaces reorder", ["", "", ""]),
     ("workspaces export", ["export", "", ""]),
     ("workspaces import", ["import", "", ""]),
+    ("groups create", ["", "", ""]),
+    ("groups rename", ["", "", ""]),
+    ("groups delete", ["", "", ""]),
+    ("groups unpack", ["", "", ""]),
+    ("groups pin", ["", "", ""]),
+    ("groups color", ["", "", ""]),
+    ("groups move", ["", "", ""]),
+    ("groups collapse", ["", "", ""]),
+    ("groups expand", ["", "", ""]),
+    ("tabs create", ["", "", ""]),
+    ("tabs open", ["", "", ""]),
+    ("tabs send", ["", "", ""]),
+    ("tabs close", ["", "", ""]),
+    ("tabs rename", ["", "", ""]),
+    ("tabs pin", ["", "", ""]),
+    ("tabs color", ["", "", ""]),
+    ("tabs reorder", ["", "", ""]),
+    ("tabs move", ["", "", ""]),
+    ("tabs separate", ["", "", ""]),
     ("panes split", ["split", "", ""]),
+    ("panes close", ["", "", ""]),
+    ("panes resize", ["", "", ""]),
+    ("panes zoom", ["", "", ""]),
+    ("panes focus", ["", "", ""]),
     ("settings get", ["config get", "", ""]),
     ("settings set", ["config set", "", ""]),
+    ("settings open", ["", "", ""]),
     ("status", ["", "", ""]),
     ("sessions list", ["", "", ""]),
+    ("sessions write", ["", "", ""]),
+    ("sessions resize", ["", "", ""]),
+    ("sessions kill", ["", "", ""]),
+    ("sessions status", ["", "", ""]),
+    ("sessions subscribe", ["", "", ""]),
+    ("sessions create", ["", "", ""]),
     ("attach", ["", "", ""]),
     ("core-session", ["", "", ""]),
     ("notify", ["", "", ""]),

@@ -16,6 +16,9 @@ umux-storestation = { path = "../storestation" }
 clap = { version = "4", features = ["derive"] }
 # The import command prints its plan as JSON (#63).
 serde_json = "1"
+# `sessions write` speaks the daemon's base64 wire shape for the write
+# payload (#127); the app-gateway mapping takes plain text instead.
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

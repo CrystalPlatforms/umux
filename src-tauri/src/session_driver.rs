@@ -396,11 +396,16 @@ impl DaemonDriver {
     }
 
     /// One handshake'd connection, errors mapped onto the typed outcome.
+    /// The connection carries the EXECUTOR capability (#126): whenever the
+    /// app is connected to the daemon, that one connection is both the
+    /// session driver and the gateway executor the daemon forwards
+    /// app-domain ops to.
     fn open_client() -> Result<umux_storestation::client::PersistentClient, DaemonConnectError> {
-        umux_storestation::client::PersistentClient::connect(
+        umux_storestation::client::PersistentClient::connect_executor(
             &store_core::paths::config_dir(),
             "desktop",
             env!("CARGO_PKG_VERSION"),
+            Some(crate::gateway_service::executor_handler()),
         )
         .map_err(map_connect_error)
     }
@@ -972,6 +977,19 @@ impl RouterDriver {
 
     pub fn daemon_enabled(&self) -> bool {
         self.daemon_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Whether the daemon driver exists AND its connection is known-dead
+    /// (#126 crash takeover): a live-then-died client is the gateway loop's
+    /// signal to take the socket over. No driver yet = the lazy connect's
+    /// own domain, never a crash.
+    pub fn daemon_connection_dead(&self) -> bool {
+        self.daemon
+            .lock()
+            .expect("router daemon lock")
+            .as_ref()
+            .map(|d| d.is_dead())
+            .unwrap_or(false)
     }
 
     /// Toggle ON, after the command made sure a daemon is running: install

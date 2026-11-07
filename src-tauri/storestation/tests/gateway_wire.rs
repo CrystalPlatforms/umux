@@ -37,6 +37,16 @@ impl GatewayBridge for FixedBridge {
     fn workspaces_list(&self) -> Result<Value, umux_storestation::protocol::ErrorObj> {
         Ok(self.0.clone())
     }
+
+    fn call(&self, op: &str, _params: &Value) -> Result<Value, umux_storestation::protocol::ErrorObj> {
+        // The fixture gateway serves reads only — a stray mutate op is the
+        // honest unknownOp, the same answer the real frontend gives.
+        Err(umux_storestation::protocol::ErrorObj::new(
+            "unknownOp",
+            format!("unknown op \"{op}\""),
+            vec![],
+        ))
+    }
 }
 
 /// A gateway serving on a tempdir config dir; stopped and cleaned on drop.

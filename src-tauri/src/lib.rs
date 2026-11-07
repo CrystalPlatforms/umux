@@ -1646,6 +1646,11 @@ async fn storestation_set_enabled(
             enable_and_verify(&driver)
         } else {
             driver.disable_daemon()?;
+            // The pinned handover rule (#126): the app re-binds only AFTER
+            // the daemon's shutdown is CONFIRMED — two consecutive connect
+            // misses (the replace_daemon rule), bounded so a wedged socket
+            // never hangs the toggle.
+            wait_for_daemon_gone();
             // #124: the daemon is gone — the gateway may take the socket
             // back (lazily; the loop probes on its own cadence).
             let gateway = gateway_service::GatewayService::global();
@@ -1656,6 +1661,27 @@ async fn storestation_set_enabled(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Wait until NOTHING answers the socket anymore (two consecutive connect
+/// misses, 300 ms apart — the replace_daemon rule), bounded at 5 s. The
+/// OFF-toggle handover's "shutdown confirmed" gate (#126).
+fn wait_for_daemon_gone() {
+    let dir = config_dir();
+    let version = env!("CARGO_PKG_VERSION");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut misses = 0;
+    while misses < 2 && std::time::Instant::now() < deadline {
+        let answering =
+            umux_storestation::client::Client::connect(&dir, "desktop", version).is_ok();
+        if !answering {
+            misses += 1;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        } else {
+            misses = 0;
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
 }
 
 /// The autostart toggle (#89, v1.7.0 phase 7): install/remove the login
@@ -2132,6 +2158,7 @@ pub fn run() {
             load_settings,
             save_settings,
             gateway_service::gateway_live_state_respond,
+            gateway_service::gateway_op_respond,
             storestation_status,
             storestation_set_enabled,
             storestation_set_autostart,

@@ -101,6 +101,8 @@ impl GatewayService {
     /// serve ends only through release_requested or listener death.
     pub fn spawn(app: AppHandle) {
         let service = Self::global();
+        // The executor role (#126) reaches the window through this handle.
+        let _ = APP_HANDLE.set(app.clone());
         let spawned = std::thread::Builder::new()
             .name("umux-gateway".into())
             .spawn(move || {
@@ -115,6 +117,23 @@ impl GatewayService {
                     if service.daemon_enabled.load(Ordering::SeqCst)
                         || service.suspended.load(Ordering::SeqCst)
                     {
+                        // Daemon crash while ON (#126): the app detects the
+                        // dead client connection and takes the socket over
+                        // (in-process session fallback is the driver's own
+                        // dead-connection rule). NO automatic hand-back —
+                        // the daemon returns only through the explicit ON
+                        // flow, so clearing the MIRROR (never the setting)
+                        // is the whole takeover.
+                        if service.daemon_enabled.load(Ordering::SeqCst)
+                            && !service.suspended.load(Ordering::SeqCst)
+                            && daemon_client_dead(&app)
+                        {
+                            log::warn!(
+                                "umux gateway: the daemon connection died while Storestation is ON — taking the socket over"
+                            );
+                            service.set_daemon_enabled(false);
+                            continue; // bind on this same tick
+                        }
                         std::thread::sleep(IDLE_TICK);
                         continue;
                     }
@@ -165,42 +184,130 @@ fn pending() -> &'static Mutex<HashMap<u64, mpsc::Sender<Value>>> {
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// The app handle, parked once at spawn so the EXECUTOR role (#126) can
+/// reach the window from anywhere (the daemon driver's lazy connect has no
+/// AppHandle in scope). None before setup finishes — the honest "the window
+/// is not up yet".
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
 struct FrontendBridge {
     app: AppHandle,
 }
 
 impl GatewayBridge for FrontendBridge {
     fn workspaces_list(&self) -> Result<Value, ErrorObj> {
-        let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::channel::<Value>();
-        pending().lock().expect("gateway pending lock").insert(id, tx);
-        let emit = self
-            .app
-            .emit("gateway_live_state_request", json!({ "id": id }));
-        if let Err(e) = emit {
+        let doc = frontend_round_trip(
+            &self.app,
+            "gateway_live_state_request",
+            json!({}),
+            "live-state read",
+        )?;
+        // The respond command assembles {live, saved}; nothing to unwrap.
+        Ok(doc)
+    }
+
+    fn call(&self, op: &str, params: &Value) -> Result<Value, ErrorObj> {
+        let payload = frontend_round_trip(
+            &self.app,
+            "gateway_op_request",
+            json!({ "op": op, "params": params }),
+            op,
+        )?;
+        unwrap_op_answer(op, payload)
+    }
+}
+
+/// The executor-side op execution (#126): the same bridge the app gateway
+/// serves, driven by the DAEMON's forwarded requests. Uses the parked app
+/// handle — an app connected to the daemon executes app-domain ops for the
+/// whole catalog this way.
+pub fn execute_frontend_op(op: &str, params: &Value) -> Result<Value, ErrorObj> {
+    match APP_HANDLE.get() {
+        Some(app) => {
+            let payload = frontend_round_trip(
+                app,
+                "gateway_op_request",
+                json!({ "op": op, "params": params }),
+                op,
+            )?;
+            unwrap_op_answer(op, payload)
+        }
+        None => Err(ErrorObj::new(
+            codes::IO_ERROR,
+            "the umux window is not up yet to execute the command",
+            vec!["try again once the umux window has finished loading".into()],
+        )),
+    }
+}
+
+/// The app-side executor callback handed to the daemon driver (#126).
+pub fn executor_handler() -> umux_storestation::client::ExecutorHandler {
+    Arc::new(|op: &str, params: &Value| execute_frontend_op(op, params))
+}
+
+/// The frontend answers `{ok:true, result}|{ok:false, error}`; the error
+/// object is forwarded verbatim to the requesting CLI client.
+fn unwrap_op_answer(op: &str, payload: Value) -> Result<Value, ErrorObj> {
+    match payload.get("ok").and_then(Value::as_bool) {
+        Some(true) => Ok(payload.get("result").cloned().unwrap_or(Value::Null)),
+        _ => {
+            let default = ErrorObj::new(
+                codes::IO_ERROR,
+                format!("the umux window answered \"{op}\" without a result"),
+                vec![],
+            );
+            Err(payload
+                .get("error")
+                .and_then(|e| serde_json::from_value(e.clone()).ok())
+                .unwrap_or(default))
+        }
+    }
+}
+
+/// One request → the UI answers → response. The shared shape of both bridge
+/// directions (#124 read, #125 mutate, #126 executor): mint a request id,
+/// park its channel in the pending map, emit ONE event, wait inside the
+/// budget, clean up on any failure. `what` names the op in the timeout
+/// error so a wedged window tells the agent WHAT did not answer.
+fn frontend_round_trip(
+    app: &AppHandle,
+    event: &str,
+    extra: Value,
+    what: &str,
+) -> Result<Value, ErrorObj> {
+    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+    let (tx, rx) = mpsc::channel::<Value>();
+    pending().lock().expect("gateway pending lock").insert(id, tx);
+    let mut payload = json!({ "id": id });
+    if let Some(obj) = extra.as_object() {
+        for (k, v) in obj {
+            payload[k] = v.clone();
+        }
+    }
+    let emit = app.emit(event, payload);
+    if let Err(e) = emit {
+        pending()
+            .lock()
+            .expect("gateway pending lock")
+            .remove(&id);
+        return Err(ErrorObj::new(
+            codes::IO_ERROR,
+            format!("could not ask the umux window for {what}: {e}"),
+            vec![],
+        ));
+    }
+    match rx.recv_timeout(FRONTEND_ANSWER_BUDGET) {
+        Ok(doc) => Ok(doc),
+        Err(_) => {
             pending()
                 .lock()
                 .expect("gateway pending lock")
                 .remove(&id);
-            return Err(ErrorObj::new(
+            Err(ErrorObj::new(
                 codes::IO_ERROR,
-                format!("could not ask the umux window for live state: {e}"),
-                vec![],
-            ));
-        }
-        match rx.recv_timeout(FRONTEND_ANSWER_BUDGET) {
-            Ok(doc) => Ok(doc),
-            Err(_) => {
-                pending()
-                    .lock()
-                    .expect("gateway pending lock")
-                    .remove(&id);
-                Err(ErrorObj::new(
-                    codes::IO_ERROR,
-                    "the umux window did not answer the live-state read within 5 s",
-                    vec!["try again once the umux window has finished loading".into()],
-                ))
-            }
+                format!("the umux window did not answer {what} within 5 s"),
+                vec!["try again once the umux window has finished loading".into()],
+            ))
         }
     }
 }
@@ -233,4 +340,29 @@ pub fn gateway_live_state_respond(id: u64, state: Value, agent_states: Value) {
     if let Some(tx) = route {
         let _ = tx.send(doc);
     }
+}
+
+/// The UI's answer to a live OP request (#125). `payload` is the whole
+/// answer document — `{ok:true, result:…}` or `{ok:false, error:{…}}` —
+/// forwarded verbatim; the bridge unwraps it (and converts a malformed
+/// answer into the honest ioError instead of guessing).
+#[tauri::command]
+pub fn gateway_op_respond(id: u64, payload: Value) {
+    let route = pending()
+        .lock()
+        .expect("gateway pending lock")
+        .remove(&id);
+    if let Some(tx) = route {
+        let _ = tx.send(payload);
+    }
+}
+
+/// Whether the app's daemon client connection is known-dead (#126 crash
+/// takeover). Only a LIVE-THEN-DIED connection counts: no driver yet is the
+/// lazy connect's own state (it owns its retries), not a crash.
+fn daemon_client_dead(app: &AppHandle) -> bool {
+    use tauri::Manager;
+    app.try_state::<crate::session_driver::RouterDriver>()
+        .map(|driver| driver.daemon_connection_dead())
+        .unwrap_or(false)
 }

@@ -10,7 +10,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    codes, hello_request, read_frame, write_control, ErrorObj, Frame, FrameError,
+    codes, hello_request, parse_request, read_frame, response_err, response_ok, write_control,
+    ErrorObj, Frame, FrameError,
 };
 use crate::transport::{self, StreamTimeouts};
 
@@ -312,7 +313,7 @@ use std::time::Duration;
 /// internally (a `session.exit` event closes that session's channel — the
 /// caller sees exactly what an in-process PTY channel closing looks like).
 pub struct PersistentClient {
-    inner: StdMutex<PersistentInner>,
+    inner: Arc<StdMutex<PersistentInner>>,
     pending: Arc<PendingMap>,
     outputs: Arc<OutputsMap>,
     dead: Arc<AtomicBool>,
@@ -336,6 +337,12 @@ struct PersistentInner {
 type PendingMap = StdMutex<HashMap<u64, std::sync::mpsc::Sender<Value>>>;
 type OutputsMap = StdMutex<HashMap<String, std::sync::mpsc::Sender<Vec<u8>>>>;
 
+/// The executor callback (#126): the app-side half of the gateway proxy.
+/// When the daemon wraps an app-domain op into a forward frame, the client
+/// runs this handler and its answer rides back as an ordinary response
+/// envelope (the daemon re-addresses it to the waiting CLI).
+pub type ExecutorHandler = Arc<dyn Fn(&str, &Value) -> Result<Value, ErrorObj> + Send + Sync>;
+
 impl PersistentClient {
     /// Connect and perform the `hello` handshake, then start the reader
     /// thread. Offline is the same typed result the one-shot client gives.
@@ -343,6 +350,21 @@ impl PersistentClient {
         config_dir: &Path,
         client_name: &str,
         client_version: &str,
+    ) -> Result<PersistentClient, ConnectError> {
+        Self::connect_executor(config_dir, client_name, client_version, None)
+    }
+
+    /// [`connect`] with the gateway-executor role (#126): the hello carries
+    /// `{"executor":true}` (capability at hello — no registration op), and
+    /// every forwarded app-domain request the daemon wraps over runs
+    /// `handler` on its own thread (the reader never blocks: CLI-facing
+    /// answers keep flowing while the frontend thinks). The handler's
+    /// answer is written back as the standard response envelope.
+    pub fn connect_executor(
+        config_dir: &Path,
+        client_name: &str,
+        client_version: &str,
+        handler: Option<ExecutorHandler>,
     ) -> Result<PersistentClient, ConnectError> {
         let stream = match transport::connect(config_dir) {
             Ok(stream) => stream,
@@ -356,7 +378,10 @@ impl PersistentClient {
         // A death before the first answer byte is the offline state (see
         // hello_io_failure) — same rule as the one-shot client.
         let (mut write, mut read) = (halves.write, halves.read);
-        let hello = hello_request(client_name, client_version);
+        let mut hello = hello_request(client_name, client_version);
+        if handler.is_some() {
+            hello["params"]["executor"] = json!(true);
+        }
         write_control(&mut write, &hello)
             .map_err(|e| hello_io_failure(config_dir, e))?;
         let response = loop {
@@ -401,21 +426,32 @@ impl PersistentClient {
         let dead = Arc::new(AtomicBool::new(false));
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
+        let inner = Arc::new(StdMutex::new(PersistentInner {
+            write,
+            next_id: 1,
+        }));
+
         let reader_pending = Arc::clone(&pending);
         let reader_outputs = Arc::clone(&outputs);
         let reader_dead = Arc::clone(&dead);
+        let reader_inner = Arc::clone(&inner);
         std::thread::Builder::new()
             .name("storestation-persistent-reader".into())
             .spawn(move || {
-                reader_loop(read, reader_pending, reader_outputs, reader_dead, shutdown_rx);
+                reader_loop(
+                    read,
+                    reader_pending,
+                    reader_outputs,
+                    reader_dead,
+                    shutdown_rx,
+                    reader_inner,
+                    handler,
+                );
             })
             .map_err(|e| ConnectError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(PersistentClient {
-            inner: StdMutex::new(PersistentInner {
-                write,
-                next_id: 1,
-            }),
+            inner,
             pending,
             outputs,
             dead,
@@ -554,15 +590,20 @@ impl Drop for PersistentClient {
 }
 
 /// The reader: route control responses to waiting callers, data frames to
-/// session channels, `session.exit` to channel closure. A dead connection
-/// fails every pending caller and closes every session channel (the same
-/// visible behavior as the sessions dying).
+/// session channels, `session.exit` to channel closure — and, for an
+/// executor connection (#126), forwarded requests to the handler (each on
+/// its own thread, so the reader never blocks and CLI-facing answers keep
+/// flowing while the frontend thinks). A dead connection fails every
+/// pending caller and closes every session channel (the same visible
+/// behavior as the sessions dying).
 fn reader_loop(
     mut read: Box<dyn std::io::Read + Send>,
     pending: Arc<PendingMap>,
     outputs: Arc<OutputsMap>,
     dead: Arc<AtomicBool>,
     shutdown: std::sync::mpsc::Receiver<()>,
+    inner: Arc<StdMutex<PersistentInner>>,
+    executor: Option<ExecutorHandler>,
 ) {
     loop {
         // The shutdown channel lets Drop stop this thread promptly even
@@ -579,9 +620,29 @@ fn reader_loop(
                         continue;
                     }
                 }
-                // No id/ok → an event envelope. Only session.exit is
-                // handled internally; other events (session.title) have no
-                // app-side consumer yet and are dropped.
+                // No id/ok → an event envelope — or, on an executor
+                // connection, a FORWARDED REQUEST from the daemon (#126).
+                if let (Some(handler), Some(request)) = (&executor, parse_request(&value).ok()) {
+                    let handler = Arc::clone(handler);
+                    let inner = Arc::clone(&inner);
+                    std::thread::Builder::new()
+                        .name("storestation-executor-op".into())
+                        .spawn(move || {
+                            let result = handler(&request.op, &request.params);
+                            let envelope = match result {
+                                Ok(result) => response_ok(request.id, result),
+                                Err(err) => response_err(request.id, &err),
+                            };
+                            // One serialized write path with every caller.
+                            let mut inner = inner.lock().expect("persistent inner lock");
+                            let _ = write_control(&mut inner.write, &envelope);
+                        })
+                        .ok();
+                    continue;
+                }
+                // A plain event. Only session.exit is handled internally;
+                // other events (session.title) have no app-side consumer
+                // yet and are dropped.
                 if value.get("event").and_then(Value::as_str) == Some("session.exit") {
                     if let Some(session) = value.get("session").and_then(Value::as_str) {
                         outputs

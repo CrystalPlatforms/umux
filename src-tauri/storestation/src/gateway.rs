@@ -53,6 +53,14 @@ pub trait GatewayBridge: Send + Sync {
     /// Build the `workspaces.list` result: `{"live": …, "saved": …}`. An
     /// error object is forwarded verbatim to the requesting client.
     fn workspaces_list(&self) -> Result<Value, ErrorObj>;
+    /// The mutate/live half of the bridge (#125): every op that is not the
+    /// gateway's own health (`storestation.status`) or the composed
+    /// `workspaces.list` rides through here to the frontend — the single
+    /// owner of live state — which executes the same pure ops the UI uses
+    /// and answers `{…}` or an error object forwarded verbatim. The gateway
+    /// does not interpret params: it passes `op`/`params` untouched, so the
+    /// op catalog can grow on the frontend side without a gateway change.
+    fn call(&self, op: &str, params: &Value) -> Result<Value, ErrorObj>;
 }
 
 /// Everything [`serve`] needs, produced by [`prepare`].
@@ -266,9 +274,12 @@ fn handle_connection(stream: transport::Stream, state: Arc<GatewayState>) {
     }
 }
 
-/// The app gateway's op catalog (the v1.8.0 tracer): the two read ops.
-/// Everything else answers `unknownOp` — the daemon keeps owning every
-/// session op, and mutations join in later issues through this same seam.
+/// The app gateway's op catalog: the two ops the gateway serves ITSELF
+/// (its health, and the composed live+saved list), plus the generic bridge
+/// pass-through (#125) — every other op rides to the frontend, which owns
+/// the live state and answers `unknownOp` for anything it does not know.
+/// The pass-through keeps the catalog additive on the frontend side: a new
+/// op needs no gateway change.
 fn dispatch(state: &GatewayState, request: &Request) -> Result<Value, ErrorObj> {
     match request.op.as_str() {
         "storestation.status" => Ok(json!({
@@ -284,10 +295,6 @@ fn dispatch(state: &GatewayState, request: &Request) -> Result<Value, ErrorObj> 
             "dataDir": state.data_dir,
         })),
         "workspaces.list" => state.bridge.workspaces_list(),
-        other => Err(ErrorObj::new(
-            codes::UNKNOWN_OP,
-            format!("unknown op \"{other}\""),
-            vec!["see: umux agent-context".into()],
-        )),
+        other => state.bridge.call(other, &request.params),
     }
 }

@@ -35,6 +35,16 @@ impl GatewayBridge for FixedBridge {
     fn workspaces_list(&self) -> Result<Value, ErrorObj> {
         Ok(self.0.clone())
     }
+
+    fn call(&self, op: &str, _params: &Value) -> Result<Value, ErrorObj> {
+        // The fixture gateway serves reads only — a stray mutate op is the
+        // honest unknownOp, the same answer the real frontend gives.
+        Err(ErrorObj::new(
+            "unknownOp",
+            format!("unknown op \"{op}\""),
+            vec![],
+        ))
+    }
 }
 
 /// A bridge whose read FAILS — the fallback shape (live:null) gets pinned.
@@ -42,6 +52,10 @@ struct FailingBridge;
 
 impl GatewayBridge for FailingBridge {
     fn workspaces_list(&self) -> Result<Value, ErrorObj> {
+        Err(ErrorObj::new("ioError", "fixture: the UI did not answer", vec![]))
+    }
+
+    fn call(&self, _op: &str, _params: &Value) -> Result<Value, ErrorObj> {
         Err(ErrorObj::new("ioError", "fixture: the UI did not answer", vec![]))
     }
 }
