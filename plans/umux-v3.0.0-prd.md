@@ -1,6 +1,6 @@
 # umux v3.0.0 — PRD — umux Ecosystem
 
-**Status:** discovered 2026-09-04 (dedicated /ask session, 30 questions in 4 series + /blueprint component sketch). **Renamed from `umux-v2.0.0-prd.md` and rescheduled to v3.0.0 on 2026-09-12** (PO decision): umux Core left the ecosystem (ships as **v1.7.0** from `main`, branch `core`) and **umux NativeApp for Android & iOS** joined it. Implementation on this long-lived `development` branch, unversioned until done; the finished ecosystem ships as **v3.0.0** — no deadline.
+**Status:** discovered 2026-09-04 (dedicated /ask session, 30 questions in 4 series + /blueprint component sketch). **Renamed from `umux-v2.0.0-prd.md` and rescheduled to v3.0.0 on 2026-09-12** (PO decision): umux Core left the ecosystem (ships as **v1.7.0** from `main`, branch `core`) and **umux NativeApp for Android & iOS** joined it. **Narrowed 2026-11-09 (PO decision):** the NativeApp ships for **Android only** — iOS is covered by the umux Application (PWA), so no App Store path and no $99/year Apple Developer Program. Implementation on this long-lived `development` branch, unversioned until done; the finished ecosystem ships as **v3.0.0** — no deadline.
 **Source of truth:** master PRD [`umux-prd.md`](./umux-prd.md) — on any conflict the master wins. Story numbering continues the master's (#105+); stories #130–#140 (SSH View, multi-window, accent colors) belong to the main-roadmap releases and are documented there.
 
 ## Problem Statement
@@ -16,7 +16,7 @@ Closing the umux window kills every session: agents stop mid-task, long jobs die
 3. **umux Core** — an optional background daemon (off by default) that owns the terminal sessions. With Core on, closing every window leaves agents and long jobs alive; `umux attach` brings any view back; the CLI and TUI drive the same live sessions while no window is open. *(Since 2026-09-12 Core ships earlier, as v1.7.0 from `main` — see below.)*
 4. **umux Application** — an installable PWA: sign in (Google or GitHub), see your paired machines and their workspaces, tabs, and agent statuses, watch an agent's output read-only ("like on the computer"), send a message to a running agent, and get a push notification when an agent finishes or waits for approval.
 5. **umux Bridge** — the remote-access link between the PWA and a paired machine: one-time-code pairing, device list with revoke, one-year pairing expiry, relayed through Cloudflare with TLS so the machine opens no inbound ports.
-6. **umux NativeApp (Android & iOS)** — the ecosystem as native phone apps, with the same capabilities as the PWA; Android ships as a **sideloaded `.apk` from GitHub Releases**, iOS at the same moment (channel in discovery). Both prototyped by the PO on 2026-09-12.
+6. **umux NativeApp (Android)** — the ecosystem as a native phone app, with the same capabilities as the PWA; ships as a **sideloaded `.apk` from GitHub Releases**. Prototyped by the PO on 2026-09-12. *(2026-11-09: the iOS native app is dropped — iPhone users get the same ecosystem through the PWA; no App Store, no $99/year Apple Developer Program.)*
 
 The cloud is a dumb cable joiner: it relays encrypted traffic and holds accounts/pairings — never message content. No plugins, no marketplace, no browser pane (all moved to **Beyond 2.0**).
 
@@ -44,12 +44,12 @@ The cloud is a dumb cable joiner: it relays encrypted traffic and holds accounts
 126. As a maintainer, I want the relay to store no message content (pass-through only; accounts and pairings are the only persisted data), so that the privacy-friendly story stays true.
 127. As a maintainer, I want accounts limited to 3 paired machines, so that free-tier limits are protected from abuse.
 
-### umux NativeApp (Android + iOS) — v3.0.0 — added 2026-09-12
+### umux NativeApp (Android) — v3.0.0 — added 2026-09-12; iOS dropped 2026-11-09
 
-> **Prototypes exist (2026-09-12, built by the PO):** Android — native **Kotlin/Compose** project generated in Google AI Studio (Splash, Workspaces + details, Notifications, Settings; Google/GitHub/Apple sign-in assets); iOS — **SwiftUI** project built in Xcode (the same views; official Apple components with Liquid Glass, iOS 26+; umux-green accent). Both carry mock data only and mirror the PWA scope. **Both ship at the same moment.** The prototypes live in the [`NativeApps/`](../NativeApps/) folder of this branch.
+> **Prototypes exist (2026-09-12, built by the PO):** Android — native **Kotlin/Compose** project generated in Google AI Studio (Splash, Workspaces + details, Notifications, Settings; Google/GitHub/Apple sign-in assets); iOS — **SwiftUI** project built in Xcode (the same views; official Apple components with Liquid Glass, iOS 26+; umux-green accent). Both carry mock data only and mirror the PWA scope. **Only the Android app ships** — the iOS native app was dropped on 2026-11-09 (PO decision): iPhones are served by the PWA instead, and the SwiftUI prototype stays in the [`NativeApps/`](../NativeApps/) folder of this branch as a reference only.
 
 141. As a user, I want the umux NativeApp for Android — the same capabilities as the PWA (Google/GitHub sign-in, paired machines and their statuses, read-only agent output, message-to-agent, push) as a native Kotlin app — installed as a **sideloaded `.apk` from GitHub Releases**, so the ecosystem lives on my phone without any store.
-142. As a user, I want the umux NativeApp for iOS with the same functionality, **shipped at the same moment as Android**; distribution is **in discovery** — App Store/TestFlight/push require the $99/year Apple Developer Program, and the only free path today is a 7-day personal sideload without push ([Apple: compare memberships](https://developer.apple.com/support/compare-memberships/)). *(PO, 2026-09-12: iOS is "planned — in discovery", not rejected.)*
+142. As a user on an iPhone, I want the full ecosystem through the **umux Application (PWA)** — the same capabilities (#114–#121), installed to the home screen from the browser — so that iOS is covered without a native app, the App Store, or the $99/year Apple Developer Program. *(Rewritten 2026-11-09, PO decision: the native iOS NativeApp — originally "planned — in discovery", 2026-09-12 — is dropped; the PWA is the iOS path.)*
 
 ## Implementation Decisions
 
@@ -76,7 +76,7 @@ The cloud is a dumb cable joiner: it relays encrypted traffic and holds accounts
 **Frontend (main repo):**
 
 6. **Settings → Core section** — Import-wizard-style section: daemon on/off (default off), autostart on/off, live status, paired-devices list with revoke.
-7. **umux NativeApp (Android + iOS)** — Native Bridge clients: Android in **Kotlin/Compose** (prototype generated in Google AI Studio, 2026-09-12), iOS in **SwiftUI** (prototype built in Xcode, 2026-09-12; official Apple components + Liquid Glass). Same capabilities as the PWA (#114–#121); the prototypes carry mock data — the real data plane arrives with Bridge. Architecture and the shared Bridge-protocol binding at /carve. Distributed as a sideloaded APK (Android); iOS channel in discovery ($99/yr program vs 7-day sideload).
+7. **umux NativeApp (Android)** — Native Bridge client in **Kotlin/Compose** (prototype generated in Google AI Studio, 2026-09-12). Same capabilities as the PWA (#114–#121); the prototype carries mock data — the real data plane arrives with Bridge. Architecture and the shared Bridge-protocol binding at /carve. Distributed as a sideloaded APK. *(2026-11-09: the iOS native app is dropped — iOS is served by the PWA (#114–#121); the SwiftUI prototype remains in `NativeApps/` as a reference.)*
 
 ### Key data flows (new in v2.0)
 - **Remote view:** PTY output → OscParser/AgentMonitor → status + bounded tail → Core → BridgeAgent → relay (WSS) → PWA.
@@ -125,7 +125,7 @@ Adam tests on **Windows 11, macOS, and Ubuntu** using a **test instance** built 
 ### Per-user-story verification
 - **PWA (#114–#121):** installable to the phone home screen; sign-in works with both Google and GitHub; machines/workspaces/statuses match what the desktop shows, including "offline" for a sleeping machine; the read-only view shows the same content as the panel; sent messages appear in the agent session; a push arrives on finish and on waiting; the protocol contains no terminal-input or command message type (enforced by tests over BridgeAgent's codec).
 - **Bridge (#122–#127):** an unpaired device cannot connect; a revoked device is cut off within seconds; expiry enforced (TTL shortened in a test environment); relay code review confirms no content persistence; a fourth machine is refused with a clear message.
-- **NativeApp (#141–#142):** the Android `.apk` installs by sideload and mirrors the PWA end to end (sign-in, machines, read-only output, message, push); iOS is verified on its shipping channel once distribution discovery lands; both apps ship at the same moment.
+- **NativeApp (#141) + iOS-via-PWA (#142):** the Android `.apk` installs by sideload and mirrors the PWA end to end (sign-in, machines, read-only output, message, push); iOS is verified through the PWA itself — home-screen install from the browser, the same flows (#114–#121). No native iOS app ships (2026-11-09).
 *(umux Core verification moved with the story set — see the v1.7.0 docs on `main`.)*
 
 ### Component "done" criteria
@@ -135,7 +135,7 @@ Adam tests on **Windows 11, macOS, and Ubuntu** using a **test instance** built 
 - **Relay/Auth:** integration tests against a staging Worker — OAuth both providers, pairing happy path + wrong code + expired + revoked, machine limit enforced, relay forwards bytes without storing them.
 
 ### Acceptance threshold (v3.0.0)
-Adam, with test instances on all three machines: starts an agent on the Mac, closes every umux window, leaves home, opens the PWA on his phone, sees the agent still running, reads its output, sends it a message, receives a push when it finishes, and — back at the Mac — `umux attach` restores everything. On his phone the NativeApps mirror the PWA (Android by `.apk` sideload; iOS on its shipping channel). On Windows, with Core never enabled, umux behaves exactly like the v1.x app. Monthly Cloudflare usage stays within the free tier.
+Adam, with test instances on all three machines: starts an agent on the Mac, closes every umux window, leaves home, opens the PWA on his phone, sees the agent still running, reads its output, sends it a message, receives a push when it finishes, and — back at the Mac — `umux attach` restores everything. On his Android phone the NativeApp mirrors the PWA (by `.apk` sideload); the same flow also works on the iPhone through the PWA alone. On Windows, with Core never enabled, umux behaves exactly like the v1.x app. Monthly Cloudflare usage stays within the free tier.
 
 ## Out of Scope
 
@@ -145,7 +145,7 @@ Adam, with test instances on all three machines: starts an agent on the Mac, clo
 - Cross-machine synchronization of workspaces (Bridge is remote control, not sync).
 - Full remote terminal (typing shell commands from the PWA) and multiple simultaneous remote viewers driving the same machine.
 - End-to-end encryption (future version); chat-extraction agent view (future version).
-- ~~Native mobile apps (PWA only)~~ — **superseded 2026-09-12:** umux NativeApp for Android & iOS is ecosystem scope (#141–#142). Sharing machines between accounts and self-hosted or non-Cloudflare relays stay out.
+- Native iOS app (App Store/TestFlight/push require the $99/year Apple Developer Program) — **dropped 2026-11-09 (PO decision):** iOS is covered by the umux Application (PWA, #114–#121); Android keeps its native app (#141). *(2026-09-12 the NativeApp for Android & iOS superseded the original "native mobile apps — PWA only" stance; since 2026-11-09 that supersession holds for Android only.)* Sharing machines between accounts and self-hosted or non-Cloudflare relays stay out.
 - Any paid component (certificates, hosting, auth vendors).
 
 ## Further Notes
