@@ -42,3 +42,6 @@ vite.config.d.ts
 pnpm-lock.yaml
 pnpm-workspace.yaml
 src-tauri/binaries/
+
+# WRITES content drafts (ledger + posts) — lives only in the working tree, never in the repo
+/CrystalPlatforms-umux/
