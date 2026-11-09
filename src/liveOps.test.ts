@@ -47,7 +47,6 @@ function seeded(): WorkspaceState {
 }
 
 const firstTabId = (s: WorkspaceState): string => s.workspaces[0].tabs![0].id
-const secondTabId = (s: WorkspaceState): string => s.workspaces[0].tabs![1].id
 
 type Recorded = { cmd: string; args?: Record<string, unknown> }
 
@@ -101,11 +100,6 @@ function harness(state: WorkspaceState = seeded(), shells: Record<string, PtyEnt
     return (original as LiveOpDeps['invoke'])(cmd, args)
   }) as LiveOpDeps['invoke']
   return { deps, calls, answers }
-}
-
-const idsOf = (s: WorkspaceState): string[] => {
-  const first = s.workspaces[0].tabs![0]
-  return [firstTabId(s), secondTabId(s), first.id].slice(0, 2)
 }
 
 beforeEach(() => {
@@ -346,7 +340,7 @@ describe('liveOps — tabs.ports / tabs.branches (#128)', () => {
       workspaces: s.workspaces.map((ws) => ({
         ...ws,
         panels: [
-          { id: leaf, workingDirectory: '/repo', sshTarget: null },
+          { id: leaf, workingDirectory: '/repo' },
         ],
       })),
     } as WorkspaceState
@@ -368,7 +362,7 @@ describe('liveOps — tabs.ports / tabs.branches (#128)', () => {
       ...s,
       workspaces: s.workspaces.map((ws) => ({
         ...ws,
-        panels: [{ id: leaf, workingDirectory: '/repo', sshTarget: null }],
+        panels: [{ id: leaf, workingDirectory: '/repo' }],
       })),
     } as WorkspaceState
     const { deps, calls, answers } = harness(patched, {
