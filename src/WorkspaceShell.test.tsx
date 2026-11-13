@@ -670,6 +670,122 @@ describe('WorkspaceShell', () => {
     expect(document.querySelector('.drag-line')).toBeNull()
   })
 
+  // Quickupdate v1.8.1 — the line renders inside the SCROLLED list, so its
+  // CSS top must speak content coordinates: with many workspaces/groups the
+  // list scrolls and the line used to ride scrollTop px ABOVE the pointer.
+  it('draws the sidebar line under the pointer when the list is scrolled', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+            { id: 'ws-3', name: 'gamma' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByText('gamma', { selector: '.workspace-name' })).toBeInTheDocument())
+
+    const restore = stubRects({
+      'workspace-row-ws-1': { top: 0, bottom: 30 },
+      'workspace-row-ws-2': { top: 30, bottom: 60 },
+      'workspace-row-ws-3': { top: 60, bottom: 90 },
+    })
+
+    // The list is scrolled 300px down when the drag starts — exactly the
+    // reported scenario (scroll first, then drag).
+    const listEl = document.querySelector('.workspace-list') as HTMLElement
+    listEl.scrollTop = 300
+
+    fireEvent.pointerDown(screen.getByTestId('workspace-row-ws-1'), { button: 0, clientX: 10, clientY: 15 })
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 70 })
+    // Top edge of ws-3 (viewport 60) in content space: 60 - 0 (list top) + 300.
+    expect((document.querySelector('.drag-line') as HTMLElement).style.top).toBe('360px')
+
+    fireEvent.pointerUp(window, {})
+    restore.mockRestore()
+  })
+
+  it('re-targets the sidebar drop when the list scrolls mid-drag', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [
+            { id: 'ws-1', name: 'alpha' },
+            { id: 'ws-2', name: 'beta' },
+            { id: 'ws-3', name: 'gamma' },
+          ],
+        })
+      return Promise.resolve(undefined)
+    })
+
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(screen.getByText('gamma', { selector: '.workspace-name' })).toBeInTheDocument())
+
+    // The rects live in a mutable object so the test can shift the rows
+    // mid-drag (what a wheel scroll does to the measured geometry).
+    const rects: Record<string, Box> = {
+      'workspace-row-ws-1': { top: 0, bottom: 30 },
+      'workspace-row-ws-2': { top: 30, bottom: 60 },
+      'workspace-row-ws-3': { top: 60, bottom: 90 },
+    }
+    const restore = stubRects(rects)
+
+    // Pointer rests at y=70: top half of ws-3 -> the line at its top edge.
+    // (Hovering the DRAGGED row itself is rejected #51 — no line — so the
+    // resting point must sit on a legitimate target.)
+    fireEvent.pointerDown(screen.getByTestId('workspace-row-ws-1'), { button: 0, clientX: 10, clientY: 15 })
+    fireEvent.pointerMove(window, { clientX: 10, clientY: 70 })
+    expect((document.querySelector('.drag-line') as HTMLElement).style.top).toBe('60px')
+
+    // A wheel scroll slides every row 40px up UNDER THE STATIONARY POINTER.
+    // The drop must re-target against the new layout with no pointer move:
+    // y=70 is now below every row -> appended, line at the last row's bottom.
+    rects['workspace-row-ws-1'] = { top: -40, bottom: -10 }
+    rects['workspace-row-ws-2'] = { top: -10, bottom: 20 }
+    rects['workspace-row-ws-3'] = { top: 20, bottom: 50 }
+    fireEvent.scroll(document.querySelector('.workspace-list') as HTMLElement)
+    expect((document.querySelector('.drag-line') as HTMLElement).style.top).toBe('50px')
+
+    fireEvent.pointerUp(window, {})
+    restore.mockRestore()
+  })
+
+  it('draws the tab line inside a horizontally scrolled bar correctly', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({ workspaces: [{ id: 'ws-1', name: 'alpha' }] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    const panel = await screen.findByTestId('panel-ws-1')
+    fireEvent.click(within(panel).getByRole('button', { name: /new terminal tab/i }))
+    await waitFor(() => expect(within(panel).getAllByRole('tab')).toHaveLength(2))
+    const tabEls = () => within(panel).getAllByRole('tab')
+    const before = tabEls().map((el) => el.getAttribute('data-testid'))
+
+    const restore = stubRects({
+      [before[0]!]: { left: 0, right: 100 },
+      [before[1]!]: { left: 100, right: 200 },
+      'tab-bar-ws-1': { left: 0, right: 200 },
+    })
+
+    // The bar is scrolled 200px right when the drag starts.
+    const barEl = document.querySelector('[data-testid="tab-bar-ws-1"]') as HTMLElement
+    barEl.scrollLeft = 200
+
+    fireEvent.pointerDown(tabEls()[0], { button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(window, { clientX: 160, clientY: 10 })
+    // After tab B (right edge at viewport 200) in content space: 200 - 0 + 200.
+    expect((document.querySelector('.drag-line-tab') as HTMLElement).style.left).toBe('400px')
+
+    fireEvent.pointerUp(window, {})
+    restore.mockRestore()
+  })
+
   // Phase 9 / #10 — split into two panels (stories 15–17). Since #47 the
   // split actions live in the TERMINAL TAB's context menu (they left the
   // workspace menu with the two-line-rows phase), targeting that tab's

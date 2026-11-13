@@ -22,6 +22,7 @@ import { describe, it, expect } from 'vitest'
 import {
   computeSidebarDrop,
   computeTabDrop,
+  dropLineInList,
   type SidebarRegion,
   type TabRegion,
 } from './dragInsertion'
@@ -221,5 +222,29 @@ describe('computeTabDrop', () => {
 
   it('past every tab appends at the end', () => {
     expect(computeTabDrop(500, regions)).toEqual({ beforeId: null, lineLeft: 300 })
+  })
+})
+
+// Quickupdate v1.8.1 — the live line draws INSIDE a scrolled container
+// (.workspace-list is the sidebar's scroll element; .tab-bar scrolls
+// horizontally), whose CSS top/left address CONTENT coordinates. A bare
+// viewport delta rode `scrollTop` px above the pointer once the list
+// scrolled (the reported v1.8.1 bug: the line sat far too high after
+// scrolling down).
+describe('dropLineInList (viewport -> content coordinates)', () => {
+  it('is the plain delta at scroll offset 0', () => {
+    expect(dropLineInList(60, 0, 0)).toBe(60)
+    expect(dropLineInList(60, 50, 0)).toBe(10)
+  })
+
+  it('adds the scroll offset for a vertically scrolled list', () => {
+    // Line should sit at viewport 60 while the list is scrolled 400px down:
+    // in content space that point lives at 60 + 400.
+    expect(dropLineInList(60, 0, 400)).toBe(460)
+    expect(dropLineInList(460, 50, 100)).toBe(510)
+  })
+
+  it('serves the tab bar the same way (horizontal scroll)', () => {
+    expect(dropLineInList(200, 0, 200)).toBe(400)
   })
 })

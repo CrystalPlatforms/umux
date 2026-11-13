@@ -192,3 +192,20 @@ export function computeTabDrop(x: number, regions: TabRegion[]): TabDrop {
     lineLeft: last?.right ?? 0,
   }
 }
+
+/// Convert a line position from VIEWPORT coordinates to the scrolled
+/// container's CONTENT coordinates, which is what CSS `top`/`left` address
+/// for an absolutely-positioned child. Both regions (`SidebarRegion.top`,
+/// `TabRegion.left`) and the drop's `lineTop`/`lineLeft` are viewport
+/// numbers; the line element lives inside the scroll container itself
+/// (.workspace-list, .tab-bar), so the position loses the container's own
+/// origin and gains its scroll offset. Without the scroll term the line
+/// rode `scrollTop` px above the pointer once the list scrolled (v1.8.1:
+/// the reported "line far too high after scrolling down").
+export function dropLineInList(
+  pos: number,
+  containerOrigin: number,
+  scrollOffset: number,
+): number {
+  return pos - containerOrigin + scrollOffset
+}

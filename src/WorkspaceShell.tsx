@@ -91,6 +91,7 @@ import { handleLiveOp, type LiveOpDeps } from './liveOps'
 import {
   computeSidebarDrop,
   computeTabDrop,
+  dropLineInList,
   type SidebarDrop,
   type SidebarRegion,
   type TabDrop,
@@ -823,6 +824,10 @@ export function WorkspaceShell() {
         // itself — a landing inside any of them is rejected.
         forbidden: ReadonlySet<string>
         listTop: number
+        // The list's scroll offset at the last geometry refresh — the line's
+        // CSS top lives in CONTENT space (dropLineInList), so a scrolled
+        // list must shift every drawn position back down by this.
+        listScroll: number
         x: number
         y: number
       }
@@ -836,6 +841,9 @@ export function WorkspaceShell() {
         label: string
         regions: TabRegion[]
         barLeft: number
+        // The bar's horizontal scroll offset at the last geometry refresh —
+        // the tab line's CSS left is a content-space value (dropLineInList).
+        barScroll: number
         x: number
         y: number
       }
@@ -932,6 +940,7 @@ export function WorkspaceShell() {
           const d = dragRef.current
           if (d?.kind !== 'sidebar') return
           d.regions = measureSidebarRegions()
+          d.listScroll = listRef.current?.scrollTop ?? 0
           dragRef.current = { ...d }
           setDrag(dragRef.current)
         })
@@ -978,6 +987,16 @@ export function WorkspaceShell() {
         : []
     }
 
+    const measureTabRegions = (wsId: string): TabRegion[] => {
+      const barEl = document.querySelector<HTMLElement>(`[data-testid="tab-bar-${wsId}"]`)
+      return barEl
+        ? [...barEl.querySelectorAll<HTMLElement>('.tab')].map((el) => {
+            const rect = el.getBoundingClientRect()
+            return { id: el.dataset.tabId ?? '', left: rect.left, right: rect.right }
+          })
+        : []
+    }
+
     const activateSidebar = (id: string, x: number, y: number): SidebarRegion[] => {
       const listEl = listRef.current
       const regions: SidebarRegion[] = measureSidebarRegions()
@@ -1015,6 +1034,7 @@ export function WorkspaceShell() {
         regions,
         forbidden,
         listTop: listEl?.getBoundingClientRect().top ?? 0,
+        listScroll: listEl?.scrollTop ?? 0,
         x,
         y,
       }
@@ -1025,12 +1045,7 @@ export function WorkspaceShell() {
 
     const activateTab = (wsId: string, id: string, x: number, y: number): TabRegion[] => {
       const barEl = document.querySelector<HTMLElement>(`[data-testid="tab-bar-${wsId}"]`)
-      const regions: TabRegion[] = barEl
-        ? [...barEl.querySelectorAll<HTMLElement>('.tab')].map((el) => {
-            const rect = el.getBoundingClientRect()
-            return { id: el.dataset.tabId ?? '', left: rect.left, right: rect.right }
-          })
-        : []
+      const regions: TabRegion[] = measureTabRegions(wsId)
       const tabs = stateRef.current.workspaces.find((w) => w.id === wsId)?.tabs ?? []
       const idx = tabs.findIndex((t) => t.id === id)
       // A drag started on a SELECTED tab moves the WHOLE selection (#106);
@@ -1053,6 +1068,7 @@ export function WorkspaceShell() {
         label,
         regions,
         barLeft: barEl?.getBoundingClientRect().left ?? 0,
+        barScroll: barEl?.scrollLeft ?? 0,
         x,
         y,
       }
@@ -1098,10 +1114,18 @@ export function WorkspaceShell() {
       if (ghostRef.current != null) {
         ghostRef.current.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 10}px)`
       }
+      // Geometry refreshes on EVERY move (v1.8.1): a scroll, a hover-expand
+      // or a resize all land between moves, and rects cached at activation
+      // once sent the drop — and the line with it — to a layout that no
+      // longer existed.
       if (d.kind === 'sidebar') {
-        applySidebarDrop(computeSidebarDrop(e.clientY, d.ids[0], d.regions, d.forbidden))
+        const regions = measureSidebarRegions()
+        dragRef.current = { ...d, regions, x: e.clientX, y: e.clientY }
+        applySidebarDrop(computeSidebarDrop(e.clientY, d.ids[0], regions, d.forbidden))
       } else {
-        const drop = computeTabDrop(e.clientX, d.regions)
+        const regions = measureTabRegions(d.wsId)
+        dragRef.current = { ...d, regions, x: e.clientX, y: e.clientY }
+        const drop = computeTabDrop(e.clientX, regions)
         tabDropRef.current = drop
         setTabDrop(drop)
       }
@@ -1168,15 +1192,52 @@ export function WorkspaceShell() {
       if (e.key === 'Escape' && dragActive.current) clearDrag()
     }
 
+    // A scroll that fires while a drag is LIVE (wheel over the list, a
+    // grabbed scrollbar) moves the rows under a STATIONARY pointer — no
+    // pointermove will follow on its own. Re-measure and re-target the drop
+    // at the last pointer position (v1.8.1). Capture phase: scroll events
+    // do not bubble.
+    const onScroll = () => {
+      const d = dragRef.current
+      if (d == null || !dragActive.current) return
+      if (d.kind === 'sidebar') {
+        const listEl = listRef.current
+        const regions = measureSidebarRegions()
+        dragRef.current = {
+          ...d,
+          regions,
+          listTop: listEl?.getBoundingClientRect().top ?? 0,
+          listScroll: listEl?.scrollTop ?? 0,
+        }
+        setDrag(dragRef.current)
+        applySidebarDrop(computeSidebarDrop(d.y, d.ids[0], regions, d.forbidden))
+      } else {
+        const barEl = document.querySelector<HTMLElement>(`[data-testid="tab-bar-${d.wsId}"]`)
+        const regions = measureTabRegions(d.wsId)
+        dragRef.current = {
+          ...d,
+          regions,
+          barLeft: barEl?.getBoundingClientRect().left ?? 0,
+          barScroll: barEl?.scrollLeft ?? 0,
+        }
+        setDrag(dragRef.current)
+        const drop = computeTabDrop(d.x, regions)
+        tabDropRef.current = drop
+        setTabDrop(drop)
+      }
+    }
+
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
     window.addEventListener('pointercancel', onPointerCancel)
     window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('scroll', onScroll, true)
     return () => {
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
       window.removeEventListener('pointercancel', onPointerCancel)
       window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('scroll', onScroll, true)
       // A drag cut short by an unmount must not leave the body frozen.
       document.body.classList.remove('is-dragging')
     }
@@ -4058,7 +4119,7 @@ export function WorkspaceShell() {
           {drag?.kind === 'sidebar' && sideDrop?.lineTop != null && (
             <div
               className="drag-line"
-              style={{ top: sideDrop.lineTop - drag.listTop }}
+              style={{ top: dropLineInList(sideDrop.lineTop, drag.listTop, drag.listScroll) }}
             />
           )}
         </ul>
@@ -4410,7 +4471,7 @@ export function WorkspaceShell() {
                   {drag?.kind === 'tab' && drag.wsId === ws.id && tabDrop != null && (
                     <div
                       className="drag-line-tab"
-                      style={{ left: tabDrop.lineLeft - drag.barLeft }}
+                      style={{ left: dropLineInList(tabDrop.lineLeft, drag.barLeft, drag.barScroll) }}
                     />
                   )}
                 </div>
