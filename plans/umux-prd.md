@@ -93,7 +93,7 @@ The Rust backend owns the pseudoterminals (PTY), SSH connections, the OSC parser
 46. As a developer, I want closing a panel that has a running process to always ask for confirmation, and closing an idle panel to never ask, so that the behavior is predictable and I never lose agent work by accident.
 
 ### Privacy-friendly Analytics — v0.2.0
-47. As the maintainer, I want a single anonymized event via Aptabase (app open only — install/usage counting; free tier, official Tauri SDK; no Settings switch — always on, with a kill-switch flag in settings.json for a full opt-out), so that real usage is measured instead of guessed from downloads.
+47. As the maintainer, I want a single anonymized launch count (app open only — usage counting; since 2026-11-14 one public CounterAPI counter `crystals-team-5978/umux`, no key, no payload; originally the official Tauri Aptabase SDK; no Settings switch — always on), so that real usage is measured instead of guessed from downloads.
 
 ### Pane Zoom — v1.0.0
 48. As a developer, I want to zoom the focused panel to fill its tab and, with the same shortcut, return to the exact previous layout (other panels keep running untouched), so that I can read one agent's output closely without disturbing the rest.
@@ -484,7 +484,7 @@ Each user story above maps to one or more acceptance checks. Most are verified b
 
 ## Roadmap
 
-- **v0.2.0 — features (Linux first):** unlimited panels (PaneLayout rewritten for N panels), agent status per panel, Settings screen with feature toggles, session restore (layout/panels/working dirs/shells), consistent close confirmations, Aptabase analytics (opt-out). *(shipped)*
+- **v0.2.0 — features (Linux first):** unlimited panels (PaneLayout rewritten for N panels), agent status per panel, Settings screen with feature toggles, session restore (layout/panels/working dirs/shells), consistent close confirmations, anonymous launch counting (shipped on Aptabase; moved to a public CounterAPI counter 2026-11-14). *(shipped)*
 - **v1.0.0 — full cross-platform launch:** Windows (NSIS `.exe`) and macOS (universal `.dmg`) builds via GitHub Actions, per-OS shells and config directories, unsigned-first-run docs, landing page on Cloudflare Pages (`*.pages.dev`, zero cost); pane zoom; sidebar metadata (git branch on tab rows, listening ports as a hover tooltip). Promotion (Show HN, Reddit, X/Twitter, dev.to; English) starts only after the landing page is live, with marketing content produced using content skills (Adam, ≤1 h/week; YouTube deferred).
 - **v1.0.3 + v1.0.4 (shipped 2026-08-31; planned as "v1.2.0") — import & CLI foundations:** one-time import wizard for cmux (what-to-import choice, preview, automatic `from cmux` collision suffix; Windows ships without import), `umux` CLI offline (list/new/rm/rename/split/import/export/config/notify; `--desk/--term` targeting flags with a hint on error), StoreCore extracted so the CLI and the app share one store implementation, CLI installed to PATH by NSIS/DMG/.deb (AppImage workaround documented), an in-app update check + one-click update from GitHub Releases (issue #55), and an "install the CLI" section (curl command) on the landing page.
 - **v1.5.0 — colors & quick UX fixes (added 2026-09-01):** an eight-color palette for workspaces, tabs, and groups chosen from the context menu (dot next to the name always visible; the left edge takes the color while active; no color = unchanged look), the inline rename pencil removed from workspace rows (context-menu rename remains), and a port click in the tooltip opening `http://localhost:{port}` in the system browser while still copying the URL.
@@ -526,6 +526,6 @@ Each user story above maps to one or more acceptance checks. Most are verified b
 
 ## Further Notes
 
-- umux is open-source and hosted publicly on GitHub. There is no commercial revenue model and no hard deadline; post-launch success is measured by GitHub activity (stars, issues and PRs from outside contributors), release downloads, and anonymized Aptabase usage, on top of Adam testing locally.
+- umux is open-source and hosted publicly on GitHub. There is no commercial revenue model and no hard deadline; post-launch success is measured by GitHub activity (stars, issues and PRs from outside contributors), release downloads, and the anonymized launch counter (CounterAPI since 2026-11-14), on top of Adam testing locally.
 - Adam is the product owner and does not write code; implementation is performed by Claude Code, with Adam reviewing output and testing locally. Explanations should therefore be step-by-step and beginner-friendly.
 - Planning artifacts live in `./plans/`. This PRD is followed by an implementation plan (`umux-plan.md`, produced via `/carve`) and then decomposed into GitHub issues (via `/dispatch`).

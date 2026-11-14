@@ -295,7 +295,7 @@ This is machine-local and reversible (`"auto"` restores the default). Other AI C
 
 ### Privacy & analytics
 
-umux reports a **single anonymous event** — `app_open` at startup — to [Aptabase](https://aptabase.com), so development is guided by how many people actually installed and use the app (Aptabase counts unique users per event). **Nothing else is ever sent**: no terminal content, commands, workspace names, file paths, or any other user data — the one event carries no payload at all. Analytics is **always on with no switch and no opt-out** (deliberate product decision, 2026-09-12: the old `analyticsEnabled` kill switch was removed from the settings schema — a stale key in an old `settings.json` is simply ignored).
+umux counts a **single anonymous event** — one counter increment at startup — on [CounterAPI](https://counterapi.dev) (public counter `crystals-team-5978/umux`), so development is guided by how often the app is actually launched. **Nothing else is ever sent**: no terminal content, commands, workspace names, file paths, or any other user data — the request carries no payload and no identifiers, and needs no API key because the counter is public (umux ships no secrets). Dev builds (`tauri dev`), unit tests and plain browser tabs never count — only a packaged launch inside the Tauri shell does. Analytics is **always on with no switch and no opt-out** (deliberate product decision, 2026-09-12: the old `analyticsEnabled` kill switch was removed from the settings schema — a stale key in an old `settings.json` is simply ignored).
 
 ---
 

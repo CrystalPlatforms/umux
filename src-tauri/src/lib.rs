@@ -1,4 +1,3 @@
-pub mod analytics;
 // #89 (v1.7.0 phase 7): the login-time daemon launcher (Run key /
 // LaunchAgent / systemd unit) — pure artifact generators + per-OS install.
 pub mod autostart;
@@ -2034,19 +2033,6 @@ pub fn resolve_cwd(cwd: Option<&str>) -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // tauri-plugin-aptabase 1.0.0 starts its flush loop with a bare
-    // `tokio::spawn` from its setup hook, which needs an ambient Tokio
-    // context on the main thread — without this guard the app PANICS at
-    // startup before any window appears ("there is no reactor running").
-    // Tauri keeps a global Tokio runtime but never *enters* it on the main
-    // thread, so enter it here for the whole run(); the plugin's task then
-    // lives on the same runtime as everything else. The guard drops when
-    // run() returns (app exit).
-    let rt_handle = match tauri::async_runtime::handle() {
-        tauri::async_runtime::RuntimeHandle::Tokio(h) => h,
-    };
-    let _rt_guard = rt_handle.enter();
-
     // v1.0 Phase 8 / #32: relocate config from the legacy location BEFORE
     // anything reads it (the settings seed below is the first reader).
     // No-op on Linux (same directory) and on a fresh Mac (nothing to move).
@@ -2063,11 +2049,12 @@ pub fn run() {
     // notification). Posters set it from their threads; the single-instance
     // callback reads it when the toast-activated relaunch arrives.
     let last_payload = LastNotificationPayload::default();
-    // v0.2 Phase 6 / #30, quickupdate 2026-09-12 (Adam): analytics is ALWAYS
-    // on — the old analyticsEnabled kill switch is gone from the schema (the
-    // CLI's config get/set entries and the settings field no longer exist),
-    // so the Aptabase plugin below registers unconditionally and nothing can
-    // turn it off.
+    // v0.2 Phase 6 / #30, quickupdate 2026-09-12 (Adam): analytics has NO
+    // kill switch — the old analyticsEnabled field is gone from the schema
+    // (the CLI's config get/set entries and the settings field no longer
+    // exist). Since quickupdate 2026-11-14 the anonymous launch counter
+    // lives in the FRONTEND (src/analytics.ts → counterapi.dev, public
+    // counter, no key); the Rust side ships no analytics at all.
 
     // The SessionCore router (#85 seam + #86 daemon face): seeded with the
     // persisted Storestation toggle. Startup with the daemon ON connects
@@ -2174,12 +2161,6 @@ pub fn run() {
             cmux_import::read_cmux_import_sources,
         ]);
 
-    // #30 AC2, quickupdate 2026-09-12: the plugin is the only place the SDK
-    // comes to life, and it registers on EVERY startup — analytics has no
-    // off state anymore. (The plugin flushes its queue on app exit by
-    // itself, so no exit hook is needed here.)
-    let builder = builder.plugin(analytics::aptabase_plugin());
-
     // Issue #66: in-app updates. The updater plugin serves `check()` to the
     // frontend (GitHub Releases latest.json is the only endpoint — zero-cost
     // policy); the process plugin provides `relaunch()` so "download + apply +
@@ -2250,16 +2231,6 @@ pub fn run() {
                         Ok(outcome) => log::info!("autostart self-heal: {outcome:?}"),
                         Err(e) => log::warn!("autostart self-heal failed: {e}"),
                     });
-            }
-            // v0.2 Phase 6 / #30 — the ONLY event umux reports: one
-            // aggregate app_open, so Aptabase can count installs/active
-            // users. Unconditional: analytics is always on (quickupdate
-            // 2026-09-12), matching the plugin registration above.
-            {
-                use tauri_plugin_aptabase::EventTracker;
-                if let Err(e) = app.handle().track_event(analytics::APP_OPEN_EVENT, None) {
-                    log::warn!("[analytics] track_event failed: {e}");
-                }
             }
             // HITL fix 2026-09-10: WebView2's BROWSER accelerator keys (F5,
             // F12, Ctrl+Shift+C/I, print/zoom chords) are consumed by the

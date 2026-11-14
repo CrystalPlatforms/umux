@@ -31,7 +31,6 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 portable-pty = "0.8"
-tauri-plugin-aptabase = "1.0.0"
 store_core = { path = "store_core" }
 # #84 (v1.7.0 phase 2): the shared session engine — the app links it
 # in-process (Storestation OFF); the umux-storestation daemon serves the

@@ -1,7 +1,14 @@
+import { useEffect } from 'react'
 import { WorkspaceShell } from './WorkspaceShell'
 import { isTauri } from './tauri-env'
+import { trackAppOpen } from './analytics'
 
 export default function App() {
+  // One anonymous launch count per production run (quickupdate 2026-11-14):
+  // trackAppOpen stays silent in dev builds and bare browser tabs on its own.
+  useEffect(() => {
+    trackAppOpen()
+  }, [])
   // Browser-mode guard: without the Tauri runtime every invoke/listen/
   // getCurrentWindow inside the shell crashes on mount (no
   // `__TAURI_INTERNALS__`). The notice tells a stray browser tab how to

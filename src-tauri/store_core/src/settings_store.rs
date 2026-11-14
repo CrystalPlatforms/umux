@@ -209,8 +209,9 @@ mod tests {
     use super::*;
 
     // T-S1 (#27 — defaults: everything on). Analytics is always on and has
-    //   no Settings switch (product decision, HITL follow-up); the flag only
-    //   gains meaning when Phase 6 initializes Aptabase.
+    //   no Settings switch (product decision, HITL follow-up; since the
+    //   2026-11-14 CounterAPI move the launch counter lives in the frontend
+    //   and the settings schema holds no analytics field at all).
     #[test]
     fn defaults_enable_every_feature() {
         let d = Settings::default();
