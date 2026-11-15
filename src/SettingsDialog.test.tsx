@@ -1289,9 +1289,10 @@ describe('SettingsDialog app version label (#107)', () => {
 // arrives as `coreStatus.error` and renders visibly. The end state renders
 // from the DAEMON's ended record (lastEndedAt), never from local guessing;
 // the countdown computes from the ABSOLUTE endsAt and asks the parent to
-// re-probe at the deadline. Platform split (#113): on macOS there is NO Core
-// switch — the section IS Core Session (BETA); Windows/Linux keep the Core
-// switch with the session controls beside it.
+// re-probe at the deadline. Platform split (#113, macOS-only Core Session
+// since the 2026-11-15 hotfix): on macOS there is NO Core switch — the
+// section IS Core Session (BETA); Windows/Linux keep the Core switch ONLY
+// (the daemon refuses sessions there — no session controls anywhere).
 describe('SettingsDialog Core Session (#114)', () => {
   const setPlatform = (value: string) => {
     Object.defineProperty(window.navigator, 'platform', { value, configurable: true })
@@ -1380,13 +1381,17 @@ describe('SettingsDialog Core Session (#114)', () => {
     }
   })
 
-  // Windows/Linux: the shipped Core switch stays and the session controls
-  // appear beside it (start button; the switch-with-dialog is macOS-only).
-  it('on Windows/Linux the Core switch stays and the session controls sit beside it', () => {
+  // Windows/Linux (2026-11-15 hotfix): the shipped Core switch stays and
+  // there are NO session controls anywhere — Core Session is macOS-only,
+  // refused by the daemon off the Mac (the macOS switch-with-dialog above).
+  it('on Windows/Linux the Core switch stays and no session controls exist', () => {
     const { getByTestId, queryByTestId } = renderCoreView({})
     expect(getByTestId('toggle-core')).toBeTruthy()
     expect(queryByTestId('toggle-core-session')).toBeNull()
-    expect(getByTestId('core-session-start')).toBeTruthy()
+    expect(queryByTestId('core-session-row')).toBeNull()
+    expect(queryByTestId('core-session-start')).toBeNull()
+    expect(queryByTestId('core-session-extend')).toBeNull()
+    expect(queryByTestId('core-session-stop')).toBeNull()
   })
 
   // The macOS switch ON opens the length dialog with the default offered;
@@ -1536,34 +1541,6 @@ describe('SettingsDialog Core Session (#114)', () => {
     expect(getByTestId('core-session-ended').textContent).toBe(
       `Session ended at ${formatSessionClock(endedAt)}.`,
     )
-  })
-
-  // The Windows/Linux session controls drive the SAME handlers (one source
-  // of truth with the CLI): extend opens the dialog in extend mode, stop
-  // reports immediately.
-  it('the Windows/Linux controls report extend and stop through the same handlers', () => {
-    const handlers = sessionProps()
-    const endsAt = Math.floor(Date.now() / 1000) + 3600
-    const { getByTestId, queryByTestId } = renderCoreView({
-      handlers,
-      coreStatus: {
-        enabled: false,
-        held: true,
-        instruction: null,
-        session: activeSession(endsAt),
-        error: null,
-      },
-    })
-    expect(queryByTestId('core-session-start')).toBeNull()
-    fireEvent.click(getByTestId('core-session-extend'))
-    const input = getByTestId('core-session-duration') as HTMLInputElement
-    fireEvent.change(input, { target: { value: '30m' } })
-    fireEvent.click(getByTestId('core-session-apply'))
-    expect(handlers.onSessionExtend).toHaveBeenCalledTimes(1)
-    expect(handlers.onSessionExtend).toHaveBeenCalledWith(1800)
-
-    fireEvent.click(getByTestId('core-session-stop'))
-    expect(handlers.onSessionStop).toHaveBeenCalledTimes(1)
   })
 
   // A refusal (Core ON, the cap — daemon-answered) is VISIBLE: the parent's

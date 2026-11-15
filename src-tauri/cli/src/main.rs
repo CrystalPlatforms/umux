@@ -217,7 +217,8 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Timed awake sessions (umux Core Session, #111): hold the OS sleep
+    /// Timed awake sessions (umux Core Session, #111; macOS only — other
+    /// platforms are refused `coreSessionPlatform`): hold the OS sleep
     /// block for a bounded window (max 24 h per session) — Storestation
     /// must be running, offline exits 3.
     CoreSession {

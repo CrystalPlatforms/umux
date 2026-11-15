@@ -67,6 +67,12 @@ pub mod codes {
     // at the daemon — the ONE gate no client can bypass; the message points
     // at `core-session start`.
     pub const CORE_RETIRED: &str = "coreRetired";
+    // Core Session retired to macOS-only (PO decision 2026-11-15, hotfix):
+    // `core.session.start` is refused off the Mac at the ONE gate — the
+    // mirror of CORE_RETIRED; the message points at `umux-storestation core
+    // on`. Additive catalog: older clients treat the unknown code as a
+    // generic error.
+    pub const CORE_SESSION_PLATFORM: &str = "coreSessionPlatform";
     // v1.8.0 CLI retrofit (#123): the offline store commands answer with the
     // same `{code,message,next,retryable}` object in `--json` mode — these
     // two name the domain refusals the prose errors used to carry. Emitted

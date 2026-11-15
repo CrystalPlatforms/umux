@@ -825,6 +825,13 @@ pub fn dispatch(
 /// gate — no other place builds these codes).
 fn core_session_refusal_error(refusal: core::SessionRefusal) -> ErrorObj {
     match refusal {
+        // Core Session retired to macOS-only (2026-11-15): the refusal is
+        // also the pointer — Core (Always-On) is this platform's honest way.
+        core::SessionRefusal::Platform => ErrorObj::new(
+            codes::CORE_SESSION_PLATFORM,
+            "Core Session is available on macOS only — this platform keeps the persistent umux Core (Always-On) instead.",
+            vec!["keep this machine awake: umux-storestation core on".into()],
+        ),
         core::SessionRefusal::CoreOn => ErrorObj::new(
             codes::CORE_CONFLICT,
             "umux Core is ON and already keeps this machine awake without a limit — a Core Session cannot run alongside it.",

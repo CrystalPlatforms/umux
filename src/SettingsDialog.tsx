@@ -842,9 +842,10 @@ export function SettingsDialog({
         )}
 
         {/* The Core view itself (v1.7.5 phase 2, #94; platform-aware since
-            #113/#114): Back, then — macOS: the Core Session switch (BETA
-            badge, Insomnia info line); Windows/Linux: the Always-On switch
-            with the session controls beside it. The switches mirror the
+            #113/#114, macOS-only Core Session since the 2026-11-15 hotfix):
+            Back, then — macOS: the Core Session switch (BETA badge, Insomnia
+            info line); Windows/Linux: the Always-On switch only (Core
+            Session is refused by the daemon there). The switches mirror the
             DAEMON's reported state (coreStatus), not local UI state: a
             failed op leaves the mirror untouched and the error renders
             below, so nothing is ever silent. */}
@@ -909,54 +910,14 @@ export function SettingsDialog({
                 />
               </div>
             )}
-            {/* The session controls and their live readouts (#114): on
-                Windows/Linux a Start/Extend/Stop row beside the Core switch;
-                on macOS the switch above IS the control, so only the
-                countdown and the end state render here. */}
+            {/* The session's live readouts (#114): the countdown while a
+                session is active and the daemon-recorded end state after
+                expiry/stop. macOS-only in practice — Core Session is
+                refused by the daemon off the Mac (2026-11-15 hotfix), so
+                these render only where a session can exist; the daemon's
+                mirror drives them, never local guessing. */}
             {onSessionStart != null && (
               <>
-                {!macosCore && (
-                  <div className="settings-row" data-testid="core-session-row">
-                    <div className="settings-row__text">
-                      <span className="settings-row__label">Core Session</span>
-                      <span className="settings-row__description">
-                        A timed awake window — the same sleep block, with an
-                        end time you pick.
-                      </span>
-                    </div>
-                    <div className="settings-import">
-                      {session?.active === true ? (
-                        <>
-                          <button
-                            type="button"
-                            className="btn-primary"
-                            data-testid="core-session-extend"
-                            onClick={() => openSessionDialog('extend')}
-                          >
-                            Extend…
-                          </button>{' '}
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            data-testid="core-session-stop"
-                            onClick={() => onSessionStop?.()}
-                          >
-                            Stop
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn-primary"
-                          data-testid="core-session-start"
-                          onClick={() => openSessionDialog('start')}
-                        >
-                          Start session…
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
                 {session?.active === true && session.endsAt != null && (
                   <SessionCountdown
                     endsAt={session.endsAt}

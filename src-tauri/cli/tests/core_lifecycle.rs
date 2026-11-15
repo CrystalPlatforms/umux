@@ -420,16 +420,22 @@ fn core_schema_field_names_are_identical_in_both_status_documents() {
 //
 // Assumptions (state-before-RED, #111/#112): the CLI grammar is
 // `umux core-session start|extend <n>{s|m|h}` / `stop`, `--json` prints the
-// pinned core.session object; the daemon refusals exit 5 with the code on
-// stderr (coreConflict while Core is ON); offline exits 3 promptly; a bad
-// duration is usage (exit 2). These tests are UNGATED — CI runs them on
-// all three platforms, so the session's wire behavior and the status shape
-// are pinned identically everywhere (the #112 parity gate at the CLI
-// level). The HOLD itself is platform-native (pmset / powercfg / logind);
-// its presence is asserted only where the tests can see the daemon's
-// honest `held` truth.
+// pinned core.session object; daemon refusals exit 5 with the code on
+// stderr; offline exits 3 promptly; a bad duration is usage (exit 2).
+//
+// macOS-only (PO decision 2026-11-15, hotfix): the session LIFECYCLE lives
+// on the Mac alone — the lifecycle and restart tests are macOS-gated. Off
+// the Mac the ONE gate answers `coreSessionPlatform` (the mirror of the
+// macOS `coreRetired` gate, #113) and a leftover session record is
+// discarded at daemon start — pinned by the non-macOS tests below, which
+// RUN on Windows and Linux CI. The HOLD itself is platform-native
+// (pmset); its presence is asserted only where the tests can see the
+// daemon's honest `held` truth.
 
 /// The pinned core.session object of one `umux core-session … --json` run.
+/// (Its callers are macOS-gated since the 2026-11-15 hotfix; the non-macOS
+/// refusals never produce a session view.)
+#[cfg_attr(not(target_os = "macos"), allow(unused))]
 fn session_json(stdout: &str) -> Value {
     let value = json(stdout);
     let mut keys: Vec<String> = value
@@ -455,7 +461,9 @@ fn session_json(stdout: &str) -> Value {
 
 // The full CLI lifecycle: start (hold + countdown) → extend (deadline
 // moves by exactly the extension) → stop (released + recorded). The flag
-// doc settles at every step.
+// doc settles at every step. macOS-only since 2026-11-15 — off the Mac the
+// platform gate refuses the start (the non-macOS tests below).
+#[cfg(target_os = "macos")]
 #[test]
 fn core_session_lifecycle_end_to_end() {
     let store = tempfile::tempdir().unwrap();
@@ -536,8 +544,10 @@ fn core_session_lifecycle_end_to_end() {
 }
 
 // story 146 at the CLI level: the session survives a daemon RESTART with
-// the SAME absolute endsAt — on every platform's real transport (UDS or
-// named pipe). This is the #112 parity proof for the restore semantics.
+// the SAME absolute endsAt — on the real transport (UDS). This was the
+// #112 parity proof; the lifecycle's home platform is macOS alone since
+// 2026-11-15, so the test rides with it.
+#[cfg(target_os = "macos")]
 #[test]
 fn core_session_survives_a_daemon_restart_with_the_same_deadline() {
     let store = tempfile::tempdir().unwrap();
@@ -571,16 +581,16 @@ fn core_session_survives_a_daemon_restart_with_the_same_deadline() {
     drop(daemon);
 }
 
-// story 148 end-to-end: start while Core is ON is refused (exit 5, the
-// code on stderr) and NOTHING changes; the same start succeeds after
-// Core off. Non-macOS since #113 — Core ON is unreachable there, so the
-// conflict simply cannot arise (the macOS start path has no Core to
-// conflict with; the retirement tests pin that).
+// Core Session retired to macOS-only (2026-11-15): off the Mac the CLI
+// start is refused — exit 5, the `coreSessionPlatform` code on stderr, the
+// message naming macOS — with Core ON (the old story-148 setup) and with
+// Core off alike; NOTHING changes. Extend/stop have nothing to act on and
+// answer noActiveSession. Runs on Windows and Linux CI.
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn core_session_start_while_core_on_is_refused_end_to_end() {
+fn core_session_start_is_refused_off_macos_end_to_end() {
     let store = tempfile::tempdir().unwrap();
-    let mut daemon = Daemon::start(store.path());
+    let daemon = Daemon::start(store.path());
     wait_until_running(store.path());
 
     let (_, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
@@ -588,32 +598,83 @@ fn core_session_start_while_core_on_is_refused_end_to_end() {
 
     let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "1h"]);
     assert_eq!(code, Some(5), "the refusal exits 5; stdout: {stdout}");
-    assert!(stderr.contains("coreConflict"), "the code travels: {stderr}");
+    assert!(stderr.contains("coreSessionPlatform"), "the code travels: {stderr}");
+    assert!(stderr.contains("macOS"), "the refusal names the platform: {stderr}");
+    assert!(
+        stderr.contains("core on"),
+        "the refusal points at the platform's own way: {stderr}"
+    );
 
     let status = json(&run_umux(store.path(), &["status", "--json"]).0);
     let svc = &status["storestation"];
     assert_eq!(svc["core"]["enabled"], true, "Core unchanged: {svc}");
     assert_eq!(svc["core"]["session"]["active"], false, "no session: {svc}");
 
+    // Core off — the SAME platform refusal, never a start.
     let (_, stderr, code) = run_core_cli(store.path(), &["core", "off"]);
     assert_eq!(code, Some(0), "core off; stderr: {stderr}");
-    let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "1h", "--json"]);
-    assert_eq!(code, Some(0), "start after Core off; stderr: {stderr}");
-    assert_eq!(session_json(&stdout)["active"], true);
+    let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "1h"]);
+    assert_eq!(code, Some(5), "still refused with Core off; stdout: {stdout}");
+    assert!(stderr.contains("coreSessionPlatform"), "{stderr}");
+
+    // Extend/stop honestly report there is nothing to act on.
+    let (_stdout, stderr, code) = run_umux(store.path(), &["core-session", "extend", "30m"]);
+    assert_eq!(code, Some(5), "extend without a session is refused");
+    assert!(stderr.contains("noActiveSession"), "{stderr}");
+    let (_stdout, stderr, code) = run_umux(store.path(), &["core-session", "stop"]);
+    assert_eq!(code, Some(5), "stop without a session is refused");
+    assert!(stderr.contains("noActiveSession"), "{stderr}");
 
     drop(daemon);
 }
 
-// A daemon-answered refusal in the OTHER direction too: core on while a
-// session is live is refused with coreConflict naming the way out; core
-// off during a session is allowed and does not end the session.
-// Non-macOS since #113 (Core ON is unreachable there; on macOS `core on`
-// is refused `coreRetired` regardless of any session — pinned below).
+// Core Session retired to macOS-only (2026-11-15): a session record left
+// in the flag doc off the Mac (a v1.7.7-era leftover) is discarded at
+// daemon start — the status reports no session, nothing held, and the doc
+// is persisted clean. Runs on Windows and Linux CI.
 #[cfg(not(target_os = "macos"))]
+#[test]
+fn core_session_record_off_macos_is_dropped_at_daemon_start_end_to_end() {
+    let store = tempfile::tempdir().unwrap();
+    let now = unix_now();
+    std::fs::write(
+        store.path().join("storestation.core.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "enabled": false,
+            "session": { "startedAt": now, "endsAt": now + 3600 },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let daemon = Daemon::start(store.path());
+    let status = wait_until_running(store.path());
+    let svc = &status["storestation"];
+    assert_eq!(
+        svc["core"]["session"]["active"], false,
+        "the record is discarded, never held: {svc}"
+    );
+    assert_eq!(svc["sleepPrevented"], false, "nothing asserted: {svc}");
+
+    let flag: Value = serde_json::from_str(
+        &std::fs::read_to_string(store.path().join("storestation.core.json"))
+            .expect("the Core flag file exists"),
+    )
+    .unwrap();
+    assert_eq!(flag["session"], Value::Null, "the doc is persisted clean: {flag}");
+
+    drop(daemon);
+}
+
+// macOS twin of the retired mirror-refusal test: with a session live,
+// `core on` is refused — there by the RETIREMENT gate (`coreRetired`, the
+// ON state is unreachable on the Mac) — and `core off` during a session is
+// allowed and does not end the session.
+#[cfg(target_os = "macos")]
 #[test]
 fn core_on_while_a_session_is_live_is_refused_end_to_end() {
     let store = tempfile::tempdir().unwrap();
-    let mut daemon = Daemon::start(store.path());
+    let daemon = Daemon::start(store.path());
     wait_until_running(store.path());
 
     let (stdout, stderr, code) = run_umux(store.path(), &["core-session", "start", "1h", "--json"]);
@@ -622,7 +683,7 @@ fn core_on_while_a_session_is_live_is_refused_end_to_end() {
 
     let (_stdout, stderr, code) = run_core_cli(store.path(), &["core", "on"]);
     assert_eq!(code, Some(5), "core on during a session is refused");
-    assert!(stderr.contains("coreConflict"), "{stderr}");
+    assert!(stderr.contains("coreRetired"), "{stderr}");
 
     // core off during the session: the choice flips, the session runs on.
     let (_, stderr, code) = run_core_cli(store.path(), &["core", "off"]);

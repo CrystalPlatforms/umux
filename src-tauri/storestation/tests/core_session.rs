@@ -16,15 +16,20 @@
 //!   extend/stop without a live session are refused `noActiveSession`.
 //! - Expiry needs NO client call: the serve-loop tick releases the hold and
 //!   records `lastEndReason: "expired"` at the deadline itself.
-//! - Start while Core is ON is refused `coreConflict`, state unchanged; the
-//!   mirror holds too (`core.set true` while a session is live), and
-//!   `core.set false` during a session changes the choice, never the hold.
+//! - Start while Core is ON is refused `coreConflict`, state unchanged.
 //! - A restart mid-session re-asserts with the SAME absolute `endsAt`; a
 //!   start after the deadline asserts nothing and records the expiry.
 //!
+//! macOS-only (PO decision 2026-11-15, hotfix): the whole session
+//! LIFECYCLE exists on macOS alone, so the lifecycle tests below are
+//! macOS-gated. Off the Mac the ONE gate answers `coreSessionPlatform`
+//! (the mirror of the macOS `coreRetired` gate, #113) and a leftover
+//! session record is discarded at restore — pinned by the non-macOS tests
+//! at the bottom (they run on Linux CI; the same rules compile-verify on
+//! Windows through the ungated CLI lifecycle tests, core_lifecycle.rs).
+//!
 //! Gate: `#[cfg(unix)]` — the raw-socket client side is std-only UDS (same
-//! rule as core.rs). Windows parity runs through the ungated CLI lifecycle
-//! tests (core_lifecycle.rs) plus the Windows-gated backend unit tests.
+//! rule as core.rs).
 
 #![cfg(unix)]
 
@@ -60,7 +65,9 @@ impl TestServer {
     }
 
     /// Start with a RECORDING notifier — the test reads every notification
-    /// the daemon posted (#114).
+    /// the daemon posted (#114). (Its only caller is macOS-gated since the
+    /// 2026-11-15 hotfix.)
+    #[cfg_attr(not(target_os = "macos"), allow(unused))]
     fn start_recording(dir: &Path) -> (Self, RecordedNotifications) {
         let calls: RecordedNotifications = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = Arc::clone(&calls);
@@ -145,7 +152,9 @@ fn call(stream: &mut std::os::unix::net::UnixStream, id: u64, op: &str, params: 
 }
 
 /// The pinned core.session key set, asserted in ONE place so every test
-/// below pins the same shape.
+/// below pins the same shape. (The lifecycle tests that use it are
+/// macOS-gated since the 2026-11-15 hotfix.)
+#[cfg_attr(not(target_os = "macos"), allow(unused))]
 fn assert_session_shape(session: &Value, context: &str) {
     let mut keys: Vec<String> = session
         .as_object()
@@ -186,6 +195,9 @@ fn assert_session_shape(session: &Value, context: &str) {
 /// CI runner's logind policy is the environment's business — an honest
 /// refusal travels as the instruction string and the hold assertion yields
 /// (the real inhibit path is core_linux's, against a fake logind).
+/// macOS-only now: the hold paths the session tests exercise exist on the
+/// Mac alone, so the helper is unused on Linux builds.
+#[cfg_attr(not(target_os = "macos"), allow(unused))]
 fn expect_held(core: &Value) -> bool {
     core["instruction"].as_str().is_none()
 }
@@ -193,6 +205,9 @@ fn expect_held(core: &Value) -> bool {
 // #111 AC: start holds the sleep block and the status carries the session —
 // `endsAt` absolute ≈ now + duration, `remainingSecs` counting down, the
 // status op's core object carrying the SAME view (one shape, two faces).
+// macOS-only since the 2026-11-15 hotfix: the session lifecycle lives on
+// the Mac alone.
+#[cfg(target_os = "macos")]
 #[test]
 fn session_start_holds_and_the_status_carries_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -274,7 +289,8 @@ fn session_params_are_validated_and_the_connection_survives() {
 
 // #111 AC: extend moves `endsAt` by exactly the extension; an extend (or a
 // start) that would push the span past 24 h from startedAt is refused
-// `sessionCapExceeded` and changes NOTHING.
+// `sessionCapExceeded` and changes NOTHING. macOS-only since 2026-11-15.
+#[cfg(target_os = "macos")]
 #[test]
 fn extend_moves_the_deadline_and_the_cap_refuses_without_changes() {
     let dir = tempfile::tempdir().unwrap();
@@ -345,6 +361,8 @@ fn extend_moves_the_deadline_and_the_cap_refuses_without_changes() {
 
 // #111 AC: stop releases the hold immediately and records the end; extend
 // and stop without a live session are refused noActiveSession.
+// macOS-only since 2026-11-15 (the lifecycle's home platform).
+#[cfg(target_os = "macos")]
 #[test]
 fn stop_releases_and_records_the_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -399,6 +417,8 @@ fn stop_releases_and_records_the_end() {
 
 // #111 AC: expiry auto-releases with NO client call — the serve-loop tick
 // drops the hold and records the expiry at the deadline itself.
+// macOS-only since 2026-11-15.
+#[cfg(target_os = "macos")]
 #[test]
 fn expiry_auto_releases_with_no_client_call() {
     let dir = tempfile::tempdir().unwrap();
@@ -445,22 +465,21 @@ fn expiry_auto_releases_with_no_client_call() {
     assert_eq!(doc["session"], Value::Null);
 }
 
-// #111 AC (story 148): start while Core is ON is refused coreConflict and
-// changes NOTHING — Core keeps its hold, no session appears.
-// Non-macOS since #113: on macOS Core cannot be turned on at all (the
-// daemon refuses it), so the conflict cannot arise; the macOS retirement
-// tests live in tests/core.rs.
+// Core Session retired to macOS-only (2026-11-15): off the Mac the start
+// is refused at the ONE gate — even with Core ON (the old story-148 setup;
+// there the platform answer precedes any conflict logic) and with Core off
+// alike. NOTHING changes: no session, no doc, Core untouched.
+// Non-macOS: runs on Linux CI (the same rules compile-verify on Windows
+// through the ungated CLI tests).
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn start_while_core_on_is_refused_and_changes_nothing() {
+fn start_refuses_the_platform_off_macos_and_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let server = TestServer::start(dir.path());
     let mut stream = server.connect();
 
     let response = call(&mut stream, 1, "core.set", json!({ "enabled": true }));
-    assert_eq!(response["ok"], true, "core on first: {response}");
-    let core_before = status_core(&mut stream);
-    assert_eq!(core_before["enabled"], true);
+    assert_eq!(response["ok"], true, "core on first (where it exists): {response}");
 
     let response = call(
         &mut stream,
@@ -468,48 +487,58 @@ fn start_while_core_on_is_refused_and_changes_nothing() {
         "core.session.start",
         json!({ "durationSecs": 3600 }),
     );
-    assert_eq!(response["ok"], false, "{response}");
-    assert_eq!(response["error"]["code"], "coreConflict");
+    assert_eq!(response["ok"], false, "the platform gate refuses: {response}");
+    assert_eq!(response["error"]["code"], "coreSessionPlatform");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("macOS"), "the refusal names the platform: {message}");
     assert!(
-        response["error"]["message"].as_str().unwrap().contains("Core"),
-        "the refusal names the conflict: {response}"
+        response["error"]["next"].as_array().unwrap().iter()
+            .any(|step| step.as_str().unwrap().contains("core on")),
+        "the refusal points at the platform's own way (Core): {response}"
     );
 
     let core_after = status_core(&mut stream);
     assert_eq!(core_after["enabled"], true, "Core unchanged: {core_after}");
     assert_eq!(core_after["session"]["active"], false, "no session: {core_after}");
     assert_eq!(core_after["session"]["lastEndReason"], Value::Null);
+    if expect_held(&core_after) {
+        assert_eq!(core_after["held"], true, "Core still owns the hold: {core_after}");
+    }
 
-    // Extend is refused too — there is nothing to extend AND Core owns the
-    // hold; the enumerated answer still names the conflict honestly.
+    // Core off — the answer is the SAME platform refusal, not a start.
+    let response = call(&mut stream, 3, "core.set", json!({ "enabled": false }));
+    assert_eq!(response["ok"], true);
     let response = call(
         &mut stream,
-        3,
+        4,
+        "core.session.start",
+        json!({ "durationSecs": 3600 }),
+    );
+    assert_eq!(response["ok"], false, "{response}");
+    assert_eq!(response["error"]["code"], "coreSessionPlatform");
+    let core_after = status_core(&mut stream);
+    assert_eq!(core_after["session"]["active"], false, "still no session: {core_after}");
+
+    // Extend and stop have nothing to act on and say so honestly.
+    let response = call(
+        &mut stream,
+        5,
         "core.session.extend",
         json!({ "durationSecs": 60 }),
     );
     assert_eq!(response["ok"], false);
     assert_eq!(response["error"]["code"], "noActiveSession");
-
-    // After Core off, the same start succeeds.
-    let response = call(&mut stream, 4, "core.set", json!({ "enabled": false }));
-    assert_eq!(response["ok"], true);
-    let response = call(
-        &mut stream,
-        5,
-        "core.session.start",
-        json!({ "durationSecs": 3600 }),
-    );
-    assert_eq!(response["ok"], true, "{response}");
-    assert_eq!(response["result"]["session"]["active"], true);
+    let response = call(&mut stream, 6, "core.session.stop", json!({}));
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "noActiveSession");
 }
 
-// The mirror refusal (one hold at a time, by construction): core.set(true)
-// while a session is live is refused coreConflict naming core-session, and
-// core.set(false) during a session flips ONLY the choice — the session's
-// hold is not the Core flip's to touch. Non-macOS since #113 (the ON state
-// is unreachable there; on macOS `core on` is refused `coreRetired`).
-#[cfg(not(target_os = "macos"))]
+// macOS twin of the retired non-macOS mirror-refusal test (one hold at a
+// time, by construction): core.set(true) while a session is live is
+// refused — there by the RETIREMENT gate (`coreRetired`, the ON state is
+// unreachable on the Mac) — and core.set(false) during a session flips
+// ONLY the choice: the session's hold is not the Core flip's to touch.
+#[cfg(target_os = "macos")]
 #[test]
 fn core_on_while_a_session_is_live_is_refused_and_off_keeps_the_session_hold() {
     let dir = tempfile::tempdir().unwrap();
@@ -527,11 +556,14 @@ fn core_on_while_a_session_is_live_is_refused_and_off_keeps_the_session_hold() {
 
     let response = call(&mut stream, 2, "core.set", json!({ "enabled": true }));
     assert_eq!(response["ok"], false, "{response}");
-    assert_eq!(response["error"]["code"], "coreConflict");
+    // On macOS the retirement gate answers BEFORE the conflict logic: the
+    // ON state is unreachable there, so the honest code is `coreRetired`
+    // with the core-session start pointer (pinned in tests/core.rs too).
+    assert_eq!(response["error"]["code"], "coreRetired");
     assert!(
         response["error"]["next"].as_array().unwrap().iter()
-            .any(|step| step.as_str().unwrap().contains("core-session stop")),
-        "the refusal points at core-session stop: {response}"
+            .any(|step| step.as_str().unwrap().contains("core-session start")),
+        "the refusal points at core-session start: {response}"
     );
 
     let core = status_core(&mut stream);
@@ -559,6 +591,8 @@ fn core_on_while_a_session_is_live_is_refused_and_off_keeps_the_session_hold() {
 
 // #111 AC (story 146): a daemon restart MID-SESSION re-asserts with the
 // remaining window — the SAME absolute endsAt, no client call.
+// macOS-only since 2026-11-15.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_live_session_survives_a_daemon_restart_with_the_same_absolute_deadline() {
     let dir = tempfile::tempdir().unwrap();
@@ -592,7 +626,10 @@ fn a_live_session_survives_a_daemon_restart_with_the_same_absolute_deadline() {
 }
 
 // #111 AC (story 146): a daemon start AFTER the deadline asserts nothing
-// and records the expiry — never an infinite hold.
+// and records the expiry — never an infinite hold. macOS-only since
+// 2026-11-15: off the Mac the record is discarded outright (the non-macOS
+// discard test below).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_restart_after_the_deadline_asserts_nothing_and_records_the_expiry() {
     let dir = tempfile::tempdir().unwrap();
@@ -632,7 +669,9 @@ fn a_restart_after_the_deadline_asserts_nothing_and_records_the_expiry() {
 // #114 AC (the automated half): the daemon EMITS the expiry notification —
 // recorded at the injected boundary, so no real toast pops in the suite.
 // A STOP notifies NOTHING (expiry only — the plan's decision; start/extend
-// always have a client looking at the answer).
+// always have a client looking at the answer). macOS-only since 2026-11-15
+// (the session lifecycle's home platform).
+#[cfg(target_os = "macos")]
 #[test]
 fn expiry_posts_the_notification_and_stop_does_not() {
     let dir = tempfile::tempdir().unwrap();
@@ -694,4 +733,38 @@ fn expiry_posts_the_notification_and_stop_does_not() {
         "a stop never notifies: {:?}",
         calls.lock().expect("notifier lock")
     );
+}
+
+// Core Session is macOS-only (2026-11-15): a session record left in the
+// document off the Mac (a v1.7.7-era leftover) is discarded at daemon
+// start — persisted clean, nothing asserted, no end record (it never ran
+// on this platform). The wire face of the off-macOS restore rule pinned in
+// the core.rs unit tests. Runs on Linux CI.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_legacy_session_record_discards_at_daemon_start_off_macos() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = unix_now();
+    std::fs::write(
+        dir.path().join("storestation.core.json"),
+        serde_json::to_vec_pretty(&json!({
+            "enabled": false,
+            "session": { "startedAt": now, "endsAt": now + 3600 },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let server = TestServer::start(dir.path());
+    let mut stream = server.connect();
+    let core = status_core(&mut stream);
+    assert_eq!(core["session"]["active"], false, "discarded, never held: {core}");
+    assert_eq!(core["held"], false, "nothing asserted: {core}");
+    assert_eq!(core["session"]["lastEndReason"], Value::Null, "no end record: {core}");
+
+    let doc: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("storestation.core.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(doc["session"], Value::Null, "the doc is persisted clean: {doc}");
 }

@@ -33,12 +33,16 @@ const MECHANISM_NAME: &str = "umux-storestation";
 
 // --- Pure artifact generators (unit-tested on every OS) ----------------------
 
-/// The Windows HKCU Run value: launch headless, hidden console (`--hidden` —
-/// the daemon hides its own console window on start; a Run-key launch of a
-/// console binary would otherwise flash one at every login). The quoted path
-/// survives spaces (NSIS's default per-user install dir does).
+/// The Windows HKCU Run value: launch the daemon WINDOWLESS by hosting its
+/// console in `conhost --headless` (the v1.7.6 P4 delivery decision — the
+/// binary stays console-subsystem so a terminal `run` keeps the shell
+/// waiting and Ctrl+C; the daemon's `--hidden` flag was retired as a no-op
+/// with #101). Without the wrapper, a Run-key launch of a console binary
+/// flashes and KEEPS a console window at every login (the 2026-11-15 HITL
+/// report). The quoted path survives spaces (NSIS's default per-user
+/// install dir does); `conhost.exe` resolves from System32 on every PATH.
 pub fn run_key_value(daemon_path: &str) -> String {
-    format!("\"{daemon_path}\" run --hidden")
+    format!("conhost.exe --headless \"{daemon_path}\" run")
 }
 
 /// The macOS LaunchAgent plist (`~/Library/{PLIST_LABEL}.plist`): run the
@@ -352,12 +356,16 @@ enum HealAction {
 }
 
 /// Pure: the heal decision (#103) for one (intent, artifact state) pair —
-/// the four reconciliations of the release startup check. Unit-tested on
-/// every OS; `heal_autostart` only executes what this returns.
+/// the reconciliations of the release startup check, grown by the 2026-11-15
+/// windowless upgrade: an artifact that points here but in a LEGACY form
+/// (`"path" run --hidden` — the console-window-at-login launch) is rewritten
+/// to the current `conhost --headless` form. Unit-tested on every OS;
+/// `heal_autostart` only executes what this returns.
 fn heal_decision(
     intent_enabled: bool,
     artifact_present: bool,
     points_here: bool,
+    current_form_ok: bool,
     daemon_available: bool,
 ) -> (HealAction, HealOutcome) {
     match (intent_enabled, artifact_present) {
@@ -369,16 +377,28 @@ fn heal_decision(
         (true, _) if !daemon_available => (HealAction::Leave, HealOutcome::NoDaemon),
         (true, false) => (HealAction::Install, HealOutcome::Installed),
         (true, true) if !points_here => (HealAction::Rewrite, HealOutcome::Rewritten),
+        // Points here but in a legacy (window-flashing) form → the windowless
+        // rewrite; `current_form_ok` is always true off Windows.
+        (true, true) if !current_form_ok => (HealAction::Rewrite, HealOutcome::Rewritten),
         (true, true) => (HealAction::Leave, HealOutcome::AlreadyCorrect),
     }
 }
 
 /// Pure: the daemon path inside a Run-key value. The generator always writes
-/// a QUOTED path (`"C:\…\umux-storestation.exe" run --hidden`); an unquoted
-/// legacy form is tolerated (path up to the last token boundary before
-/// `run`). `None` = the value is too mangled to trust — heal rewrites it.
+/// the WRAPPED form (`conhost.exe --headless "C:\…\umux-storestation.exe"
+/// run`); the legacy forms are tolerated (a bare quoted path — the pre-2026
+/// `"path" run --hidden` artifact — and an unquoted path before ` run`).
+/// `None` = the value is too mangled to trust — heal rewrites it.
 pub fn run_key_daemon_path(value: &str) -> Option<&str> {
     let trimmed = value.trim();
+    // The wrapped form: the daemon path is the quoted segment AFTER the
+    // wrapper's `--headless` flag (`conhost.exe --headless "C:\…" run`).
+    if let Some(rest) = trimmed.find("--headless").map(|at| &trimmed[at + "--headless".len()..]) {
+        let start = rest.find('"')?;
+        let after = &rest[start + 1..];
+        let end = after.find('"')?;
+        return Some(&after[..end]);
+    }
     if let Some(rest) = trimmed.strip_prefix('"') {
         let end = rest.find('"')?;
         return Some(&rest[..end]);
@@ -389,6 +409,26 @@ pub fn run_key_daemon_path(value: &str) -> Option<&str> {
         None if !trimmed.is_empty() => Some(trimmed),
         None => None,
     }
+}
+
+/// Pure: does the Run value launch the daemon WINDOWLESS — wrapped in the
+/// `conhost --headless` host? A legacy bare `"path" run --hidden` value is
+/// NOT windowless (the no-op `--hidden` never prevented the console) — the
+/// heal rewrites it to the wrapped form. Case-insensitive: registry values
+/// are hand-editable and Windows paths compare loosely.
+/// (Non-Windows builds never wrap — the heal passes `true` there — so only
+/// the tests call this off Windows, same story as plist_points_at.)
+#[cfg(windows)]
+pub fn run_key_is_windowless(value: &str) -> bool {
+    let lowered = value.trim().to_lowercase();
+    lowered.contains("conhost") && lowered.contains("--headless")
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn run_key_is_windowless(value: &str) -> bool {
+    let lowered = value.trim().to_lowercase();
+    lowered.contains("conhost") && lowered.contains("--headless")
 }
 
 /// Pure: does the stored Run value launch THIS daemon? Windows paths are
@@ -430,9 +470,11 @@ fn unit_points_at(unit: &str, daemon_path: &str) -> bool {
 /// artifact — the same rule the dev guard enforces for the toggle); the app
 /// calls it from a background thread at setup, logging the outcome.
 ///
-/// The four reconciliations:
+/// The five reconciliations:
 ///   intent ON  + artifact missing  → install (the post-update restore)
 ///   intent ON  + artifact wrong    → rewrite to the installed daemon
+///   intent ON  + artifact here but in a legacy (window-flashing) form
+///                                  → rewrite to the windowless host (2026-11-15)
 ///   intent OFF + artifact present  → remove (a leftover must not survive)
 ///   otherwise                      → leave alone
 pub fn heal_autostart(intent_enabled: bool) -> Result<HealOutcome, String> {
@@ -447,6 +489,7 @@ pub fn heal_autostart(intent_enabled: bool) -> Result<HealOutcome, String> {
         intent_enabled,
         current.is_some(),
         points_here,
+        current_form_ok(current.as_ref()),
         daemon_available,
     );
     match action {
@@ -500,6 +543,25 @@ fn artifact_points_at(artifact: &str, daemon_path: &str) -> bool {
     }
 }
 
+/// Is the current artifact in the platform's CURRENT form? Windows: the Run
+/// value must wrap the daemon in the `conhost --headless` host (the
+/// windowless delivery — a legacy bare value flashes a console window at
+/// every login and gets rewritten). macOS/Linux artifacts have no windowing
+/// dimension — always current.
+#[cfg(windows)]
+fn current_form_ok(current: Option<&String>) -> bool {
+    match current {
+        Some(value) => run_key_is_windowless(value),
+        None => true,
+    }
+}
+
+#[cfg(not(windows))]
+fn current_form_ok(current: Option<&String>) -> bool {
+    let _ = current;
+    true
+}
+
 /// Windows: read the HKCU Run value (`reg query`, windowless). `None` when
 /// the value is absent — the query exits 1 for a missing value.
 #[cfg(windows)]
@@ -526,16 +588,18 @@ fn read_windows_run_value() -> Result<Option<String>, String> {
 mod tests {
     use super::*;
 
-    // AC (#89): the generated Run-key value launches the daemon HEADLESS —
-    // quoted path (installs with spaces), `run`, `--hidden`. The quoted path
-    // is the NSIS reality ("C:\Users\Adam\AppData\Local\Programs\umux\...").
+    // AC (#89 + the v1.7.6 P4 delivery, 2026-11-15): the generated Run-key
+    // value launches the daemon WINDOWLESS — the `conhost --headless` host
+    // around the quoted daemon path (installs with spaces), then `run`.
     #[test]
-    fn run_key_value_quotes_path_and_runs_hidden() {
+    fn run_key_value_wraps_the_daemon_in_the_headless_host() {
         let value = run_key_value(r"C:\Program Files\umux\umux-storestation.exe");
         assert_eq!(
             value,
-            r#""C:\Program Files\umux\umux-storestation.exe" run --hidden"#
+            r#"conhost.exe --headless "C:\Program Files\umux\umux-storestation.exe" run"#
         );
+        // The wrapper IS the windowless delivery.
+        assert!(run_key_is_windowless(&value));
     }
 
     // AC (#89): the LaunchAgent plist is well-formed, runs the daemon at
@@ -583,20 +647,27 @@ mod tests {
     // --- v1.7.6 P4 (#103): the self-heal's pure halves -----------------------
 
     // The Run value's daemon path parses in every form the artifact can
-    // legitimately take (the generator always quotes; a legacy unquoted
-    // form is tolerated), and refuses to guess at mangled values.
+    // legitimately take (the generator's wrapped form, the legacy quoted
+    // and unquoted forms), and refuses to guess at mangled values.
     #[test]
-    fn run_key_daemon_path_parses_quoted_unquoted_and_mangled() {
+    fn run_key_daemon_path_parses_wrapped_legacy_and_mangled() {
+        // The current wrapped form.
         assert_eq!(
             run_key_daemon_path(
-                r#""C:\Program Files\umux\umux-storestation.exe" run --hidden"#
+                r#"conhost.exe --headless "C:\Program Files\umux\umux-storestation.exe" run"#
             ),
             Some(r"C:\Program Files\umux\umux-storestation.exe")
+        );
+        // Legacy quoted (the pre-2026 `"path" run --hidden` artifact).
+        assert_eq!(
+            run_key_daemon_path(r#""C:\umux\umux-storestation.exe" run --hidden"#),
+            Some(r"C:\umux\umux-storestation.exe")
         );
         assert_eq!(
             run_key_daemon_path(r#""C:\umux\umux-storestation.exe""#),
             Some(r"C:\umux\umux-storestation.exe")
         );
+        // Legacy unquoted.
         assert_eq!(
             run_key_daemon_path(r"C:\umux\umux-storestation.exe run"),
             Some(r"C:\umux\umux-storestation.exe")
@@ -604,6 +675,29 @@ mod tests {
         // Mangled → None (the heal treats "cannot parse" as "rewrite").
         assert_eq!(run_key_daemon_path(""), None);
         assert_eq!(run_key_daemon_path("\"unclosed"), None);
+        // A wrapper with no quoted path after --headless cannot be trusted.
+        assert_eq!(run_key_daemon_path("conhost.exe --headless"), None);
+    }
+
+    // The windowless detection: the wrapped value IS windowless; the legacy
+    // bare values are NOT (that is the whole point of the heal's rewrite);
+    // the check is case-insensitive (registry values are hand-editable).
+    #[test]
+    fn run_key_is_windowless_detects_only_the_headless_host() {
+        assert!(run_key_is_windowless(
+            r#"conhost.exe --headless "C:\Program Files\umux\umux-storestation.exe" run"#
+        ));
+        assert!(run_key_is_windowless(
+            r#"CONHOST.EXE --HEADLESS "C:\PROG\umux-storestation.exe" run"#
+        ));
+        assert!(!run_key_is_windowless(
+            r#""C:\Program Files\umux\umux-storestation.exe" run --hidden"#
+        ));
+        assert!(!run_key_is_windowless(
+            r"C:\Program Files\umux\umux-storestation.exe run"
+        ));
+        assert!(!run_key_is_windowless("conhost.exe"));
+        assert!(!run_key_is_windowless(""));
     }
 
     // THE POISONED-MACHINE CASE (story 7): the historical dev-tree Run key
@@ -684,45 +778,52 @@ mod tests {
         assert!(!disable_err.contains("dev build"));
     }
 
-    // The heal decision matrix (#103 story 7) — every reconciliation the
-    // release startup check can take, including the fresh-install safety
-    // rule (intent OFF + nothing present = untouched).
+    // The heal decision matrix (#103 story 7 + the 2026-11-15 windowless
+    // upgrade) — every reconciliation the release startup check can take,
+    // including the fresh-install safety rule (intent OFF + nothing present
+    // = untouched) and the legacy-form rewrite (points here, wrong form).
     #[test]
     fn heal_decision_covers_every_reconciliation() {
         use HealAction::*;
         // A user who never enabled it: untouched (default-OFF preserved).
         assert_eq!(
-            heal_decision(false, false, false, true),
+            heal_decision(false, false, false, true, true),
             (Leave, HealOutcome::AlreadyCorrect)
         );
         // Intent OFF + leftover artifact → removed.
         assert_eq!(
-            heal_decision(false, true, false, true),
+            heal_decision(false, true, false, true, true),
             (Remove, HealOutcome::Removed)
         );
         // Intent ON + artifact missing (the post-update restore) → installed.
         assert_eq!(
-            heal_decision(true, false, false, true),
+            heal_decision(true, false, false, true, true),
             (Install, HealOutcome::Installed)
         );
         // Intent ON + poisoned target (the dev-tree key) → rewritten.
         assert_eq!(
-            heal_decision(true, true, false, true),
+            heal_decision(true, true, false, true, true),
             (Rewrite, HealOutcome::Rewritten)
         );
-        // Intent ON + already correct → untouched.
+        // Intent ON + pointing here but in the LEGACY window-flashing form
+        // (2026-11-15) → rewritten to the windowless host.
         assert_eq!(
-            heal_decision(true, true, true, true),
+            heal_decision(true, true, true, false, true),
+            (Rewrite, HealOutcome::Rewritten)
+        );
+        // Intent ON + already correct (windowless, pointing here) → untouched.
+        assert_eq!(
+            heal_decision(true, true, true, true, true),
             (Leave, HealOutcome::AlreadyCorrect)
         );
         // Intent ON + broken install (no daemon beside the app) → reported,
         // never half-installed.
         assert_eq!(
-            heal_decision(true, false, false, false),
+            heal_decision(true, false, false, true, false),
             (Leave, HealOutcome::NoDaemon)
         );
         assert_eq!(
-            heal_decision(true, true, false, false),
+            heal_decision(true, true, false, true, false),
             (Leave, HealOutcome::NoDaemon)
         );
     }

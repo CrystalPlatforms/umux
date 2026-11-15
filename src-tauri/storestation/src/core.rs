@@ -28,12 +28,16 @@
 //! umux Core Session (timed awake sessions, #111) slots into the SAME state
 //! machine: the session is a bounded window (absolute `endsAt`, unix
 //! seconds, max 24 h from `startedAt`) during which the daemon holds the
-//! exact same platform assertion. One hold at a time — the session refuses
-//! to start while Core is ON and `core.set(true)` is refused while a
-//! session is live (the holds never stack, PRD decision); expiry drops the
-//! existing `PowerAssertion` value, inheriting the crash-release guarantee
-//! by construction. The ended record (`lastEndedAt`, `lastEndReason`) is
-//! deliberately NOT persisted — it lives for the daemon's lifetime only.
+//! exact same platform assertion. macOS-only since the 2026-11-15 hotfix
+//! (PO decision): off the Mac `core.session.start` is refused at the one
+//! gate (`coreSessionPlatform`) and a leftover session record is discarded
+//! at restore — the mirror of the macOS Core retirement (#113). One hold at
+//! a time — the session refuses to start while Core is ON and
+//! `core.set(true)` is refused while a session is live (the holds never
+//! stack, PRD decision); expiry drops the existing `PowerAssertion` value,
+//! inheriting the crash-release guarantee by construction. The ended record
+//! (`lastEndedAt`, `lastEndReason`) is deliberately NOT persisted — it
+//! lives for the daemon's lifetime only.
 //!
 //! Unit tests below cover the pure parts (flag persistence, view shape);
 //! the wire behavior is exercised in `storestation/tests/core.rs`.
@@ -114,8 +118,14 @@ pub const END_REASON_STOPPED: &str = "stopped";
 /// these to the enumerated wire codes — one gate, no scattered refusals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionRefusal {
+    /// Core Session is macOS-only (PO decision 2026-11-15, hotfix): off the
+    /// Mac the WHOLE feature is refused at the one gate — the exact mirror
+    /// of the macOS `core.set` retirement (#113), so no client bypasses it.
+    Platform,
     /// Start while Core is ON: Core already keeps the machine awake without
-    /// a limit; the holds never stack (story 148).
+    /// a limit; the holds never stack (story 148). Unreachable in practice
+    /// since the macOS-only gate (sessions live only where Core is retired)
+    /// — kept as defense-in-depth on the shared state machine.
     CoreOn,
     /// Start/extend would push the span past 24 h from `startedAt`.
     CapExceeded,
@@ -254,6 +264,23 @@ impl CoreState {
         // macOS Core retirement (#113): a legacy ON flag is migrated off
         // before any restore decision — see [`migrate_retired_core_flag`].
         let (enabled, core_retired) = migrate_retired_core_flag(config_dir, enabled, session);
+        // Core Session is macOS-only (2026-11-15): a session record left in
+        // the document off the Mac (a v1.7.7-era leftover) is discarded at
+        // restore — persisted clean, nothing asserted, no end record (the
+        // session never ran on this platform). The mirror of the macOS
+        // migration above: stale state must never survive a platform gate.
+        #[cfg(not(target_os = "macos"))]
+        let session = if session.is_some() {
+            if let Err(e) = save_doc(config_dir, enabled, None) {
+                eprintln!("umux-storestation: could not persist the discarded session record: {e}");
+            }
+            eprintln!(
+                "umux-storestation: a Core Session record was discarded at restore — Core Session is available on macOS only."
+            );
+            None
+        } else {
+            session
+        };
         // A document claiming BOTH holds at once is unreachable through the
         // daemon (each side refuses the other); if a hand-edit produced it,
         // Core — the primary v1.7.5 state — wins and the session record is
@@ -421,6 +448,20 @@ impl CoreState {
         self.session.is_some()
     }
 
+    /// Core Session is macOS-only (PO decision 2026-11-15, hotfix): `Some`
+    /// off the Mac, `None` on macOS. The ONE gate — the mirror of the macOS
+    /// `core.set` retirement (#113) — lives here so no client (CLI,
+    /// Settings, a hand-rolled socket client) can bypass it.
+    #[cfg(not(target_os = "macos"))]
+    fn platform_refusal(&self) -> Option<SessionRefusal> {
+        Some(SessionRefusal::Platform)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn platform_refusal(&self) -> Option<SessionRefusal> {
+        None
+    }
+
     /// Start a timed session: persist the absolute window FIRST (an
     /// assertion hiccup must not undo it — the next daemon start retries,
     /// exactly like the Core flag), then take the hold. `now` is the stamp
@@ -431,6 +472,9 @@ impl CoreState {
         duration_secs: u64,
         now: u64,
     ) -> Result<(), SessionRefusal> {
+        if let Some(refusal) = self.platform_refusal() {
+            return Err(refusal);
+        }
         if self.enabled {
             return Err(SessionRefusal::CoreOn);
         }
@@ -1281,7 +1325,11 @@ mod tests {
     }
 
     // story 148: start while Core is ON is refused before anything is
-    // touched — no window, no doc write.
+    // touched — no window, no doc write. macOS-only since the 2026-11-15
+    // hotfix: sessions only exist where Core cannot (the macOS mirror is
+    // pinned by the wire retirement tests; off the Mac the PLATFORM gate
+    // answers first — see off_macos_start_refuses_the_platform below).
+    #[cfg(target_os = "macos")]
     #[test]
     fn start_refuses_while_core_is_enabled() {
         let dir = tempfile::tempdir().unwrap();
@@ -1298,7 +1346,8 @@ mod tests {
 
     // A successful start persists the absolute window FIRST and clears a
     // stale end record (the end state belongs to the session the user
-    // sees; story 145).
+    // sees; story 145). macOS-only since the 2026-11-15 hotfix.
+    #[cfg(target_os = "macos")]
     #[test]
     fn start_persists_the_window_and_clears_stale_end_records() {
         let dir = tempfile::tempdir().unwrap();
@@ -1405,7 +1454,10 @@ mod tests {
     }
 
     // Restore with a past deadline: expired at the deadline, doc settled,
-    // nothing held — never an infinite hold (story 146).
+    // nothing held — never an infinite hold (story 146). macOS-only since
+    // the 2026-11-15 hotfix: off the Mac ANY session record is discarded
+    // before the deadline logic runs (see the off-macOS twin below).
+    #[cfg(target_os = "macos")]
     #[test]
     fn restore_records_an_expired_deadline_and_settles_the_doc() {
         let dir = tempfile::tempdir().unwrap();
@@ -1435,6 +1487,69 @@ mod tests {
         assert!(!state.session_active(), "the session record is discarded");
         assert_eq!(state.last_ended_at, None, "no end record for a session that never ran");
         assert_eq!(state.last_end_reason, None);
+    }
+
+    // Core Session is macOS-only (2026-11-15): off the Mac the start is
+    // refused at the ONE gate BEFORE any other rule — Core ON or OFF makes
+    // no difference, the doc and the state are untouched.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_macos_start_refuses_the_platform_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = CoreState::restore(dir.path());
+        assert_eq!(
+            state.start_session(dir.path(), 3600, 1000),
+            Err(SessionRefusal::Platform),
+            "the platform gate answers first"
+        );
+        assert!(!state.session_active());
+        assert!(!state.held(), "nothing was asserted");
+        assert_eq!(
+            load_doc(dir.path()),
+            (false, None),
+            "the doc is untouched — not even created"
+        );
+        // Even with Core ON (the legacy v1.7.7 story-148 setup) the answer
+        // is the platform refusal, never the conflict.
+        save_doc(dir.path(), true, None).unwrap();
+        state.enabled = true;
+        assert_eq!(
+            state.start_session(dir.path(), 3600, 1000),
+            Err(SessionRefusal::Platform),
+            "the platform gate precedes the CoreOn defense"
+        );
+        assert!(state.enabled(), "Core is untouched");
+        assert_eq!(load_doc(dir.path()), (true, None), "the doc is untouched");
+    }
+
+    // The off-macOS twin of the macOS migration: a session record left in
+    // the document (a v1.7.7-era leftover) is discarded at restore —
+    // persisted clean, nothing asserted, no end record (it never ran on
+    // this platform). The state must never silently hold off its platform.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_macos_restore_discards_a_session_record() {
+        let dir = tempfile::tempdir().unwrap();
+        save_doc(dir.path(), false, Some(SessionWindow { started_at: 100, ends_at: 100_000 }))
+            .unwrap();
+        let state = CoreState::restore_with_clock(dir.path(), 200);
+        assert!(!state.session_active(), "the record is discarded, never held");
+        assert!(!state.held(), "nothing is asserted");
+        assert_eq!(state.last_ended_at, None, "no end record: it never ran here");
+        assert_eq!(state.last_end_reason, None);
+        assert_eq!(
+            load_doc(dir.path()),
+            (false, None),
+            "the doc is persisted clean for the next reader"
+        );
+        // A past deadline is discarded the same way — the deadline logic is
+        // macOS-only now.
+        save_doc(dir.path(), false, Some(SessionWindow { started_at: 100, ends_at: 200 }))
+            .unwrap();
+        let state = CoreState::restore_with_clock(dir.path(), 300);
+        assert!(!state.session_active());
+        assert_eq!(state.last_end_reason, None, "no expiry record off the Mac");
+        assert_eq!(load_doc(dir.path()), (false, None), "the doc is settled");
     }
 
     // macOS twin (#113): the BOTH-holds hand-edit migrates the flag off and
@@ -1512,59 +1627,10 @@ mod tests {
     }
 
 
-    // ---- Windows session backend (#112): the SAME state machine, the
-    // SetThreadExecutionState hold. The session owns WHEN the untouched
-    // v1.7.5 backend is taken and dropped — nothing else.
-    //
-    // State-before-RED assumptions (#112): the hold is thread-local, the
-    // session's stop/expiry ends the hold thread cleanly (a stuck join
-    // would hang this test), and the honest caveat is worded for the
-    // session ("Core Session"), not for Core.
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_session_holds_stops_and_carries_the_session_lid_caveat() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut state = CoreState::restore_with_clock(dir.path(), unix_now());
-        state.start_session(dir.path(), 3600, unix_now()).unwrap();
-        assert!(
-            state.held(),
-            "the session holds the idle-sleep block: {:?}",
-            state.instruction
-        );
-        let caveat = state
-            .view()["instruction"]
-            .as_str()
-            .expect("the session caveat is the honest Windows state, never silence")
-            .to_string();
-        assert!(!caveat.is_empty());
-        assert!(
-            caveat.contains("Core Session"),
-            "the caveat is worded for the session: {caveat}"
-        );
-
-        state.stop_session(dir.path(), unix_now()).unwrap();
-        assert!(!state.held(), "stop releases the hold");
-        assert_eq!(state.view()["instruction"], Value::Null);
-
-        // The previous hold's thread really finished — re-asserting works.
-        state.start_session(dir.path(), 60, unix_now()).unwrap();
-        assert!(state.held(), "a session after a stop holds again");
-        state.stop_session(dir.path(), unix_now()).unwrap();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_session_expiry_releases_the_hold() {
-        let dir = tempfile::tempdir().unwrap();
-        let now = unix_now();
-        let mut state = state_with_session(now, now.saturating_sub(1)); // already due
-        state.take_hold();
-        assert!(state.held(), "the hold is taken: {:?}", state.instruction);
-        assert!(state.expire_if_due(dir.path(), now), "the tick expires it");
-        assert!(!state.held(), "expiry released the hold");
-        assert_eq!(state.last_end_reason, Some(END_REASON_EXPIRED));
-    }
+    // ---- Windows session backend (#112): retired with the macOS-only gate
+    // (2026-11-15) — the hold/release machinery stays pinned by the
+    // macOS-gated tests, and the off-macOS refusal + discard twins above
+    // run HERE on Windows (this platform's new truth for sessions).
 
     #[cfg(target_os = "windows")]
     #[test]
