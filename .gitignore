@@ -47,5 +47,8 @@ src-tauri/binaries/
 brag-output/
 brag-output-*/
 
+# /hyperframes video projects (local only)
+.hyperframes/
+
 # Content drafts (WRITES skills, local only)
-/CrystalPlatforms-umux/
+/writes-content/
