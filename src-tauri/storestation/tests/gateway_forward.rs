@@ -461,3 +461,90 @@ fn stop_against_an_app_served_socket_is_honest() {
     stop.store(true, Ordering::SeqCst);
     handle.join().expect("the gateway loop ends cleanly");
 }
+
+/// THE 2026-11-15 HITL regression: the executor connection is ALSO the
+/// session driver — declaring `{"executor":true}` at hello must NOT turn
+/// the connection ops-blind. The v1.8.0 executor-only refusal answered
+/// every sessions.create with `unknownOp`, the desktop app silently fell
+/// back in-process, and Storestation owned ZERO sessions on every platform
+/// (the whole "Storestation doesn't work / 0 sessions" report). The demux
+/// stays unambiguous by construction: frames carrying "ok" are forward
+/// answers (relayed before request parsing), frames carrying "op" are
+/// requests dispatched normally.
+#[test]
+fn an_executor_connection_sends_daemon_domain_ops() {
+    let daemon = Daemon::start();
+    wait_until_answering(daemon.path());
+
+    // The app-shaped connection: executor capability at hello, then the
+    // session-driver ops a panel open runs.
+    let mut app = Raw::connect_as(daemon.path(), true);
+    let reply = app.request(
+        "sessions.create",
+        json!({
+            "id": "executor-open-1",
+            "cols": 80,
+            "rows": 24,
+            "workspaceId": "ws-1",
+            "tabId": "tab-1",
+            "panelId": "panel-1",
+        }),
+    );
+    assert_eq!(
+        reply["ok"], true,
+        "the executor connection opens a session: {reply}"
+    );
+    assert_eq!(reply["result"]["id"], "executor-open-1", "{reply}");
+
+    let reply = app.request("sessions.list", json!({ "limit": 10 }));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let ids: Vec<&str> = reply["result"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .filter_map(|s| s["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"executor-open-1"),
+        "the daemon OWNS the executor-opened session: {reply}"
+    );
+
+    // A plain CLI client still works beside the executor — and it SEES the
+    // session too (one registry, one truth).
+    let mut cli = Raw::connect(daemon.path());
+    let reply = cli.request("sessions.list", json!({ "limit": 10 }));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let ids: Vec<&str> = reply["result"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .filter_map(|s| s["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"executor-open-1"),
+        "a plain client sees the executor-opened session: {reply}"
+    );
+
+    // App-domain ops from the executor connection itself still forward —
+    // through its own connection: the daemon wraps it back to the executor,
+    // the witness plays the bridge (answers the forward), and the relayed
+    // answer carries the ASKER's id. The handler runs daemon-side on its own
+    // thread in the real app — no deadlock by construction.
+    let ask_id = 500u64;
+    app.send(&json!({ "id": ask_id, "op": "workspaces.list", "params": {} }));
+    let forward = app.recv_control();
+    assert_eq!(
+        forward.get("op").and_then(Value::as_str),
+        Some("workspaces.list"),
+        "the daemon wraps the app-domain op back to the executor: {forward}"
+    );
+    let forward_id = forward["id"].as_u64().unwrap_or(0);
+    app.send(&json!({
+        "id": forward_id,
+        "ok": true,
+        "result": { "executed": true },
+    }));
+    let reply = app.recv_control();
+    assert_eq!(reply["id"], json!(ask_id), "{reply}");
+    assert_eq!(reply["ok"], true, "self-forwarded app-domain op answers: {reply}");
+}

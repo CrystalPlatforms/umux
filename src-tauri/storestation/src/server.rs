@@ -476,8 +476,11 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
 
     let mut handshaked = false;
     // Set at hello when the client declares itself the gateway executor
-    // (#126): its control frames are then ANSWERS to forwarded requests,
-    // and its death unregisters the executor slot and fails the forwards.
+    // (#126): frames carrying "ok" are then ANSWERS to forwarded requests
+    // (relayed before request parsing), ops parse normally — the one
+    // connection is both the session driver and the executor (HITL fix
+    // 2026-11-15) — and its death unregisters the executor slot and fails
+    // the forwards.
     let mut executor_seq: Option<u64> = None;
     loop {
         let frame = match read_frame(&mut reader) {
@@ -562,17 +565,17 @@ fn handle_connection(stream: transport::Stream, state: Arc<ServeState>) {
             continue;
         }
 
-        // An executor connection sends no ops of its own after hello (it
-        // only answers) — anything else is refused, the connection stays.
-        if executor_seq.is_some() {
-            let err = ErrorObj::new(
-                codes::UNKNOWN_OP,
-                "this connection is the gateway executor — it answers forwarded requests, it does not send ops",
-                vec![],
-            );
-            let _ = outbound.send(Outbound::Control(response_err(request.id, &err)));
-            continue;
-        }
+        // An executor connection SENDS OPS like any client since the HITL fix
+        // 2026-11-15: the desktop app's ONE connection is both the session
+        // driver and the gateway executor (session_driver.rs pins exactly
+        // that design), and the v1.8.0 executor-only refusal broke every
+        // panel open — sessions.create answered unknownOp, the app fell back
+        // in-process silently, and Storestation owned zero sessions on every
+        // platform. The demux stays unambiguous: frames carrying "ok" are
+        // forward answers (relayed above), frames carrying "op" are requests
+        // — dispatched normally below, including app-domain ones (a forward
+        // to the executor itself executes through the frontend bridge, on
+        // its own thread — no deadlock).
 
         // App-domain ops (#126) forward to the registered executor; the
         // answer comes back asynchronously through complete_forward. With
