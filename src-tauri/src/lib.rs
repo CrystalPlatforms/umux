@@ -2267,6 +2267,26 @@ pub fn run() {
                     log::warn!("[accelerators] with_webview failed: {e}");
                 }
             }
+            // HITL fix 2026-11-15 (the Windows zombie): the notification-banner
+            // window (#118) lives HIDDEN for the app's whole lifetime, so when
+            // the main window was destroyed the event loop still had a living
+            // window and never ended — the process stayed alive window-less
+            // (only the single-instance helper remained) and every later
+            // launch was silently swallowed by the single-instance forward.
+            // When the main window is gone, the app IS over: exit cleanly, so
+            // the RunEvent::Exit path (gateway socket/pid cleanup) still runs.
+            // macOS/Linux are unaffected there (the banner is Windows-only,
+            // #118) — the guard is unconditional and harmless everywhere.
+            {
+                let handle = app.handle().clone();
+                if let Some(win) = app.get_webview_window("main") {
+                    win.on_window_event(move |event| {
+                        if matches!(event, tauri::WindowEvent::Destroyed) {
+                            handle.exit(0);
+                        }
+                    });
+                }
+            }
             // #118: the umux notification banner window (Windows only —
             // macOS keeps its NATIVE notifications, whose click now
             // navigates via the mac-notification-sys delegate, #119; Linux
