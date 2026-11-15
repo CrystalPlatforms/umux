@@ -153,6 +153,18 @@ jobs:
           gh release upload "$TAG" --clobber umux_universal.dmg \
             --repo "$GITHUB_REPOSITORY"
 
+      # Ręczne przebiegi (workflow_dispatch) nie tworzą release'a — ten krok
+      # zostawia zbudowane pakiety jako artefakty runa (np. test-build przed
+      # shipem), tak jak po stronie Linuxa.
+      - name: Upload pakietów macOS jako artefaktów runa
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-packages
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: error
+
   # v1.0 Phase 10 / #34: trzecia platforma w macierzy release'u.
   # Windows buduje przez ConPTY-ready backend (v1.0 Phase 9 / #33);
   # runner windows-latest ma MSVC, Rust i WebView2 out-of-the-box.
@@ -211,3 +223,13 @@ jobs:
           Copy-Item $exe.FullName umux_x64-setup.exe
           gh release upload $env:TAG --clobber umux_x64-setup.exe `
             --repo $env:GITHUB_REPOSITORY
+
+      # Ręczne przebiegi (workflow_dispatch) nie tworzą release'a — ten krok
+      # zostawia instalator NSIS jako artefakt runa (np. test-build przed
+      # shipem), tak jak po stronie Linuxa.
+      - name: Upload pakietów Windows jako artefaktów runa
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
