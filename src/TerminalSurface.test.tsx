@@ -19,6 +19,11 @@ import { render, waitFor, act } from '@testing-library/react'
 
 const PANEL_ID = 42
 
+// The lazy-terminal-boot probe (quickupdate 2026-11-18): how many times the
+// mocked Terminal engine was CONSTRUCTED. vi.hoisted because the mock
+// factories below are hoisted above this file's consts.
+const lazyProbe = vi.hoisted(() => ({ constructed: 0 }))
+
 const invokeMock = vi.fn()
 let outputHandler: ((e: { payload: { id: number; data: string } }) => void) | null = null
 let sshExitHandler: ((e: { payload: { id: number; error: string | null } }) => void) | null = null
@@ -63,6 +68,7 @@ vi.mock('@xterm/xterm', () => ({
     rows = 24
     constructor(opts?: { fontFamily?: string }) {
       terminalOpts = opts ?? null
+      lazyProbe.constructed++
     }
     loadAddon() {}
     open() {}
@@ -97,6 +103,22 @@ describe('TerminalSurface', () => {
     outputHandler = null
     sshExitHandler = null
     sshOpenError = null
+    lazyProbe.constructed = 0
+  })
+
+  // Lazy terminal boot (quickupdate 2026-11-18, the speed HITL): the panel's
+  // own DOM paints BEFORE the xterm engine finishes loading — the app shell
+  // never waits on the terminal module. With the old static import the
+  // constructor ran synchronously inside the mount effect, i.e. inside
+  // render(): constructed would already be 1 here.
+  it('paints the panel before the xterm module lands, then boots the engine', async () => {
+    const { container } = render(<TerminalSurface cwd="/x" />)
+    expect(container.firstElementChild).not.toBeNull()
+    expect(lazyProbe.constructed).toBe(0)
+    await waitFor(() => expect(lazyProbe.constructed).toBe(1))
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('pty_open', expect.anything()),
+    )
   })
 
   it('opens a PTY on mount', async () => {
@@ -120,6 +142,9 @@ describe('TerminalSurface', () => {
   it('configures xterm with the platform terminal font stack', async () => {
     render(<TerminalSurface />)
 
+    // The engine boots asynchronously (lazy terminal boot), so the options
+    // land after the module load — wait for the constructor to have run.
+    await waitFor(() => expect(terminalOpts).not.toBeNull())
     expect(terminalOpts?.fontFamily).toContain('ui-monospace')
     expect(terminalOpts?.fontFamily).toContain('monospace')
     // `monospace` alone would be the regression: it must be the LAST resort

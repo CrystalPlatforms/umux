@@ -131,7 +131,7 @@ const FIXTURE: FixtureRow[] = [
   { area: 'System actions', action: 'inline rename inputs', command: 'UI-only exception (plan Appendix)', uiOnly: true },
   { area: 'System actions', action: 'drag ghost / insertion-line visuals', command: 'UI-only exception (plan Appendix)', uiOnly: true },
   { area: 'System actions', action: 'sidebar drag handle itself (width is the persisted counterpart)', command: 'UI-only exception — settings set sidebar-width is the persisted counterpart', uiOnly: true },
-  { area: 'System actions', action: 'splash / banner transient states', command: 'UI-only exception (plan Appendix)', uiOnly: true },
+  { area: 'System actions', action: 'banner transient states', command: 'UI-only exception (plan Appendix)', uiOnly: true },
 ]
 
 // --- the harness -------------------------------------------------------------
@@ -234,12 +234,21 @@ describe('parity fixture (#128 — the plan Appendix inventory)', () => {
     const uiOnly = FIXTURE.filter((r) => r.uiOnly)
     // The plan Appendix names these four groups verbatim; the fixture keeps
     // them visible so a command never grows for a screen-only state by
-    // accident.
-    for (const must of ['inline rename inputs', 'drag ghost', 'sidebar drag handle', 'splash / banner transient states']) {
+    // accident. (The splash window left with quickupdate 2026-11-18 — the
+    // banner transient states stand alone now.)
+    for (const must of ['inline rename inputs', 'drag ghost', 'sidebar drag handle', 'banner transient states']) {
       expect(
         uiOnly.some((r) => r.action.includes(must)),
         `the plan's UI-only exception "${must}" must stay in the fixture`,
       ).toBe(true)
+    }
+    // The splash window is GONE: no fixture row may still describe it, so
+    // the documented surface never outlives the app.
+    for (const row of FIXTURE) {
+      expect(
+        row.action.toLowerCase().includes('splash'),
+        `the splash window was removed (quickupdate 2026-11-18) — row "${row.action}" still mentions it`,
+      ).toBe(false)
     }
     // Every UI-only row still says WHY (its command field is the reason).
     for (const row of uiOnly) {

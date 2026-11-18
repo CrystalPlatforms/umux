@@ -391,27 +391,13 @@ async fn panel_processes(
     .map_err(|e| e.to_string())?
 }
 
-// --- Splashscreen handoff (quickupdate 2026-09-13) ---------------------------
+// --- Splashscreen removal (quickupdate 2026-11-18) ---------------------------
 //
-// The splash window is visible from process start (it is a static page, so it
-// paints immediately); the MAIN window starts hidden so the app never shows a
-// half-booted UI. The frontend invokes this once its boot work is done (workspaces
-// + settings loaded, session restore applied), which closes the splash and
-// reveals the main window. Idempotent: a missing window label is fine, and a
-// second call just re-shows the (already visible) main window.
-
-#[tauri::command]
-fn close_splashscreen(app: AppHandle) {
-    // The splash is the gate: a call with the splash already gone (a dev-HMR
-    // reload re-runs the frontend boot effect) must not steal focus back.
-    if let Some(splash) = app.get_webview_window("splashscreen") {
-        let _ = splash.close();
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.show();
-            let _ = main.set_focus();
-        }
-    }
-}
+// The splash window (and its fixed 2 s beat) is gone: the main window is
+// visible from process start, so the app simply appears as soon as the OS
+// paints it. The frontend boot (workspaces + settings) still completes
+// before the first panel mounts — that ordering never depended on the
+// splash, only on the boot effect's own sequencing.
 
 // --- Sidebar tab metadata: git branch (v1.0 Phase 14 / #41) -------------------
 //
@@ -2082,8 +2068,8 @@ pub fn run() {
     // callback runs in the FIRST instance: bring its main window to
     // the front, so `umux attach` and a second launch are both
     // idempotent focuses. A failure to find the window (still
-    // splashing) is a silent no-op — the splash handoff will show it
-    // a moment later anyway.
+    // booting) is a silent no-op — the window is visible from
+    // process start and will be there a moment later anyway.
     //
     // Dev builds skip the plugin entirely (2026-10-02): the macOS lock is a
     // /tmp socket keyed by the app identifier alone, so `tauri dev` and the
@@ -2157,7 +2143,6 @@ pub fn run() {
             list_shells,
             open_settings_file,
             updater_status,
-            close_splashscreen,
             cmux_import::read_cmux_import_sources,
         ]);
 
@@ -2183,13 +2168,11 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         // Window geometry persistence (quickupdate 2026-09-18): size, position,
         // maximized and fullscreen are saved when the app exits and restored at
-        // window creation — while the splash is still up and the main window is
-        // hidden — so the close_splashscreen reveal already shows the restored
-        // geometry. VISIBLE is deliberately NOT tracked: visibility is the
-        // splash handoff's job (the main window must stay hidden until boot
-        // completes), and DECORATIONS is not user-adjustable in umux. The
-        // splash keeps its fixed centered look via the denylist, which also
-        // stops the plugin from saving its 320x220 box.
+        // window creation, so the app reappears exactly as it was left. VISIBLE
+        // is deliberately NOT tracked: the main window is visible from process
+        // start since the splash removal (quickupdate 2026-11-18), and
+        // DECORATIONS is not user-adjustable in umux. The denylist stops the
+        // plugin from ever saving the hidden Windows banner window's box.
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(
@@ -2198,7 +2181,7 @@ pub fn run() {
                         | tauri_plugin_window_state::StateFlags::MAXIMIZED
                         | tauri_plugin_window_state::StateFlags::FULLSCREEN,
                 )
-                .with_denylist(&["splashscreen", "notification-banner"])
+                .with_denylist(&["notification-banner"])
                 .build(),
         );
 

@@ -1686,12 +1686,18 @@ export function WorkspaceShell() {
   // is surfaced instead of silent. Dismissible; cleared on dismiss.
   const [fallbackMessage, setFallbackMessage] = useState<string | null>(null)
 
+  // Boot skeletons (quickupdate 2026-11-18, cold-start polish): false until
+  // load_workspaces/load_settings resolve — the sidebar flashes placeholder
+  // rows instead of an empty rail for those fractions of a second.
+  const [booted, setBooted] = useState(false)
+
   // Boot (#27 + #29): workspaces and settings load TOGETHER, and panels mount
   // only after both resolve — the session-restore toggle decides whether a
   // restored panel receives its saved cwd at PTY-open time (the surface
   // consumes cwd once, at mount), so it must be known before the first mount.
+  // (The splash handoff left with quickupdate 2026-11-18: the window is
+  // visible from process start; this effect only sequences the panel mount.)
   useEffect(() => {
-    let splashTimer: number | null = null
     void Promise.all([
       invoke<{
         workspaces: Workspace[]
@@ -1719,21 +1725,10 @@ export function WorkspaceShell() {
           data.order ?? [],
         ),
       )
-      // Splashscreen handoff (quickupdate 2026-09-13): boot is done — settings
-      // and workspaces are in state, so the panels mount on this very commit.
-      // The splash stays up a fixed 2 s BEAT after boot (Adam: let it actually
-      // be seen) before close_splashscreen reveals the main window; the app is
-      // fully usable behind it the whole time. Cleared on unmount so a dev-HMR
-      // teardown never fires a stale close.
-      splashTimer = window.setTimeout(() => {
-        void invoke('close_splashscreen').catch((e) =>
-          console.error('close_splashscreen failed:', e),
-        )
-      }, 2_000)
+      // Boot is done — the skeletons give way to the real tree (or to the
+      // onboarding empty state on a fresh store).
+      setBooted(true)
     })
-    return () => {
-      if (splashTimer != null) window.clearTimeout(splashTimer)
-    }
   }, [])
 
   /// Apply a settings patch (v0.2 Phase 3 / #27): update local state, persist
@@ -3670,6 +3665,22 @@ export function WorkspaceShell() {
 
         {/* position: relative (CSS) — the live drag line anchors here. */}
         <ul className="workspace-list" ref={listRef}>
+          {/* Boot skeletons (quickupdate 2026-11-18): a handful of placeholder
+              rows for the fractions of a second before the store lands — the
+              rail never looks broken-empty during a cold start. Decorative
+              (aria-hidden), inert (no pointer events, no test ids the rest of
+              the shell could ever trip over). */}
+          {!booted &&
+            Array.from({ length: 5 }, (_, i) => (
+              <li
+                key={`boot-skeleton-${i}`}
+                className="workspace-row skeleton-row"
+                aria-hidden="true"
+              >
+                <span className="skeleton-dot" />
+                <span className="skeleton-line" style={{ width: `${78 - i * 9}%` }} />
+              </li>
+            ))}
           {/* The sidebar renders the FLATTENED tree (#48): groups and their
               workspaces interleaved in the shared order, depth driving the
               indentation. */}

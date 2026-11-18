@@ -14,6 +14,12 @@ ensureFullscreenViewport()
 // owns the styles and the flash behavior.
 installOverlayScrollbars()
 
+// The boot shell (index.html) painted the app colors while this bundle was
+// loading; the mount below renders over the same spot — take the skeleton
+// out in the same task so the swap never shows through (quickupdate
+// 2026-11-18, the splash removal's no-white-frame rule).
+document.getElementById('boot')?.remove()
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />

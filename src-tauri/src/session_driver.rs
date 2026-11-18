@@ -306,6 +306,16 @@ impl DaemonConnectError {
     }
 }
 
+/// Whether the self-heal's spawn attempt can fix this connect failure
+/// (quickupdate 2026-11-18): OFFLINE is the ONE such failure — nothing
+/// answers the socket, so starting the bundled daemon is exactly the
+/// remedy. A gate refusal or a transport error describes a socket that
+/// IS served (somebody's daemon, wedged or newer); spawning into it could
+/// only collide — the honest answer there stays fallback + backoff.
+fn a_spawn_could_fix(e: &DaemonConnectError) -> bool {
+    matches!(e, DaemonConnectError::Offline)
+}
+
 /// Map the client crate's connect error onto the typed outcome. A protocol
 /// MAJOR mismatch is a gate refusal (protoTooNew = the daemon is newer than
 /// this client, protoTooOld = the daemon cannot serve this client's major).
@@ -935,6 +945,25 @@ impl RouterDriver {
         }
     }
 
+    /// Install a freshly connected daemon driver as THE daemon face
+    /// (shared by the plain lazy connect and the self-heal's retry).
+    fn install_daemon(&self, driver: DaemonDriver) -> bool {
+        *self.daemon.lock().expect("router daemon lock") = Some(driver);
+        self.record_connect_outcome(Ok(()));
+        true
+    }
+
+    /// Record a failed connect attempt (the Settings gate card + the retry
+    /// backoff), shared by every failure arm of [`Self::ensure_daemon`].
+    fn record_failed_connect(&self, e: &DaemonConnectError) {
+        self.record_connect_outcome(Err(e));
+        *self.connect_failed_at.lock().expect("router backoff lock") =
+            Some(std::time::Instant::now());
+        if e.is_gate() {
+            log::warn!("Storestation daemon gate refusal: {}", e.message());
+        }
+    }
+
     /// The usable daemon connection, CONNECTING LAZILY when needed (HITL
     /// fix 2026-09-20, macOS): the phase-4 startup rule — an app relaunch
     /// with the setting ON must rebind panels to their live daemon
@@ -942,6 +971,18 @@ impl RouterDriver {
     /// connection up (the toggle-time connection died with the previous
     /// app process). `false` = no usable daemon right now; the caller
     /// falls back in-process.
+    ///
+    /// The SELF-HEAL (quickupdate 2026-11-18, the macOS HITL report): when
+    /// the connect fails because NOTHING answers the socket — a reboot
+    /// without the opt-in autostart, a daemon crash, a machine restored
+    /// from sleep — the app itself brings the bundled daemon up and
+    /// retries, exactly like the Settings toggle's verified flow. Before
+    /// this rule the app only ever CONNECTED: with the switch ON but the
+    /// daemon absent, every panel silently landed in-process forever and
+    /// Storestation did nothing in practice (the terminals died with the
+    /// window). Only the OFFLINE outcome spawns; a gate refusal or a
+    /// transport error describes a socket that IS served — spawning into
+    /// it could only collide ([`Self::a_spawn_could_fix`]).
     fn ensure_daemon(&self) -> bool {
         if self.with_daemon(|_| ()).is_some() {
             return true;
@@ -953,18 +994,24 @@ impl RouterDriver {
             }
         }
         match DaemonDriver::connect() {
-            Ok(driver) => {
-                *self.daemon.lock().expect("router daemon lock") = Some(driver);
-                self.record_connect_outcome(Ok(()));
-                true
+            Ok(driver) => self.install_daemon(driver),
+            Err(ref e) if a_spawn_could_fix(e) => {
+                // Nothing answers — bring the bundled daemon up (idempotent:
+                // a daemon that started between the probe and the spawn is
+                // just used), then connect again. Any failure lands in the
+                // SAME honest outcome as before: the backoff takes over and
+                // the open falls back in-process.
+                let _ = crate::spawn_daemon_if_absent();
+                match DaemonDriver::connect() {
+                    Ok(driver) => self.install_daemon(driver),
+                    Err(e) => {
+                        self.record_failed_connect(&e);
+                        false
+                    }
+                }
             }
             Err(e) => {
-                self.record_connect_outcome(Err(&e));
-                *self.connect_failed_at.lock().expect("router backoff lock") =
-                    Some(std::time::Instant::now());
-                if e.is_gate() {
-                    log::warn!("Storestation daemon gate refusal: {}", e.message());
-                }
+                self.record_failed_connect(&e);
                 false
             }
         }
@@ -1304,6 +1351,27 @@ mod connect_error_tests {
             assert!(matches!(e, DaemonConnectError::Other { .. }));
             assert!(!e.is_gate());
         }
+    }
+
+    // The self-heal policy (quickupdate 2026-11-18): OFFLINE is the ONE
+    // failure a spawn can fix — nothing answers the socket, so starting the
+    // bundled daemon is exactly the remedy. A GATE refusal (a newer daemon,
+    // a malformed handshake) or a transport error describes a socket that
+    // IS served; spawning into it can only collide, never heal.
+    #[test]
+    fn only_offline_is_worth_a_spawn() {
+        let offline = map_connect_error(umux_storestation::client::ConnectError::NotRunning {
+            stale: false,
+        });
+        let gate = DaemonConnectError::Gate {
+            message: "fixture refusal".into(),
+        };
+        let other = DaemonConnectError::Other {
+            message: "fixture".into(),
+        };
+        assert!(a_spawn_could_fix(&offline), "offline: nothing answers — spawn can fix it");
+        assert!(!a_spawn_could_fix(&gate), "a gate refusal must never trigger a spawn");
+        assert!(!a_spawn_could_fix(&other), "a transport error must never trigger a spawn");
     }
 }
 

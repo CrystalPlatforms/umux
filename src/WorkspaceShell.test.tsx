@@ -209,6 +209,23 @@ describe('WorkspaceShell', () => {
     ).toBeInTheDocument()
   })
 
+  // Boot skeletons (quickupdate 2026-11-18, the cold-start HITL): while
+  // load_workspaces is in flight the sidebar flashes placeholder rows — never
+  // an empty rail — and gives way to the real tree the moment the data lands.
+  it('flashes sidebar skeleton rows until the workspaces land', async () => {
+    const { container } = render(<WorkspaceShell />)
+
+    // Before the boot invoke resolves: skeletons, and ONLY skeletons.
+    const skeletons = container.querySelectorAll('.skeleton-row')
+    expect(skeletons.length).toBeGreaterThan(0)
+    expect(container.querySelector('.workspace-row:not(.skeleton-row)')).toBeNull()
+
+    // The data lands: the skeletons give way (an empty store shows none).
+    await waitFor(() =>
+      expect(container.querySelectorAll('.skeleton-row').length).toBe(0),
+    )
+  })
+
   // Phase 17 / Issue #18 — onboarding empty state. A fresh install (no
   // workspaces) shows a friendly welcome in the main area that guides the
   // user to create their first workspace.

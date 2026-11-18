@@ -13,15 +13,32 @@
 // testable core of this slice lives in PtyService (Rust, cargo tests).
 
 import { useEffect, useRef, useState } from 'react'
-import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { WebglAddon } from '@xterm/addon-webgl'
+// TYPE-ONLY import (quickupdate 2026-11-18): the runtime engine arrives
+// lazily — see loadTerminalEngine below. The static import used to pull all
+// of xterm.js into the app's FIRST parse, so the whole UI waited on the
+// terminal library before painting anything.
+import type { Terminal as XTerm } from '@xterm/xterm'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import '@xterm/xterm/css/xterm.css'
 import { clipboardAction } from './clipboardShortcut'
 import { WriteBatcher } from './WriteBatcher'
 import { canUseWebglRenderer } from './gpuRenderer'
+
+// Lazy terminal engine (quickupdate 2026-11-18, the boot-speed HITL): the
+// app shell must paint before the terminal library parses. xterm.js + the
+// fit/webgl addons are the heaviest modules umux ships; loading them on the
+// FIRST panel mount — a microtask after the first paint — moves hundreds of
+// milliseconds of parse work OFF the critical path of opening the window.
+// The CSS stays static (tiny, and the terminal area is styled from the first
+// frame). Subsequent mounts hit the module cache: no second load, ever.
+function loadTerminalEngine() {
+  return Promise.all([
+    import('@xterm/xterm'),
+    import('@xterm/addon-fit'),
+    import('@xterm/addon-webgl'),
+  ] as const)
+}
 
 // Decode the base64 `pty_output` payload (perf audit 2026-09-05: the wire used
 // to carry a JSON array of numbers — ~4x the bytes per chunk and much slower
@@ -105,7 +122,7 @@ export function TerminalSurface({
   const containerRef = useRef<HTMLDivElement>(null)
   // The live xterm instance, surfaced so the `focused` prop below can pull
   // keyboard focus into it (the instance is created inside the mount effect).
-  const termRef = useRef<Terminal | null>(null)
+  const termRef = useRef<XTerm | null>(null)
   // A connection failure (sync ssh_open rejection, or an async `ssh_exit` event
   // carrying a failure message) sets this; the panel then shows a clear error
   // instead of a blank, dead surface (Phase 16 / Issue #17, AC1 + AC2).
@@ -115,333 +132,352 @@ export function TerminalSurface({
     const container = containerRef.current
     if (container == null) return
 
-    const term = new Terminal({
-      fontFamily: TERMINAL_FONT,
-      fontSize: 14,
-      // Bounded scrollback (Phase 20 / #21, AC2): cap retained lines so a long
-      // heavy-output session can't grow memory without limit. xterm's default
-      // is 1000; we set it explicitly so the cap is intentional, not accidental.
-      scrollback: 1000,
-    })
-    termRef.current = term
-    const fit = new FitAddon()
-    term.loadAddon(fit)
-    term.open(container)
+    // The engine load is ASYNC now, so the effect's real teardown is built
+    // inside the continuation. The synchronous cleanup only flips the flags:
+    // `cancelled` aborts a continuation that has not built anything yet
+    // (StrictMode's double mount in dev), `teardown` releases everything the
+    // continuation did build.
+    let cancelled = false
+    let teardown: (() => void) | null = null
 
-    // GPU renderer (perf audit 2026-09-05): xterm's default DOM renderer
-    // touches layout per painted cell; the WebGL addon draws the viewport on
-    // the GPU, which is the difference between smooth and janky output on
-    // Windows WebView2. Only CHROMIUM-based webviews get it: Apple WebKit
-    // (macOS WKWebView) and WebKitGTK (Linux) create the WebGL context but
-    // paint a black canvas — prompt invisible, keystrokes still work
-    // (xtermjs/xterm.js#3575, macOS regression 2026-09-07). On Chromium
-    // context loss (GPU reset, driver churn, or too many live contexts once
-    // many panels are open) the addon is dropped and xterm falls back to the
-    // DOM renderer — degraded but never broken.
-    let webgl: WebglAddon | undefined
-    if (canUseWebglRenderer(navigator.userAgent)) {
-      try {
-        webgl = new WebglAddon()
-        webgl.onContextLoss(() => {
-          webgl?.dispose()
-          webgl = undefined
-        })
-        term.loadAddon(webgl)
-      } catch {
-        webgl = undefined // no usable WebGL: the DOM renderer still works
-      }
-    }
+    const boot = async () => {
+      const [{ Terminal }, { FitAddon }, { WebglAddon }] = await loadTerminalEngine()
+      if (cancelled) return
 
-    // Ctrl+Shift+C copies the current selection to the clipboard instead of
-    // reaching the shell; Ctrl+Shift+V pastes (HITL 2026-09-10 — the chord
-    // used to sit on split-vertical, so pasting split the pane); everything
-    // else (including plain Ctrl+C, which must stay SIGINT, and plain
-    // Ctrl+V, xterm's native paste) passes through to the PTY (Phase 19 /
-    // HITL). Returning false swallows the key from xterm so it is not
-    // forwarded via onData.
-    term.attachCustomKeyEventHandler((event) => {
-      if (event.type !== 'keydown') return true
-      const action = clipboardAction(event)
-      if (action === 'copy') {
-        const selection = term.getSelection()
-        if (selection) {
-          // The OS-level clipboard FIRST (HITL 2026-11-07, the Wayland
-          // report: WebKitGTK's webview clipboard is ISOLATED from the
-          // system one — text copied here was invisible to other apps).
-          // The webview API stays as the fallback, so Windows/macOS
-          // behavior is unchanged when the plugin is unreachable.
-          invoke<string>('plugin:clipboard-manager|write_text', { contents: selection })
-            .catch(() => void navigator.clipboard?.writeText(selection))
-        }
-        return false
-      }
-      if (action === 'paste') {
-        // Chromium (WebView2) binds Ctrl+Shift+V to its own native
-        // paste-plain-text command and fires a DOM `paste` event on xterm's
-        // textarea — without preventDefault the text lands TWICE on Windows
-        // (once natively, once via term.paste below). WebKitGTK and macOS
-        // don't bind the chord, so this is a no-op there. Note xterm ignores
-        // this handler's return value for native behavior: `return false`
-        // only stops the key from reaching the PTY, it cannot stop the paste
-        // event. A blocked clipboard read (WebView2 permission) logs and
-        // leaves plain Ctrl+V as the paste path — the key is swallowed
-        // either way.
-        event.preventDefault()
-        const pluginPaste = () =>
-          invoke<string>('plugin:clipboard-manager|read_text', {})
-            .then((text) => {
-              if (text) term.paste(text)
-            })
-            .catch((err: unknown) =>
-              console.error('paste failed (Ctrl+V still works):', err),
-            )
-        navigator.clipboard
-          ?.readText()
-          .then((text) => {
-            // Empty does NOT mean "empty clipboard" on Wayland — WebKitGTK
-            // answers with "" for any SYSTEM clipboard content it cannot
-            // see, so an empty answer falls through to the OS-level read.
-            if (text) term.paste(text)
-            else void pluginPaste()
+      const term = new Terminal({
+        fontFamily: TERMINAL_FONT,
+        fontSize: 14,
+        // Bounded scrollback (Phase 20 / #21, AC2): cap retained lines so a long
+        // heavy-output session can't grow memory without limit. xterm's default
+        // is 1000; we set it explicitly so the cap is intentional, not accidental.
+        scrollback: 1000,
+      })
+      termRef.current = term
+      const fit = new FitAddon()
+      term.loadAddon(fit)
+      term.open(container)
+
+      // GPU renderer (perf audit 2026-09-05): xterm's default DOM renderer
+      // touches layout per painted cell; the WebGL addon draws the viewport on
+      // the GPU, which is the difference between smooth and janky output on
+      // Windows WebView2. Only CHROMIUM-based webviews get it: Apple WebKit
+      // (macOS WKWebView) and WebKitGTK (Linux) create the WebGL context but
+      // paint a black canvas — prompt invisible, keystrokes still work
+      // (xtermjs/xterm.js#3575, macOS regression 2026-09-07). On Chromium
+      // context loss (GPU reset, driver churn, or too many live contexts once
+      // many panels are open) the addon is dropped and xterm falls back to the
+      // DOM renderer — degraded but never broken.
+      let webgl: InstanceType<typeof WebglAddon> | undefined
+      if (canUseWebglRenderer(navigator.userAgent)) {
+        try {
+          webgl = new WebglAddon()
+          webgl.onContextLoss(() => {
+            webgl?.dispose()
+            webgl = undefined
           })
-          .catch(() => void pluginPaste())
-        return false
-      }
-      return true
-    })
-
-    // Fit only when the container actually has size. A hidden workspace is
-    // display:none, so the container reports 0×0 — and the installed
-    // addon-fit CLAMPS that to a degenerate 2×1 terminal (Math.max guards in
-    // proposeDimensions), which SIGWINCHes the shell into a frozen TUI: a
-    // Claude Code agent in a background workspace literally stopped running
-    // until its workspace was revealed again (HITL round 6). Skipping the fit
-    // keeps the last real geometry; the reveal's ResizeObserver pass re-fits.
-    const fitIfVisible = () => {
-      if (container.clientWidth === 0 || container.clientHeight === 0) return
-      fit.fit()
-    }
-
-    fitIfVisible()
-
-    let panelId: number | null = null
-    // Buffer output chunks that arrive before our panel id is known, so we don't
-    // drop the shell's initial prompt due to the open/listen race.
-    const pending: Array<{ id: number; data: string }> = []
-    let disposed = false
-
-    // Pick the command/event family from the transport. A remote panel (sshTarget
-    // set) uses the ssh_* family + ssh_output event; otherwise the local pty_*
-    // family. The two id spaces are disjoint, which is why remote panels need
-    // their own event channel (see lib.rs ssh_open).
-    const isRemote = sshTarget !== undefined
-    const openCmd = isRemote ? 'ssh_open' : 'pty_open'
-    const outputEvent = isRemote ? 'ssh_output' : 'pty_output'
-    const writeCmd = isRemote ? 'ssh_write' : 'pty_write'
-    const resizeCmd = isRemote ? 'ssh_resize' : 'pty_resize'
-    const closeCmd = isRemote ? 'ssh_close' : 'pty_close'
-
-    // Coalesce output chunks (Phase 20 / #21, AC1 + AC2). Under heavy PTY
-    // output the backend fires one `pty_output` event per 4 KB read — hundreds
-    // to thousands per second — and writing each straight to xterm forces a
-    // parse + re-render every time, janking the UI. The batcher groups the
-    // chunks that land inside the same animation frame into ONE term.write, so
-    // the render count drops from N-per-frame to at most 1-per-frame; and it
-    // flushes the moment 64 KB accumulates, so the in-flight buffer can't grow
-    // without bound. Bytes are concatenated in order and never altered, so
-    // terminal output stays byte-identical (the pure core is unit-tested in
-    // WriteBatcher.test.ts).
-    const batcher = new WriteBatcher({
-      maxBytes: 64 * 1024,
-      maxAgeMs: 16,
-      now: () => performance.now(),
-    })
-    const writeToTerm = (bytes: Uint8Array) => {
-      const immediate = batcher.push(bytes)
-      if (immediate != null) term.write(immediate)
-    }
-
-    // One flush per animation frame drains anything buffered by maxAge. rAF is
-    // paused when the tab/window is hidden, so a backgrounded panel stops
-    // rendering — exactly what we want.
-    let rafId = 0
-    const tickFrame = () => {
-      const due = batcher.tick()
-      if (due != null) term.write(due)
-      rafId = requestAnimationFrame(tickFrame)
-    }
-    rafId = requestAnimationFrame(tickFrame)
-
-    // Pipeline diagnostics (issue #75 hunt): every few seconds report how many
-    // characters this panel's DOM holds — total and non-whitespace (a blank
-    // grid is all spaces; a painted TUI carries hundreds of visible chars).
-    // Numbers only — never content. The backend logs it only while its debug
-    // flag file exists, so a normal install pays one tiny no-op invoke.
-    const paintTimer = window.setInterval(() => {
-      if (panelId == null) return
-      const text = container.textContent ?? ''
-      let visible = 0
-      for (const c of text) if (!/\s/.test(c)) visible++
-      void invoke('pty_debug_paint', { id: panelId, chars: text.length, visible }).catch(() => {})
-    }, 4000)
-
-    const writeIfOurs = (payload: { id: number; data: string }) => {
-      if (payload.id === panelId) {
-        const bytes = base64ToBytes(payload.data)
-        writeToTerm(bytes)
-        // Byte-activity signal for the panel's status machine (#26): the
-        // chunk's LENGTH is the whole signal — content is never inspected.
-        onActivity?.(bytes.length)
-      }
-    }
-
-    // Subscribe BEFORE opening the PTY: the backend starts emitting the moment
-    // the shell spawns, so the listener must be registered first.
-    const unlistenP = listen<{ id: number; data: string }>(outputEvent, (event) => {
-      if (panelId == null) {
-        pending.push(event.payload)
-        return
-      }
-      writeIfOurs(event.payload)
-    })
-
-    // Per-panel completion signal (v0.2 Phase 2 / #26): the backend emits
-    // `pty_completion` / `ssh_completion` when the OSC parser sees an AI-CLI
-    // completion in THIS panel's stream (alongside — independent of — the
-    // desktop notification). Same pending pattern as output: the id isn't
-    // known until open resolves, so early payloads are buffered.
-    const completionEvent = isRemote ? 'ssh_completion' : 'pty_completion'
-    const pendingCompletions: Array<{ id: number }> = []
-    const completionIfOurs = (payload: { id: number }) => {
-      if (disposed) return
-      if (payload.id === panelId) onCompletion?.()
-    }
-    const unlistenCompletionP = listen<{ id: number }>(completionEvent, (event) => {
-      if (panelId == null) {
-        pendingCompletions.push(event.payload)
-        return
-      }
-      completionIfOurs(event.payload)
-    })
-
-    // Remote panels also listen for `ssh_exit`: when the ssh process dies, the
-    // backend reports whether it was a connection failure (error message) or a
-    // clean/remote-command exit (error=null). Only an error for OUR panel id
-    // surfaces a diagnostic; clean exits leave the surface as-is.
-    const unlistenExitP = isRemote
-      ? listen<{ id: number; error: string | null }>('ssh_exit', (event) => {
-          if (disposed) return
-          if (event.payload.id !== panelId) return
-          if (event.payload.error != null) setError(event.payload.error)
-        })
-      : Promise.resolve(() => {})
-
-    // Open the PTY (or SSH session) at xterm's measured size so the shell agrees
-    // with the renderer from the first byte (see lib.rs pty_open / ssh_open).
-    // term.cols/rows are already set by the fit() above. A remote panel passes
-    // its target string and NEVER a shell; a local one passes the configured
-    // shell (#77) — the key is simply absent when unset (Auto), matching the
-    // pre-#77 invoke shape.
-    const openArgs = isRemote
-      ? { target: sshTarget, cols: term.cols, rows: term.rows, label }
-      : {
-          cwd,
-          ...(shell != null ? { shell } : {}),
-          cols: term.cols,
-          rows: term.rows,
-          label,
-          // #86: the rebind ids — present only when the caller knows them.
-          ...(context != null
-            ? {
-                workspaceId: context.workspaceId,
-                tabId: context.tabId,
-                panelId: context.panelId,
-              }
-            : {}),
+          term.loadAddon(webgl)
+        } catch {
+          webgl = undefined // no usable WebGL: the DOM renderer still works
         }
-    const opened = invoke<number>(openCmd, openArgs).then((id) => {
-      if (disposed) {
-        void invoke(closeCmd, { id })
-        return
       }
-      panelId = id
-      // Tell the shell which backend handle this panel owns (#28 close
-      // confirmations, #29 cwd snapshots).
-      onOpened?.(id)
 
-      // Flush anything that arrived before we knew our id, keeping only ours.
-      for (const payload of pending) writeIfOurs(payload)
-      pending.length = 0
-      for (const payload of pendingCompletions) completionIfOurs(payload)
-      pendingCompletions.length = 0
-
-      // Keystrokes from xterm -> backend PTY. Each keystroke is also a user
-      // acknowledgement of the panel (clears needs-attention); one carrying
-      // Enter additionally reports a PROMPT SUBMITTED (model v2: a present
-      // AI CLI is now working on it, even while thinking silently).
-      term.onData((data) => {
-        onUserInput?.(/[\r\n]/.test(data))
-        void invoke(writeCmd, { id: panelId, data })
+      // Ctrl+Shift+C copies the current selection to the clipboard instead of
+      // reaching the shell; Ctrl+Shift+V pastes (HITL 2026-09-10 — the chord
+      // used to sit on split-vertical, so pasting split the pane); everything
+      // else (including plain Ctrl+C, which must stay SIGINT, and plain
+      // Ctrl+V, xterm's native paste) passes through to the PTY (Phase 19 /
+      // HITL). Returning false swallows the key from xterm so it is not
+      // forwarded via onData.
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.type !== 'keydown') return true
+        const action = clipboardAction(event)
+        if (action === 'copy') {
+          const selection = term.getSelection()
+          if (selection) {
+            // The OS-level clipboard FIRST (HITL 2026-11-07, the Wayland
+            // report: WebKitGTK's webview clipboard is ISOLATED from the
+            // system one — text copied here was invisible to other apps).
+            // The webview API stays as the fallback, so Windows/macOS
+            // behavior is unchanged when the plugin is unreachable.
+            invoke<string>('plugin:clipboard-manager|write_text', { contents: selection })
+              .catch(() => void navigator.clipboard?.writeText(selection))
+          }
+          return false
+        }
+        if (action === 'paste') {
+          // Chromium (WebView2) binds Ctrl+Shift+V to its own native
+          // paste-plain-text command and fires a DOM `paste` event on xterm's
+          // textarea — without preventDefault the text lands TWICE on Windows
+          // (once natively, once via term.paste below). WebKitGTK and macOS
+          // don't bind the chord, so this is a no-op there. Note xterm ignores
+          // this handler's return value for native behavior: `return false`
+          // only stops the key from reaching the PTY, it cannot stop the paste
+          // event. A blocked clipboard read (WebView2 permission) logs and
+          // leaves plain Ctrl+V as the paste path — the key is swallowed
+          // either way.
+          event.preventDefault()
+          const pluginPaste = () =>
+            invoke<string>('plugin:clipboard-manager|read_text', {})
+              .then((text) => {
+                if (text) term.paste(text)
+              })
+              .catch((err: unknown) =>
+                console.error('paste failed (Ctrl+V still works):', err),
+              )
+          navigator.clipboard
+            ?.readText()
+            .then((text) => {
+              // Empty does NOT mean "empty clipboard" on Wayland — WebKitGTK
+              // answers with "" for any SYSTEM clipboard content it cannot
+              // see, so an empty answer falls through to the OS-level read.
+              if (text) term.paste(text)
+              else void pluginPaste()
+            })
+            .catch(() => void pluginPaste())
+          return false
+        }
+        return true
       })
 
-      // Report terminal geometry changes so the shell re-wraps correctly.
-      // Also tell the status machine a resize happened: the repaint the shell
-      // does in response is mechanical, not agent activity.
-      term.onResize(({ cols, rows }) => {
-        onViewportResize?.()
-        void invoke(resizeCmd, { id: panelId, cols, rows })
-      })
+      // Fit only when the container actually has size. A hidden workspace is
+      // display:none, so the container reports 0×0 — and the installed
+      // addon-fit CLAMPS that to a degenerate 2×1 terminal (Math.max guards in
+      // proposeDimensions), which SIGWINCHes the shell into a frozen TUI: a
+      // Claude Code agent in a background workspace literally stopped running
+      // until its workspace was revealed again (HITL round 6). Skipping the fit
+      // keeps the last real geometry; the reveal's ResizeObserver pass re-fits.
+      const fitIfVisible = () => {
+        if (container.clientWidth === 0 || container.clientHeight === 0) return
+        fit.fit()
+      }
 
-      // Re-fit now that resize reporting is live, then force one explicit
-      // resize with the CURRENT dimensions. Any fit that ran between the first
-      // fit (before open) and the onResize registration above changed xterm's
-      // geometry without reaching the shell — the handler did not exist yet —
-      // leaving it at stale open-time dimensions for the panel's whole life
-      // (Windows/ConPTY showed it as lines cut off at the right edge, output
-      // overwriting mid-screen, and `clear` clearing only part of the view).
-      // The explicit call closes that race: after open, shell and renderer
-      // agree, whatever happened while the open was in flight.
       fitIfVisible()
-      void invoke(resizeCmd, { id: panelId, cols: term.cols, rows: term.rows })
-    }).catch((e: unknown) => {
-      // Synchronous failure (bad target, empty host/user, spawn error): the
-      // backend rejects ssh_open with a friendly message. Catch it so the panel
-      // shows a diagnostic instead of swallowing an unhandled rejection and
-      // leaving a blank, hung surface (AC1 + AC2).
-      if (!disposed) {
-        setError(e instanceof Error ? e.message : String(e))
+
+      let panelId: number | null = null
+      // Buffer output chunks that arrive before our panel id is known, so we don't
+      // drop the shell's initial prompt due to the open/listen race.
+      const pending: Array<{ id: number; data: string }> = []
+      let disposed = false
+
+      // Pick the command/event family from the transport. A remote panel (sshTarget
+      // set) uses the ssh_* family + ssh_output event; otherwise the local pty_*
+      // family. The two id spaces are disjoint, which is why remote panels need
+      // their own event channel (see lib.rs ssh_open).
+      const isRemote = sshTarget !== undefined
+      const openCmd = isRemote ? 'ssh_open' : 'pty_open'
+      const outputEvent = isRemote ? 'ssh_output' : 'pty_output'
+      const writeCmd = isRemote ? 'ssh_write' : 'pty_write'
+      const resizeCmd = isRemote ? 'ssh_resize' : 'pty_resize'
+      const closeCmd = isRemote ? 'ssh_close' : 'pty_close'
+
+      // Coalesce output chunks (Phase 20 / #21, AC1 + AC2). Under heavy PTY
+      // output the backend fires one `pty_output` event per 4 KB read — hundreds
+      // to thousands per second — and writing each straight to xterm forces a
+      // parse + re-render every time, janking the UI. The batcher groups the
+      // chunks that land inside the same animation frame into ONE term.write, so
+      // the render count drops from N-per-frame to at most 1-per-frame; and it
+      // flushes the moment 64 KB accumulates, so the in-flight buffer can't grow
+      // without bound. Bytes are concatenated in order and never altered, so
+      // terminal output stays byte-identical (the pure core is unit-tested in
+      // WriteBatcher.test.ts).
+      const batcher = new WriteBatcher({
+        maxBytes: 64 * 1024,
+        maxAgeMs: 16,
+        now: () => performance.now(),
+      })
+      const writeToTerm = (bytes: Uint8Array) => {
+        const immediate = batcher.push(bytes)
+        if (immediate != null) term.write(immediate)
       }
-    })
 
-    const onWindowResize = () => fitIfVisible()
-    window.addEventListener('resize', onWindowResize)
+      // One flush per animation frame drains anything buffered by maxAge. rAF is
+      // paused when the tab/window is hidden, so a backgrounded panel stops
+      // rendering — exactly what we want.
+      let rafId = 0
+      const tickFrame = () => {
+        const due = batcher.tick()
+        if (due != null) term.write(due)
+        rafId = requestAnimationFrame(tickFrame)
+      }
+      rafId = requestAnimationFrame(tickFrame)
 
-    // Re-fit whenever the container itself resizes — most importantly when the
-    // panel is split (or later, when the divider is dragged): the container
-    // shrinks/grows inside the window, so the window 'resize' event never
-    // fires. Without this xterm keeps the old cols/rows, so a split panel
-    // wraps at the wrong width and a vertical split miscounts rows.
-    const resizeObserver = new ResizeObserver(() => fitIfVisible())
-    resizeObserver.observe(container)
+      // Pipeline diagnostics (issue #75 hunt): every few seconds report how many
+      // characters this panel's DOM holds — total and non-whitespace (a blank
+      // grid is all spaces; a painted TUI carries hundreds of visible chars).
+      // Numbers only — never content. The backend logs it only while its debug
+      // flag file exists, so a normal install pays one tiny no-op invoke.
+      const paintTimer = window.setInterval(() => {
+        if (panelId == null) return
+        const text = container.textContent ?? ''
+        let visible = 0
+        for (const c of text) if (!/\s/.test(c)) visible++
+        void invoke('pty_debug_paint', { id: panelId, chars: text.length, visible }).catch(() => {})
+      }, 4000)
+
+      const writeIfOurs = (payload: { id: number; data: string }) => {
+        if (payload.id === panelId) {
+          const bytes = base64ToBytes(payload.data)
+          writeToTerm(bytes)
+          // Byte-activity signal for the panel's status machine (#26): the
+          // chunk's LENGTH is the whole signal — content is never inspected.
+          onActivity?.(bytes.length)
+        }
+      }
+
+      // Subscribe BEFORE opening the PTY: the backend starts emitting the moment
+      // the shell spawns, so the listener must be registered first.
+      const unlistenP = listen<{ id: number; data: string }>(outputEvent, (event) => {
+        if (panelId == null) {
+          pending.push(event.payload)
+          return
+        }
+        writeIfOurs(event.payload)
+      })
+
+      // Per-panel completion signal (v0.2 Phase 2 / #26): the backend emits
+      // `pty_completion` / `ssh_completion` when the OSC parser sees an AI-CLI
+      // completion in THIS panel's stream (alongside — independent of — the
+      // desktop notification). Same pending pattern as output: the id isn't
+      // known until open resolves, so early payloads are buffered.
+      const completionEvent = isRemote ? 'ssh_completion' : 'pty_completion'
+      const pendingCompletions: Array<{ id: number }> = []
+      const completionIfOurs = (payload: { id: number }) => {
+        if (disposed) return
+        if (payload.id === panelId) onCompletion?.()
+      }
+      const unlistenCompletionP = listen<{ id: number }>(completionEvent, (event) => {
+        if (panelId == null) {
+          pendingCompletions.push(event.payload)
+          return
+        }
+        completionIfOurs(event.payload)
+      })
+
+      // Remote panels also listen for `ssh_exit`: when the ssh process dies, the
+      // backend reports whether it was a connection failure (error message) or a
+      // clean/remote-command exit (error=null). Only an error for OUR panel id
+      // surfaces a diagnostic; clean exits leave the surface as-is.
+      const unlistenExitP = isRemote
+        ? listen<{ id: number; error: string | null }>('ssh_exit', (event) => {
+            if (disposed) return
+            if (event.payload.id !== panelId) return
+            if (event.payload.error != null) setError(event.payload.error)
+          })
+        : Promise.resolve(() => {})
+
+      // Open the PTY (or SSH session) at xterm's measured size so the shell agrees
+      // with the renderer from the first byte (see lib.rs pty_open / ssh_open).
+      // term.cols/rows are already set by the fit() above. A remote panel passes
+      // its target string and NEVER a shell; a local one passes the configured
+      // shell (#77) — the key is simply absent when unset (Auto), matching the
+      // pre-#77 invoke shape.
+      const openArgs = isRemote
+        ? { target: sshTarget, cols: term.cols, rows: term.rows, label }
+        : {
+            cwd,
+            ...(shell != null ? { shell } : {}),
+            cols: term.cols,
+            rows: term.rows,
+            label,
+            // #86: the rebind ids — present only when the caller knows them.
+            ...(context != null
+              ? {
+                  workspaceId: context.workspaceId,
+                  tabId: context.tabId,
+                  panelId: context.panelId,
+                }
+              : {}),
+          }
+      const opened = invoke<number>(openCmd, openArgs).then((id) => {
+        if (disposed) {
+          void invoke(closeCmd, { id })
+          return
+        }
+        panelId = id
+        // Tell the shell which backend handle this panel owns (#28 close
+        // confirmations, #29 cwd snapshots).
+        onOpened?.(id)
+
+        // Flush anything that arrived before we knew our id, keeping only ours.
+        for (const payload of pending) writeIfOurs(payload)
+        pending.length = 0
+        for (const payload of pendingCompletions) completionIfOurs(payload)
+        pendingCompletions.length = 0
+
+        // Keystrokes from xterm -> backend PTY. Each keystroke is also a user
+        // acknowledgement of the panel (clears needs-attention); one carrying
+        // Enter additionally reports a PROMPT SUBMITTED (model v2: a present
+        // AI CLI is now working on it, even while thinking silently).
+        term.onData((data) => {
+          onUserInput?.(/[\r\n]/.test(data))
+          void invoke(writeCmd, { id: panelId, data })
+        })
+
+        // Report terminal geometry changes so the shell re-wraps correctly.
+        // Also tell the status machine a resize happened: the repaint the shell
+        // does in response is mechanical, not agent activity.
+        term.onResize(({ cols, rows }) => {
+          onViewportResize?.()
+          void invoke(resizeCmd, { id: panelId, cols, rows })
+        })
+
+        // Re-fit now that resize reporting is live, then force one explicit
+        // resize with the CURRENT dimensions. Any fit that ran between the first
+        // fit (before open) and the onResize registration above changed xterm's
+        // geometry without reaching the shell — the handler did not exist yet —
+        // leaving it at stale open-time dimensions for the panel's whole life
+        // (Windows/ConPTY showed it as lines cut off at the right edge, output
+        // overwriting mid-screen, and `clear` clearing only part of the view).
+        // The explicit call closes that race: after open, shell and renderer
+        // agree, whatever happened while the open was in flight.
+        fitIfVisible()
+        void invoke(resizeCmd, { id: panelId, cols: term.cols, rows: term.rows })
+      }).catch((e: unknown) => {
+        // Synchronous failure (bad target, empty host/user, spawn error): the
+        // backend rejects ssh_open with a friendly message. Catch it so the panel
+        // shows a diagnostic instead of swallowing an unhandled rejection and
+        // leaving a blank, hung surface (AC1 + AC2).
+        if (!disposed) {
+          setError(e instanceof Error ? e.message : String(e))
+        }
+      })
+
+      const onWindowResize = () => fitIfVisible()
+      window.addEventListener('resize', onWindowResize)
+
+      // Re-fit whenever the container itself resizes — most importantly when the
+      // panel is split (or later, when the divider is dragged): the container
+      // shrinks/grows inside the window, so the window 'resize' event never
+      // fires. Without this xterm keeps the old cols/rows, so a split panel
+      // wraps at the wrong width and a vertical split miscounts rows.
+      const resizeObserver = new ResizeObserver(() => fitIfVisible())
+      resizeObserver.observe(container)
+
+      teardown = () => {
+        disposed = true
+        cancelAnimationFrame(rafId)
+        window.clearInterval(paintTimer)
+        // Flush any output still buffered from the last frame so closing a panel
+        // never silently drops bytes.
+        const remaining = batcher.flush()
+        if (remaining.byteLength > 0) term.write(remaining)
+        window.removeEventListener('resize', onWindowResize)
+        resizeObserver.disconnect()
+        void unlistenP.then((fn) => fn())
+        void unlistenExitP.then((fn) => fn())
+        void unlistenCompletionP.then((fn) => fn())
+        void opened.then(() => {
+          if (panelId != null) void invoke(closeCmd, { id: panelId })
+        })
+        term.dispose()
+        termRef.current = null
+      }
+    }
+    void boot()
 
     return () => {
-      disposed = true
-      cancelAnimationFrame(rafId)
-      window.clearInterval(paintTimer)
-      // Flush any output still buffered from the last frame so closing a panel
-      // never silently drops bytes.
-      const remaining = batcher.flush()
-      if (remaining.byteLength > 0) term.write(remaining)
-      window.removeEventListener('resize', onWindowResize)
-      resizeObserver.disconnect()
-      void unlistenP.then((fn) => fn())
-      void unlistenExitP.then((fn) => fn())
-      void unlistenCompletionP.then((fn) => fn())
-      void opened.then(() => {
-        if (panelId != null) void invoke(closeCmd, { id: panelId })
-      })
-      term.dispose()
-      termRef.current = null
+      cancelled = true
+      teardown?.()
     }
   }, [])
 

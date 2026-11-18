@@ -31,21 +31,8 @@
         "fullscreen": false,
         "dragDropEnabled": false,
         "useHttpsScheme": true,
-        "visible": false
-      },
-      {
-        "label": "splashscreen",
-        "title": "umux",
-        "url": "splashscreen.html",
-        "width": 320,
-        "height": 220,
-        "resizable": false,
-        "decorations": false,
-        "center": true,
-        "skipTaskbar": true,
-        "alwaysOnTop": true,
-        "dragDropEnabled": false,
-        "useHttpsScheme": true
+        "visible": true,
+        "backgroundColor": "#111317"
       }
     ],
     "security": {

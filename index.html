@@ -4,8 +4,30 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>umux by Crystal</title>
+    <!-- Boot shell (quickupdate 2026-11-18): the splash window is gone, so the
+         app's FIRST painted frame must already look like umux — never a white
+         webview card. This dependency-free skeleton paints the real shell
+         colors (App.css: --bg-app #111317, --bg-sidebar #171a21) the moment
+         the HTML arrives, while the React bundle is still loading; main.tsx
+         removes it in the same task that mounts the app. -->
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #111317; }
+      #boot { display: flex; height: 100vh; width: 100vw; }
+      #boot .side {
+        flex: 0 0 auto;
+        width: 240px;
+        background: #171a21;
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      #boot .main { flex: 1 1 auto; }
+    </style>
   </head>
   <body>
+    <div id="boot" aria-hidden="true">
+      <div class="side"></div>
+      <div class="main"></div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
