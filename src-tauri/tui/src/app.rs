@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, MouseButton, MouseEvent,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyEventKind, MouseButton,
+    MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -69,6 +69,10 @@ pub struct App {
     pub model: TermModel,
     pub driver: Arc<dyn SessionDriver>,
     pub driver_kind: DriverKind,
+    /// The desktop store's chosen default shell — the fallback when the term
+    /// store's own `default-shell` is unset (the "shell you picked in
+    /// Settings" the Terminal should honor out of the box).
+    desk_shell: Option<String>,
     pub panes: HashMap<String, Pane>,
     pub active_ws: String,
     active_tabs: HashMap<String, String>, // ws id → tab id
@@ -91,6 +95,13 @@ impl App {
         let (driver, driver_kind) = crate::driver::choose_driver();
         let mut model = TermModel::open();
         let mut ids = Ids::new();
+        // Read the desktop's chosen shell once, read-only — the Terminal
+        // never writes the desk store.
+        let desk_shell = store_core::settings_store::SettingsStore::new(
+            store_core::paths::settings_path(),
+        )
+        .load()
+        .default_shell;
         // A first-run term store gets one workspace with one pane — the TUI
         // boots into a usable shell (the desktop's first-run shape).
         if model.data.workspaces.is_empty() {
@@ -102,6 +113,7 @@ impl App {
             model,
             driver,
             driver_kind,
+            desk_shell,
             panes: HashMap::new(),
             active_ws,
             active_tabs: HashMap::new(),
@@ -201,8 +213,14 @@ impl App {
     /// Spawn one pane's PTY session through the driver seam and start its
     /// output pump.
     fn spawn_pane(&mut self, ws_id: &str, tab_id: &str, leaf_id: &str, cols: u16, rows: u16) {
+        // The chosen shell wins: term store first, then the desktop store's
+        // choice, then $SHELL, then the per-OS default (driver's chain).
         let shell = resolve_shell(
-            self.model.settings.default_shell.as_deref(),
+            self.model
+                .settings
+                .default_shell
+                .as_deref()
+                .or(self.desk_shell.as_deref()),
             Some(&std::env::var("SHELL").unwrap_or_default()),
         );
         let params = OpenParams {
@@ -466,10 +484,39 @@ impl App {
             .position(|id| *id == self.active_ws)
             .unwrap_or(0);
         let next = (idx as i32 + delta).rem_euclid(order.len() as i32) as usize;
-        self.active_ws = order[next].clone();
+        self.activate_workspace(&order[next]);
+    }
+
+    /// A sidebar click (or the chord) landing on this workspace.
+    fn activate_workspace(&mut self, ws_id: &str) {
+        if self.model.workspace(ws_id).is_none() {
+            return;
+        }
+        self.active_ws = ws_id.to_string();
         self.zoomed = false;
         self.normalize_selection();
-        // Switching workspaces repaints everything — a mechanical redraw.
+        self.redraw_all();
+    }
+
+    /// A tab-title click landing on this tab of the active workspace.
+    fn activate_tab(&mut self, tab_id: &str) {
+        let known = self
+            .model
+            .workspace(&self.active_ws)
+            .map(|ws| ws.tabs.iter().any(|t| t.id == tab_id))
+            .unwrap_or(false);
+        if !known {
+            return;
+        }
+        self.active_tabs
+            .insert(self.active_ws.clone(), tab_id.to_string());
+        self.zoomed = false;
+        self.normalize_selection();
+        self.redraw_all();
+    }
+
+    /// Switching workspaces/tabs repaints everything — a mechanical redraw.
+    fn redraw_all(&mut self) {
         let now = self.now_ms();
         for pane in self.panes.values_mut() {
             pane.status.on_redraw(now);
@@ -478,10 +525,19 @@ impl App {
 
     // --- event handling -------------------------------------------------------
 
-    fn handle_input(&mut self, event: Event, pane_area: Rect) {
+    fn handle_input(&mut self, event: Event, area: Rect) {
         match event {
-            Event::Key(key) => self.handle_key(key, pane_area.width, pane_area.height),
-            Event::Mouse(mouse) => self.handle_mouse(mouse, pane_area),
+            Event::Key(key) => {
+                // Windows consoles deliver BOTH the press and the release of
+                // every key; the prefix machine and the PTY must see only the
+                // press (a release would re-arm chords and echo ghosts).
+                if key.kind == KeyEventKind::Release {
+                    return;
+                }
+                let pane_area = ui::pane_area(area);
+                self.handle_key(key, pane_area.width, pane_area.height);
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse, area),
             Event::Resize(_, _) => {} // the loop redraws + resizes every frame
             Event::FocusGained | Event::FocusLost => {}
             Event::Paste(_) => {}
@@ -507,12 +563,25 @@ impl App {
         }
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent, pane_area: Rect) {
+    fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) {
         // The hit tests use the SAME rects the renderer drew — ui::pane_area
         // is the one geometry both sides share.
+        let pane_area = ui::pane_area(area);
         let rects = self.pane_geometry(pane_area);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // The clickable chrome first: footer buttons, tab titles and
+                // sidebar workspace rows own their rows before pane hit-tests.
+                if let Some(hit) = ui::hit_test(self, area, mouse.column, mouse.row) {
+                    match hit {
+                        ui::UiHit::Command(cmd) => {
+                            self.dispatch_command(cmd, pane_area.width, pane_area.height);
+                        }
+                        ui::UiHit::Tab(tab_id) => self.activate_tab(&tab_id),
+                        ui::UiHit::Workspace(ws_id) => self.activate_workspace(&ws_id),
+                    }
+                    return;
+                }
                 if self.zoomed {
                     return;
                 }
@@ -757,7 +826,7 @@ fn event_loop(
         match app.msg_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Msg::Input(ev)) => {
                 let size = terminal.size().unwrap_or(area);
-                app.handle_input(ev, ui::pane_area(Rect::new(0, 0, size.width, size.height)));
+                app.handle_input(ev, Rect::new(0, 0, size.width, size.height));
             }
             Ok(Msg::Output { pane, bytes }) => app.handle_output(&pane, bytes),
             Err(mpsc::RecvTimeoutError::Timeout) => {}

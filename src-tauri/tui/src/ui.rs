@@ -9,11 +9,12 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Pane};
 use crate::model::tab_display_name;
+use crate::prefix::PrefixCommand;
 use crate::status::AgentStatus;
 
 /// The pane area of a given terminal size — the ONE geometry both the
@@ -109,10 +110,12 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+    // Hand-drawn spans (not the Tabs widget) so the hit-test below walks the
+    // exact same left-to-right geometry — a click lands on the tab it hit.
     let Some(ws) = app.model.workspace(&app.active_ws) else {
         return;
     };
-    let titles: Vec<Span> = ws
+    let spans: Vec<Span> = ws
         .tabs
         .iter()
         .enumerate()
@@ -129,10 +132,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             )
         })
         .collect();
-    frame.render_widget(
-        Tabs::new(titles).highlight_style(Style::default()),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -249,14 +249,117 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         height: 1,
         ..area
     };
-    let text = Line::from(vec![
-        Span::styled(
-            format!(" {} ", app.driver_kind.label()),
-            Style::default().fg(ratatui::style::Color::Cyan),
-        ),
-        Span::raw("Ctrl+B prefix · q: quit (Ctrl+B q) · \" split · % vsplit · z zoom"),
-    ]);
-    frame.render_widget(Paragraph::new(text), footer);
+    // The same left-to-right walk [`hit_test`] does — each button owns
+    // exactly the columns its span paints.
+    let mut spans: Vec<Span> = vec![Span::styled(
+        format!(" {} ", app.driver_kind.label()),
+        Style::default().fg(ratatui::style::Color::Cyan),
+    )];
+    for (label, _) in footer_button_specs() {
+        spans.push(Span::styled(
+            format!(" [{label}] "),
+            Style::default().fg(ratatui::style::Color::Blue),
+        ));
+    }
+    spans.push(Span::raw("Ctrl+B prefix"));
+    frame.render_widget(Paragraph::new(Line::from(spans)), footer);
+}
+
+// --- mouse hit-testing -------------------------------------------------------
+
+/// What a click on the chrome landed on (panes/dividers are app.rs's own
+/// geometry — this covers footer, tab bar and sidebar only).
+#[derive(Clone, Debug)]
+pub enum UiHit {
+    /// A footer button — dispatch the same command the chord would send.
+    Command(PrefixCommand),
+    /// A tab title of the active workspace.
+    Tab(String),
+    /// A sidebar workspace row.
+    Workspace(String),
+}
+
+/// The footer's buttons, label → chord command (draw order = hit order).
+fn footer_button_specs() -> &'static [(&'static str, PrefixCommand)] {
+    &[
+        ("1 New", PrefixCommand::NewTab),
+        ("2 | Split", PrefixCommand::SplitRight),
+        ("3 -- Split", PrefixCommand::SplitDown),
+        ("4 Zoom", PrefixCommand::ZoomPane),
+        ("5 Close", PrefixCommand::ClosePane),
+        ("Q Quit", PrefixCommand::Quit),
+    ]
+}
+
+/// The sidebar's inner rect (the block draws only the RIGHT border).
+fn sidebar_inner(area: Rect) -> Rect {
+    Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(1),
+        height: area.height,
+    }
+}
+
+/// Which piece of chrome owns this cell? Mirrors the renderer's geometry
+/// cell for cell, so a click never lands beside what it visually hit.
+pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
+    if area.width < 4 || area.height < 3 {
+        return None;
+    }
+    // Footer row (the full width, exactly what draw_footer paints).
+    if row == area.y + area.height - 1 {
+        let mut x = area.x;
+        x = x.saturating_add(app.driver_kind.label().chars().count() as u16 + 2);
+        for (label, cmd) in footer_button_specs() {
+            let w = label.chars().count() as u16 + 4; // " [label] "
+            if col >= x && col < x.saturating_add(w) {
+                return Some(UiHit::Command(*cmd));
+            }
+            x += w;
+        }
+        return None;
+    }
+    let sidebar_w = (area.width / 5).clamp(if area.width > 30 { 14 } else { 0 }, 30);
+    if sidebar_w > 0 && col < area.x.saturating_add(sidebar_w) {
+        let inner = sidebar_inner(Rect {
+            x: area.x,
+            y: area.y,
+            width: sidebar_w,
+            height: area.height,
+        });
+        if col >= inner.x && row >= inner.y && row < inner.y.saturating_add(inner.height) {
+            let idx = (row - inner.y) as usize;
+            return app
+                .model
+                .workspace_order()
+                .get(idx)
+                .cloned()
+                .map(UiHit::Workspace);
+        }
+        return None;
+    }
+    let main = Rect {
+        x: area.x.saturating_add(sidebar_w),
+        width: area.width.saturating_sub(sidebar_w),
+        ..area
+    };
+    // Tab bar row (the shape draw() uses: only when the main column is tall
+    // enough to slice a dedicated row).
+    if main.height >= 4 && row == main.y {
+        if let Some(ws) = app.model.workspace(&app.active_ws) {
+            let mut x = main.x;
+            for (i, tab) in ws.tabs.iter().enumerate() {
+                let label = format!(" {} ", truncate(tab_display_name(i, tab), 16));
+                let w = label.chars().count() as u16;
+                if col >= x && col < x.saturating_add(w) {
+                    return Some(UiHit::Tab(tab.id.clone()));
+                }
+                x += w;
+            }
+        }
+    }
+    None
 }
 
 // --- helpers -----------------------------------------------------------------
