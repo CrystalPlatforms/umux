@@ -14,7 +14,6 @@ use ratatui::Frame;
 
 use crate::app::{App, Pane};
 use crate::model::tab_display_name;
-use crate::prefix::PrefixCommand;
 use crate::status::AgentStatus;
 
 /// The pane area of a given terminal size — the ONE geometry both the
@@ -78,9 +77,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_panes(frame, app, pane_area);
     draw_footer(frame, app, area);
-    // The dropdown paints LAST — it overlays the panes.
+    // Overlays paint LAST, in stacking order: shell dropdown, context menu,
+    // confirm dialog.
     if app.shell_menu_open() {
         draw_shell_menu(frame, app, area);
+    }
+    if app.menu.is_some() {
+        draw_menu(frame, app, area);
+    }
+    if app.confirm.is_some() {
+        draw_confirm(frame, app, area);
     }
 }
 
@@ -88,11 +94,32 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default().title(" umux ").borders(Borders::RIGHT);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.width == 0 {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    // Header row: the "+" (New workspace) at the right edge — the desktop's
+    // sidebar-header button. Row 0 belongs to it; workspace rows start below.
+    if let Some(plus) = sidebar_plus_rect(inner) {
+        let mut style = Style::default().fg(ratatui::style::Color::Cyan);
+        if hovered(app, plus) {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" + ", style))),
+            plus,
+        );
+    }
+    let rows = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(1),
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+    if rows.height == 0 {
         return;
     }
     let mut lines: Vec<Line> = Vec::new();
-    for ws_id in app.model.workspace_order() {
+    for (i, ws_id) in app.model.workspace_order().into_iter().enumerate() {
         let Some(ws) = app.model.workspace(&ws_id) else {
             continue;
         };
@@ -100,31 +127,50 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         let active = ws_id == app.active_ws;
         let marker = if active { ">" } else { " " };
         let glyph = status_glyph(aggregate);
-        lines.push(Line::from(Span::styled(
-            format!("{marker}{glyph} {}", truncate(ws.name.clone(), inner.width.saturating_sub(4) as usize)),
-            if active {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
+        let mut style = if active {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        // A hovered workspace row lights up (the row's click switches).
+        if hovered(
+            app,
+            Rect {
+                x: rows.x,
+                y: rows.y.saturating_add(i as u16),
+                width: rows.width,
+                height: 1,
             },
+        ) {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{marker}{glyph} {}",
+                truncate(ws.name.clone(), inner.width.saturating_sub(4) as usize)
+            ),
+            style,
         )));
     }
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(Paragraph::new(lines), rows);
 }
 
-/// The tab bar's geometry — each tab's clickable rect (id + label + active
-/// flag) plus the trailing "+" (new tab) button. The ONE geometry the
+/// One tab's chrome: its clickable title (with the per-tab agent-status
+/// glyph — the desktop's per-tab chip), its inline "x" (close), and whether
+/// it is the active tab.
+struct TabChrome {
+    rect: Rect,
+    x_rect: Option<Rect>,
+    label: String,
+    active: bool,
+    id: String,
+}
+
+/// The tab bar's geometry — each tab's title + "x", then the trailing
+/// "+" (new tab) and "v" (shell picker) buttons. The ONE geometry the
 /// renderer and [`hit_test`] share; `row` is the single-row slice draw()
 /// paints the tabs into.
-fn tab_chrome(
-    app: &App,
-    row: Rect,
-) -> (
-    Vec<(Rect, String, bool, String)>,
-    Option<Rect>,
-    Option<Rect>,
-) {
+fn tab_chrome(app: &App, row: Rect) -> (Vec<TabChrome>, Option<Rect>, Option<Rect>) {
     let mut tabs = Vec::new();
     let mut plus = None;
     let mut vdown = None;
@@ -134,24 +180,39 @@ fn tab_chrome(
     let right = row.x.saturating_add(row.width);
     let mut x = row.x;
     for (i, tab) in ws.tabs.iter().enumerate() {
-        let label = format!(" {} ", truncate(tab_display_name(i, tab), 16));
+        // Per-tab agent status (story #77 parity with the desktop's chips):
+        // the tab title carries the glyph, not just the sidebar aggregate.
+        let glyph = status_glyph(app.tab_status(&tab.id));
+        let label = format!(
+            " {}{} ",
+            truncate(tab_display_name(i, tab), 16),
+            glyph
+        );
         let w = label.chars().count() as u16;
-        if x.saturating_add(w) > right {
+        // Title + its " x" (2 cols) must both fit.
+        if x.saturating_add(w + 2) > right {
             break;
         }
         let active = app.active_tab_id().as_deref() == Some(tab.id.as_str());
-        tabs.push((
-            Rect {
+        let x_rect = Rect {
+            x: x.saturating_add(w),
+            y: row.y,
+            width: 2,
+            height: 1,
+        };
+        tabs.push(TabChrome {
+            rect: Rect {
                 x,
                 y: row.y,
                 width: w,
                 height: 1,
             },
+            x_rect: Some(x_rect),
             label,
             active,
-            tab.id.clone(),
-        ));
-        x += w;
+            id: tab.id.clone(),
+        });
+        x += w + 2;
     }
     if x.saturating_add(3) <= right {
         plus = Some(Rect {
@@ -178,14 +239,21 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     // same left-to-right geometry — a click lands on the tab it hit.
     let (tabs, plus, vdown) = tab_chrome(app, area);
     let mut spans: Vec<Span> = Vec::new();
-    for (rect, label, active, _) in &tabs {
+    for t in &tabs {
         let mut style = Style::default();
-        if *active {
+        if t.active {
             style = style.add_modifier(Modifier::REVERSED);
-        } else if hovered(app, *rect) {
+        } else if hovered(app, t.rect) {
             style = style.add_modifier(Modifier::BOLD);
         }
-        spans.push(Span::styled(label.clone(), style));
+        spans.push(Span::styled(t.label.clone(), style));
+        if let Some(xr) = t.x_rect {
+            let mut xs = Style::default().fg(ratatui::style::Color::DarkGray);
+            if hovered(app, xr) {
+                xs = xs.add_modifier(Modifier::REVERSED);
+            }
+            spans.push(Span::styled(" x", xs));
+        }
     }
     for button in [plus, vdown] {
         if let Some(rect) = button {
@@ -308,33 +376,6 @@ fn render_grid(frame: &mut Frame, pane: &Pane, inner: Rect, focused: bool) {
     }
 }
 
-/// The footer row and its clickable buttons — the ONE geometry the renderer
-/// and [`hit_test`] share.
-fn footer_layout(app: &App, area: Rect) -> (Rect, Vec<(Rect, &'static str, PrefixCommand)>) {
-    let footer = Rect {
-        y: area.y + area.height - 1,
-        height: 1,
-        ..area
-    };
-    let mut x = footer.x.saturating_add(app.driver_kind.label().chars().count() as u16 + 2);
-    let mut buttons = Vec::new();
-    for (label, cmd) in footer_button_specs() {
-        let w = label.chars().count() as u16 + 4; // " [label] "
-        buttons.push((
-            Rect {
-                x,
-                y: footer.y,
-                width: w,
-                height: 1,
-            },
-            *label,
-            *cmd,
-        ));
-        x += w;
-    }
-    (footer, buttons)
-}
-
 /// Is the last mouse position inside this rect? (hover highlighting)
 fn hovered(app: &App, r: Rect) -> bool {
     app.hover_pos()
@@ -342,53 +383,112 @@ fn hovered(app: &App, r: Rect) -> bool {
         .unwrap_or(false)
 }
 
+/// The status footer — desktop parity says the bottom bar carries NO
+/// toolbar (actions live in the tab bar and the context menus), so this is
+/// a plain status line now.
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let (footer, buttons) = footer_layout(app, area);
-    // The same left-to-right walk [`hit_test`] does — each button owns
-    // exactly the columns its span paints.
+    let footer = Rect {
+        y: area.y + area.height - 1,
+        height: 1,
+        ..area
+    };
     let mut spans: Vec<Span> = vec![Span::styled(
         format!(" {} ", app.driver_kind.label()),
         Style::default().fg(ratatui::style::Color::Cyan),
     )];
-    for (rect, label, _) in &buttons {
-        let mut style = Style::default().fg(ratatui::style::Color::Blue);
-        if hovered(app, *rect) {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        spans.push(Span::styled(format!(" [{label}] "), style));
+    if app.is_zoomed() {
+        spans.push(Span::raw("  zoomed — Esc restores"));
     }
-    spans.push(Span::raw("Ctrl+B prefix"));
+    spans.push(Span::raw("  right-click pane/tab/workspace for actions · header menu: quit"));
     frame.render_widget(Paragraph::new(Line::from(spans)), footer);
 }
 
 // --- mouse hit-testing -------------------------------------------------------
 
-/// What a click on the chrome landed on (panes/dividers are app.rs's own
-/// geometry — this covers footer, tab bar and sidebar only).
+/// One chrome action — the mouse/menu equivalent of the desktop's buttons
+/// and context-menu rows. Carries its own target id where one is needed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuAction {
+    NewTab,
+    CloseTab(String),
+    SplitHorizontal,
+    SplitVertical,
+    ZoomToggle,
+    FocusPane(String),
+    ClosePane(String),
+    NewWorkspace,
+    CloseWorkspace(String),
+    Quit,
+}
+
+/// Which surface a right-click landed on (the desktop's per-surface menus).
+#[derive(Clone, Debug)]
+pub enum MenuKind {
+    /// A tab title.
+    Tab(String),
+    /// A pane in the grid.
+    Pane(String),
+    /// A sidebar workspace row.
+    Workspace(String),
+    /// The chrome generally (sidebar header, tab-bar gaps, footer).
+    Header,
+}
+
+/// The open context menu: what it sits on, where it opened, the keyboard
+/// selection (arrows + Enter; Esc closes).
+#[derive(Clone, Debug)]
+pub struct MenuState {
+    pub kind: MenuKind,
+    pub anchor: (u16, u16),
+    pub selected: usize,
+}
+
+/// What a left click on the chrome landed on (panes/dividers are app.rs's
+/// own geometry).
 #[derive(Clone, Debug)]
 pub enum UiHit {
-    /// A footer button — dispatch the same command the chord would send.
-    Command(PrefixCommand),
+    /// A chrome action (tab "+" and sidebar "+" buttons).
+    Menu(MenuAction),
     /// A tab title of the active workspace.
     Tab(String),
+    /// A tab's inline "x" (close this tab).
+    TabClose(String),
     /// A sidebar workspace row.
     Workspace(String),
     /// The tab bar's "v" shell-picker button.
     ShellMenu,
 }
 
-/// The footer's buttons, label → chord command (draw order = hit order).
-fn footer_button_specs() -> &'static [(&'static str, PrefixCommand)] {
-    &[
-        ("1 New", PrefixCommand::NewTab),
-        ("2 | Split", PrefixCommand::SplitRight),
-        ("3 -- Split", PrefixCommand::SplitDown),
-        ("4 Zoom", PrefixCommand::ZoomPane),
-        ("5 Close", PrefixCommand::ClosePane),
-        ("Q Quit", PrefixCommand::Quit),
-    ]
+/// The context menu's rows: `None` is a separator (the desktop's
+/// menu-separator).
+pub fn menu_items(kind: &MenuKind) -> Vec<Option<MenuAction>> {
+    match kind {
+        MenuKind::Tab(tab_id) => vec![
+            Some(MenuAction::NewTab),
+            Some(MenuAction::SplitHorizontal),
+            Some(MenuAction::SplitVertical),
+            Some(MenuAction::ZoomToggle),
+            None,
+            Some(MenuAction::CloseTab(tab_id.clone())),
+        ],
+        MenuKind::Pane(pane_id) => vec![
+            Some(MenuAction::FocusPane(pane_id.clone())),
+            Some(MenuAction::SplitHorizontal),
+            Some(MenuAction::SplitVertical),
+            Some(MenuAction::ZoomToggle),
+            None,
+            Some(MenuAction::ClosePane(pane_id.clone())),
+        ],
+        MenuKind::Workspace(ws_id) => vec![Some(MenuAction::CloseWorkspace(ws_id.clone()))],
+        MenuKind::Header => vec![
+            Some(MenuAction::NewWorkspace),
+            None,
+            Some(MenuAction::Quit),
+        ],
+    }
 }
 
+/// The footer's buttons, label → chord command (draw order = hit order).
 /// The sidebar's inner rect (the block draws only the RIGHT border).
 fn sidebar_inner(area: Rect) -> Rect {
     Rect {
@@ -399,23 +499,27 @@ fn sidebar_inner(area: Rect) -> Rect {
     }
 }
 
+/// The sidebar header row's "+" (New workspace — the desktop's sidebar
+/// header button), at the row's right edge.
+fn sidebar_plus_rect(inner: Rect) -> Option<Rect> {
+    if inner.width < 5 {
+        return None;
+    }
+    Some(Rect {
+        x: inner.x.saturating_add(inner.width.saturating_sub(3)),
+        y: inner.y,
+        width: 3,
+        height: 1,
+    })
+}
+
 /// Which piece of chrome owns this cell? Mirrors the renderer's geometry
 /// cell for cell, so a click never lands beside what it visually hit.
 pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
     if area.width < 4 || area.height < 3 {
         return None;
     }
-    // Footer row (the full width, exactly what draw_footer paints).
-    if row == area.y + area.height - 1 {
-        let (_, buttons) = footer_layout(app, area);
-        for (rect, _, cmd) in &buttons {
-            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
-                return Some(UiHit::Command(*cmd));
-            }
-        }
-        return None;
-    }
-    let sidebar_w = (area.width / 5).clamp(if area.width > 30 { 14 } else { 0 }, 30);
+    let sidebar_w = sidebar_width(area);
     if sidebar_w > 0 && col < area.x.saturating_add(sidebar_w) {
         let inner = sidebar_inner(Rect {
             x: area.x,
@@ -423,8 +527,18 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             width: sidebar_w,
             height: area.height,
         });
-        if col >= inner.x && row >= inner.y && row < inner.y.saturating_add(inner.height) {
-            let idx = (row - inner.y) as usize;
+        // Header row: only its "+" button is clickable (New workspace).
+        if row == inner.y {
+            if let Some(plus) = sidebar_plus_rect(inner) {
+                if col >= plus.x && col < plus.x.saturating_add(plus.width) {
+                    return Some(UiHit::Menu(MenuAction::NewWorkspace));
+                }
+            }
+            return None;
+        }
+        // Workspace rows (one row below the header).
+        if row > inner.y && row < inner.y.saturating_add(inner.height) {
+            let idx = (row - inner.y - 1) as usize;
             return app
                 .model
                 .workspace_order()
@@ -440,7 +554,8 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
         ..area
     };
     // Tab bar row (the shape draw() uses: only when the main column is tall
-    // enough to slice a dedicated row).
+    // enough to slice a dedicated row). A tab's "x" owns its columns before
+    // the title itself.
     if main.height >= 4 && row == main.y {
         let row_rect = Rect {
             x: main.x,
@@ -449,23 +564,291 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             height: 1,
         };
         let (tabs, plus, vdown) = tab_chrome(app, row_rect);
-        for (rect, _, _, tab_id) in &tabs {
-            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
-                return Some(UiHit::Tab(tab_id.clone()));
+        for t in &tabs {
+            if let Some(xr) = t.x_rect {
+                if col >= xr.x && col < xr.x.saturating_add(xr.width) {
+                    return Some(UiHit::TabClose(t.id.clone()));
+                }
+            }
+            if col >= t.rect.x && col < t.rect.x.saturating_add(t.rect.width) {
+                return Some(UiHit::Tab(t.id.clone()));
             }
         }
-        for (rect, hit) in [(plus, None), (vdown, Some(UiHit::ShellMenu))] {
-            if let Some(rect) = rect {
-                if col >= rect.x && col < rect.x.saturating_add(rect.width) {
-                    return match hit {
-                        Some(hit) => Some(hit),
-                        None => Some(UiHit::Command(PrefixCommand::NewTab)),
-                    };
+        if let Some(rect) = plus {
+            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                return Some(UiHit::Menu(MenuAction::NewTab));
+            }
+        }
+        if let Some(rect) = vdown {
+            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                return Some(UiHit::ShellMenu);
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// The sidebar column's width for a frame size (shared by the renderer and
+/// the hit-tests).
+fn sidebar_width(area: Rect) -> u16 {
+    (area.width / 5).clamp(if area.width > 30 { 14 } else { 0 }, 30)
+}
+
+/// Which surface did this cell belong to? — the right-click menu's kind.
+pub fn context_kind(app: &App, area: Rect, col: u16, row: u16) -> Option<MenuKind> {
+    if area.width < 4 || area.height < 3 {
+        return None;
+    }
+    let sidebar_w = sidebar_width(area);
+    if sidebar_w > 0 && col < area.x.saturating_add(sidebar_w) {
+        let inner = sidebar_inner(Rect {
+            x: area.x,
+            y: area.y,
+            width: sidebar_w,
+            height: area.height,
+        });
+        if row == inner.y {
+            return Some(MenuKind::Header);
+        }
+        if row > inner.y && row < inner.y.saturating_add(inner.height) {
+            let idx = (row - inner.y - 1) as usize;
+            return app
+                .model
+                .workspace_order()
+                .get(idx)
+                .cloned()
+                .map(MenuKind::Workspace);
+        }
+        return Some(MenuKind::Header);
+    }
+    let main = Rect {
+        x: area.x.saturating_add(sidebar_w),
+        width: area.width.saturating_sub(sidebar_w),
+        ..area
+    };
+    if main.height >= 4 && row == main.y {
+        let row_rect = Rect {
+            x: main.x,
+            y: main.y,
+            width: main.width,
+            height: 1,
+        };
+        let (tabs, _, _) = tab_chrome(app, row_rect);
+        for t in &tabs {
+            let covers = col >= t.rect.x
+                && col < t.rect.x.saturating_add(t.rect.width)
+                || t.x_rect
+                    .map(|xr| col >= xr.x && col < xr.x.saturating_add(xr.width))
+                    .unwrap_or(false);
+            if covers {
+                return Some(MenuKind::Tab(t.id.clone()));
+            }
+        }
+        return Some(MenuKind::Header);
+    }
+    // The pane grid: a leaf under the click owns the menu; gaps fall back
+    // to the header menu.
+    let pane_area = pane_area(area);
+    let rects = app.pane_geometry(pane_area);
+    if let Some(leaf) = crate::layout::pane_at(&rects, col, row) {
+        return Some(MenuKind::Pane(leaf));
+    }
+    Some(MenuKind::Header)
+}
+
+// --- the context menu (right-click) -------------------------------------------
+
+/// The menu's box for its kind — anchored at the click, clamped to the
+/// frame (the shell dropdown's shape).
+pub fn menu_rect(kind: &MenuKind, anchor: (u16, u16), area: Rect) -> Rect {
+    let items = menu_items(kind);
+    let widest = items
+        .iter()
+        .map(|i| i.as_ref().map(|a| menu_label(a).chars().count()).unwrap_or(8))
+        .max()
+        .unwrap_or(8) as u16;
+    let width = (widest + 4).clamp(12, area.width.saturating_sub(2).max(12));
+    let height = (items.len() as u16 + 2).min(area.height.saturating_sub(1)).max(3);
+    let x = anchor.0.min(area.x.saturating_add(area.width.saturating_sub(width + 1)));
+    let mut y = anchor.1.saturating_add(1);
+    if y.saturating_add(height) > area.y.saturating_add(area.height) {
+        y = anchor.1.saturating_sub(height);
+    }
+    Rect { x, y, width, height }
+}
+
+fn menu_label(action: &MenuAction) -> String {
+    match action {
+        MenuAction::NewTab => "New tab".into(),
+        MenuAction::CloseTab(_) => "Close tab".into(),
+        MenuAction::SplitHorizontal => "Split horizontal".into(),
+        MenuAction::SplitVertical => "Split vertical".into(),
+        MenuAction::ZoomToggle => "Zoom".into(),
+        MenuAction::FocusPane(_) => "Focus pane".into(),
+        MenuAction::ClosePane(_) => "Close pane".into(),
+        MenuAction::NewWorkspace => "New workspace".into(),
+        MenuAction::CloseWorkspace(_) => "Close workspace".into(),
+        MenuAction::Quit => "Quit".into(),
+    }
+}
+
+/// A click while the context menu is open: `Some(pick)` = inside (pick =
+/// the action, separators pick nothing); `None` = outside (caller closes).
+pub fn menu_hit(
+    app: &App,
+    area: Rect,
+    col: u16,
+    row: u16,
+) -> Option<Option<MenuAction>> {
+    let state = app.menu.as_ref()?;
+    let rect = menu_rect(&state.kind, state.anchor, area);
+    if col < rect.x || col >= rect.x.saturating_add(rect.width) {
+        return None;
+    }
+    if row < rect.y || row >= rect.y.saturating_add(rect.height) {
+        return None;
+    }
+    let inner_y = rect.y + 1;
+    if row < inner_y || row >= rect.y.saturating_add(rect.height - 1) {
+        return None; // border rows: neither pick nor close
+    }
+    menu_items(&state.kind).get((row - inner_y) as usize).cloned()
+}
+
+fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(state) = app.menu.as_ref() else {
+        return;
+    };
+    let rect = menu_rect(&state.kind, state.anchor, area);
+    frame.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut non_sep = 0usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for item in menu_items(&state.kind) {
+        match item {
+            None => lines.push(Line::from(Span::styled(
+                "─".repeat(inner.width as usize),
+                Style::default().fg(ratatui::style::Color::DarkGray),
+            ))),
+            Some(action) => {
+                let mut style = Style::default();
+                if non_sep == state.selected {
+                    style = style.add_modifier(Modifier::REVERSED);
                 }
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", menu_label(&action)),
+                    style,
+                )));
+                non_sep += 1;
             }
         }
     }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// --- the close-workspace confirmation -----------------------------------------
+
+fn confirm_rect(app: &App, area: Rect) -> Option<Rect> {
+    app.confirm.as_ref()?;
+    let width = 48.min(area.width.saturating_sub(2)).max(20);
+    let height = 6.min(area.height.saturating_sub(1)).max(4);
+    Some(Rect {
+        x: area.x.saturating_add((area.width.saturating_sub(width)) / 2),
+        y: area.y.saturating_add((area.height.saturating_sub(height)) / 2),
+        width,
+        height,
+    })
+}
+
+/// The two buttons' rects ([Close] [Cancel]) inside the dialog.
+fn confirm_buttons(rect: Rect) -> (Rect, Rect) {
+    let row_y = rect.y.saturating_add(rect.height.saturating_sub(2));
+    let close = Rect {
+        x: rect.x.saturating_add(3),
+        y: row_y,
+        width: 10,
+        height: 1,
+    };
+    let cancel = Rect {
+        x: close.x.saturating_add(12),
+        y: row_y,
+        width: 10,
+        height: 1,
+    };
+    (close, cancel)
+}
+
+/// A click on the dialog: `Some(true)` = Close, `Some(false)` = Cancel,
+/// `None` = outside (the caller cancels).
+pub fn confirm_hit(app: &App, area: Rect, col: u16, row: u16) -> Option<bool> {
+    let rect = confirm_rect(app, area)?;
+    let (close, cancel) = confirm_buttons(rect);
+    let inside = |r: &Rect| col >= r.x && col < r.x.saturating_add(r.width) && row == r.y;
+    if inside(&close) {
+        return Some(true);
+    }
+    if inside(&cancel) {
+        return Some(false);
+    }
     None
+}
+
+fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(rect) = confirm_rect(app, area) else {
+        return;
+    };
+    let Some(c) = app.confirm.as_ref() else {
+        return;
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL).title(" close workspace ");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let name = app
+        .model
+        .workspace(&c.ws_id)
+        .map(|ws| ws.name.clone())
+        .unwrap_or_default();
+    let (close, cancel) = confirm_buttons(rect);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(format!(
+        " Close '{}'?",
+        truncate(name, inner.width.saturating_sub(12) as usize)
+    )));
+    lines.push(Line::from(format!(
+        " {} live pane(s) will be terminated.",
+        c.live
+    )));
+    lines.push(Line::from(""));
+    let mut cs = Style::default().fg(ratatui::style::Color::Red);
+    let mut xs = Style::default();
+    if hovered(app, close) {
+        cs = cs.add_modifier(Modifier::REVERSED);
+    }
+    if hovered(app, cancel) {
+        xs = xs.add_modifier(Modifier::REVERSED);
+    }
+    // One line holds both buttons — painted as two spans at fixed offsets.
+    let mut row = vec![Span::raw(" ")];
+    if close.x > inner.x + 1 {
+        row.push(Span::raw(" ".repeat((close.x - inner.x - 1) as usize)));
+    }
+    row.push(Span::styled("[ Close ]", cs));
+    if cancel.x > close.x + 9 {
+        row.push(Span::raw(" ".repeat((cancel.x - close.x - 9) as usize)));
+    }
+    row.push(Span::styled("[ Cancel ]", xs));
+    lines.push(Line::from(row));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // --- the shell picker dropdown ------------------------------------------------

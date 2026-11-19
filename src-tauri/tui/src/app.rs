@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyEventKind, MouseButton,
-    MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -35,10 +35,10 @@ use store_core::workspace_store::{LayoutNode, Orientation};
 
 use crate::driver::{default_cwd, resolve_shell, DriverKind, OpenParams, SessionDriver};
 use crate::grid::Grid;
+use crate::keymap::key_to_bytes;
 use crate::model::{tab_display_name, Ids, TermModel};
-use crate::prefix::{PrefixCommand, PrefixEvent, PrefixMachine};
 use crate::status::{is_known_cli, AgentStatusMachine};
-use crate::ui;
+use crate::ui::{self, MenuAction};
 
 /// One live pane: its session, its emulated screen, its status machine and
 /// its side-channel OSC parser (the byte stream itself is never mutated —
@@ -65,6 +65,12 @@ struct Drag {
     divider_id: String,
 }
 
+/// The pending close-workspace confirmation.
+pub struct ConfirmClose {
+    pub ws_id: String,
+    pub live: usize,
+}
+
 pub struct App {
     pub model: TermModel,
     pub driver: Arc<dyn SessionDriver>,
@@ -78,7 +84,6 @@ pub struct App {
     active_tabs: HashMap<String, String>, // ws id → tab id
     pub active_pane: String,
     pub zoomed: bool,
-    prefix: PrefixMachine,
     ids: Ids,
     msg_tx: Sender<Msg>,
     msg_rx: Receiver<Msg>,
@@ -87,8 +92,15 @@ pub struct App {
     /// highlights; `Moved` events only arrive under mouse capture, which the
     /// run() setup enables.
     hover: Option<(u16, u16)>,
+    /// The last known pane-grid size (cols, rows) — new panes spawn at it.
+    pane_dims: (u16, u16),
     /// The shell picker dropdown (the tab bar's "v" button) is showing.
     shell_menu: bool,
+    /// The open context menu (right-click chrome), if any.
+    pub menu: Option<ui::MenuState>,
+    /// The pending "close workspace" confirmation (desktop CloseConfirmDialog
+    /// parity: only when the workspace holds live panes).
+    pub confirm: Option<ConfirmClose>,
     should_exit: bool,
     start: Instant,
     last_status_tick: u64,
@@ -125,13 +137,15 @@ impl App {
             active_tabs: HashMap::new(),
             active_pane: String::new(),
             zoomed: false,
-            prefix: PrefixMachine::new(),
             ids,
             msg_tx,
             msg_rx,
             drag: None,
             hover: None,
+            pane_dims: (80, 24),
             shell_menu: false,
+            menu: None,
+            confirm: None,
             should_exit: false,
             start: Instant::now(),
             last_status_tick: 0,
@@ -298,7 +312,7 @@ impl App {
 
     /// The geometry of the pane area for the current tab. `zoomed` gives the
     /// focused pane the whole area.
-    fn pane_geometry(&self, area: Rect) -> Vec<(String, Rect)> {
+    pub fn pane_geometry(&self, area: Rect) -> Vec<(String, Rect)> {
         let Some(tree) = self.active_tree() else {
             return vec![];
         };
@@ -343,9 +357,11 @@ impl App {
 
     // --- commands (the prefix dispatch, B4) ----------------------------------
 
-    fn dispatch_command(&mut self, cmd: PrefixCommand, cols: u16, rows: u16) {
-        match cmd {
-            PrefixCommand::NewTab => {
+    /// Chrome actions (menus/buttons) land here. `cols`/`rows` size a newly
+    /// spawned pane, exactly as the loop sizes its sessions.
+    fn run_menu_action(&mut self, action: MenuAction, cols: u16, rows: u16) {
+        match action {
+            MenuAction::NewTab => {
                 let Some(tab_id) = self.model.create_tab(&self.active_ws, &mut self.ids) else {
                     return;
                 };
@@ -354,120 +370,143 @@ impl App {
                 self.normalize_selection();
                 self.model.persist();
             }
-            PrefixCommand::CloseTab => {
-                let Some(tab_id) = self.active_tab_id() else {
-                    return;
-                };
-                let leaves = self
-                    .model
-                    .tab_layout(&tab_id)
-                    .map(|t| crate::layout::leaf_ids(&t))
-                    .unwrap_or_default();
-                if self.model.close_tab(&tab_id) {
-                    for leaf in leaves {
-                        self.kill_pane(&leaf);
-                    }
-                    self.model.persist();
-                    self.normalize_selection();
-                }
-            }
-            PrefixCommand::ClosePane => {
-                let Some(tab_id) = self.active_tab_id() else {
-                    return;
-                };
-                let tree = self.model.tab_layout(&tab_id);
-                let Some(tree) = tree else { return };
-                let leaves = crate::layout::leaf_ids(&tree);
-                if leaves.len() <= 1 {
-                    // The last pane belongs to closing the tab.
-                    self.dispatch_command(PrefixCommand::CloseTab, cols, rows);
-                    return;
-                }
-                if self.model.close_pane(&tab_id, &self.active_pane) {
-                    let closed = self.active_pane.clone();
-                    self.kill_pane(&closed);
-                    self.model.persist();
-                    self.normalize_selection();
-                }
-            }
-            PrefixCommand::SplitRight | PrefixCommand::SplitDown => {
-                let Some(tab_id) = self.active_tab_id() else {
-                    return;
-                };
-                let orientation = if cmd == PrefixCommand::SplitRight {
-                    Orientation::Horizontal
+            MenuAction::CloseTab(tab_id) => self.close_tab_id(&tab_id),
+            MenuAction::SplitHorizontal => self.split_focused(Orientation::Horizontal, cols, rows),
+            MenuAction::SplitVertical => self.split_focused(Orientation::Vertical, cols, rows),
+            MenuAction::ZoomToggle => self.zoomed = !self.zoomed,
+            MenuAction::FocusPane(leaf_id) => self.focus_pane(&leaf_id),
+            MenuAction::ClosePane(leaf_id) => self.close_leaf(&leaf_id),
+            MenuAction::NewWorkspace => self.create_workspace_active(),
+            MenuAction::CloseWorkspace(ws_id) => {
+                let live = self.live_panes_of_workspace(&ws_id);
+                if live > 0 {
+                    // Desktop CloseConfirmDialog parity: something is running,
+                    // so the delete asks first.
+                    self.confirm = Some(ConfirmClose { ws_id, live });
                 } else {
-                    Orientation::Vertical
-                };
-                let active = self.active_pane.clone();
-                if let Some((_, new_leaf)) =
-                    self.model.split_pane(&tab_id, &active, orientation, &mut self.ids)
-                {
-                    let ws = self.active_ws.clone();
-                    self.model.persist();
-                    self.spawn_pane(&ws, &tab_id, &new_leaf, cols.max(10), rows.max(4));
-                    self.active_pane = new_leaf;
+                    self.delete_workspace(&ws_id);
                 }
             }
-            PrefixCommand::ZoomPane => self.zoomed = !self.zoomed,
-            PrefixCommand::Quit => self.should_exit = true,
-            PrefixCommand::FocusLeft
-            | PrefixCommand::FocusRight
-            | PrefixCommand::FocusUp
-            | PrefixCommand::FocusDown => self.focus_nav(cmd, cols, rows),
-            PrefixCommand::NextWorkspace => self.switch_workspace(1),
-            PrefixCommand::PrevWorkspace => self.switch_workspace(-1),
+            MenuAction::Quit => self.request_exit(),
         }
     }
 
-    /// Focus navigation: pick the neighbor pane whose center lies in the
-    /// direction (the pure geometry is [`crate::layout`]'s; the choice is
-    /// arithmetic over the current rects).
-    fn focus_nav(&mut self, cmd: PrefixCommand, cols: u16, rows: u16) {
-        // The rect center in f64-safe integer math (ratatui has no
-        // Rect::center in this version).
-        let center = |r: &Rect| -> (i64, i64) {
-            (
-                r.x as i64 + (r.width / 2) as i64,
-                r.y as i64 + (r.height / 2) as i64,
-            )
-        };
-        let (dx, dy) = match cmd {
-            PrefixCommand::FocusLeft => (-1i64, 0),
-            PrefixCommand::FocusRight => (1, 0),
-            PrefixCommand::FocusUp => (0, -1),
-            _ => (0, 1),
-        };
-        let rects = self.pane_geometry(Rect::new(0, 0, cols, rows.saturating_sub(1)));
-        let Some(current) = rects
-            .iter()
-            .find(|(id, _)| *id == self.active_pane)
-            .map(|(_, r)| center(r))
-        else {
+    fn split_focused(&mut self, orientation: Orientation, cols: u16, rows: u16) {
+        let Some(tab_id) = self.active_tab_id() else {
             return;
         };
-        let mut best: Option<(String, u64)> = None;
-        for (id, r) in &rects {
-            if *id == self.active_pane || r.width < 2 || r.height < 2 {
-                continue;
+        let active = self.active_pane.clone();
+        if let Some((_, new_leaf)) =
+            self.model
+                .split_pane(&tab_id, &active, orientation, &mut self.ids)
+        {
+            let ws = self.active_ws.clone();
+            self.model.persist();
+            self.spawn_pane(&ws, &tab_id, &new_leaf, cols.max(10), rows.max(4));
+            self.active_pane = new_leaf;
+        }
+    }
+
+    fn close_tab_id(&mut self, tab_id: &str) {
+        let leaves = self
+            .model
+            .tab_layout(tab_id)
+            .map(|t| crate::layout::leaf_ids(&t))
+            .unwrap_or_default();
+        if self.model.close_tab(tab_id) {
+            for leaf in leaves {
+                self.kill_pane(&leaf);
             }
-            let (cx, cy) = center(r);
-            let vx = cx - current.0;
-            let vy = cy - current.1;
-            let along = vx * dx + vy * dy;
-            if along <= 0 {
-                continue;
+            self.model.persist();
+            self.normalize_selection();
+        }
+    }
+
+    /// Close one pane; the last pane of a tab closes the tab (the same rule
+    /// the chords used to apply).
+    fn close_leaf(&mut self, leaf_id: &str) {
+        let Some(tab_id) = self.model.tab_of_pane(leaf_id) else {
+            return;
+        };
+        let leaves = self
+            .model
+            .tab_layout(&tab_id)
+            .map(|t| crate::layout::leaf_ids(&t))
+            .unwrap_or_default();
+        if leaves.len() <= 1 {
+            self.close_tab_id(&tab_id);
+            return;
+        }
+        if self.model.close_pane(&tab_id, leaf_id) {
+            self.kill_pane(leaf_id);
+            self.model.persist();
+            self.normalize_selection();
+        }
+    }
+
+    fn create_workspace_active(&mut self) {
+        let ws_id = self.model.create_workspace(&mut self.ids);
+        self.activate_workspace(&ws_id);
+        self.model.persist();
+    }
+
+    /// Live sessions under one workspace (the confirm dialog's count).
+    fn live_panes_of_workspace(&self, ws_id: &str) -> usize {
+        let Some(ws) = self.model.workspace(ws_id) else {
+            return 0;
+        };
+        ws.tabs
+            .iter()
+            .filter_map(|t| self.model.tab_layout(&t.id))
+            .map(|tree| crate::layout::leaf_ids(&tree))
+            .flatten()
+            .filter(|leaf| self.panes.contains_key(leaf))
+            .count()
+    }
+
+    fn delete_workspace(&mut self, ws_id: &str) {
+        let Some(ws) = self.model.workspace(ws_id) else {
+            return;
+        };
+        let leaves: Vec<String> = ws
+            .tabs
+            .iter()
+            .filter_map(|t| self.model.tab_layout(&t.id))
+            .map(|tree| crate::layout::leaf_ids(&tree))
+            .flatten()
+            .collect();
+        if self.model.delete_workspace(ws_id) {
+            for leaf in leaves {
+                self.kill_pane(&leaf);
             }
-            // Prefer alignment on the cross axis.
-            let cross = if dx != 0 { vy.abs() } else { vx.abs() };
-            let score = along.unsigned_abs() + cross.unsigned_abs() * 2;
-            if best.as_ref().map(|(_, s)| score < *s).unwrap_or(true) {
-                best = Some((id.clone(), score));
+            self.model.persist();
+            self.normalize_selection();
+            self.redraw_all();
+        }
+    }
+
+    /// The worst live status across a tab's panes — the tab title's glyph
+    /// (the desktop's per-tab chip).
+    pub fn tab_status(&self, tab_id: &str) -> crate::status::AgentStatus {
+        use crate::status::AgentStatus::*;
+        let mut worst = Idle;
+        let leaves = self
+            .model
+            .tab_layout(tab_id)
+            .map(|t| crate::layout::leaf_ids(&t))
+            .unwrap_or_default();
+        for leaf in leaves {
+            if let Some(pane) = self.panes.get(&leaf) {
+                let s = pane.status.status();
+                if s == NeedsAttention {
+                    return NeedsAttention;
+                }
+                if s == Working {
+                    worst = Working;
+                }
             }
         }
-        if let Some((id, _)) = best {
-            self.focus_pane(&id);
-        }
+        worst
     }
 
     /// Focus a pane (acknowledging needs-attention — the same rule as the
@@ -482,20 +521,7 @@ impl App {
         }
     }
 
-    fn switch_workspace(&mut self, delta: i32) {
-        let order = self.model.workspace_order();
-        if order.is_empty() {
-            return;
-        }
-        let idx = order
-            .iter()
-            .position(|id| *id == self.active_ws)
-            .unwrap_or(0);
-        let next = (idx as i32 + delta).rem_euclid(order.len() as i32) as usize;
-        self.activate_workspace(&order[next]);
-    }
-
-    /// A sidebar click (or the chord) landing on this workspace.
+    /// A sidebar click (or a menu action) landing on this workspace.
     fn activate_workspace(&mut self, ws_id: &str) {
         if self.model.workspace(ws_id).is_none() {
             return;
@@ -543,7 +569,8 @@ impl App {
                     return;
                 }
                 let pane_area = ui::pane_area(area);
-                self.handle_key(key, pane_area.width, pane_area.height);
+                self.pane_dims = (pane_area.width.max(10), pane_area.height.max(4));
+                self.handle_key(key);
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse, area),
             Event::Resize(_, _) => {} // the loop redraws + resizes every frame
@@ -552,23 +579,90 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, cols: u16, rows: u16) {
-        match self.prefix.feed(self.now_ms(), key) {
-            PrefixEvent::Consumed => {}
-            PrefixEvent::Command(cmd) => self.dispatch_command(cmd, cols, rows),
-            PrefixEvent::ToPane(bytes) => {
-                if bytes.is_empty() {
-                    return;
-                }
-                let submitted = bytes.contains(&0x0d);
-                let now = self.now_ms();
-                self.write_active(&bytes);
-                if let Some(pane) = self.panes.get_mut(&self.active_pane) {
-                    pane.status.on_user_input(now, submitted);
-                    pane.grid.scroll_to_bottom();
+    fn handle_key(&mut self, key: KeyEvent) {
+        // Modal chrome owns the keyboard first: the context menu navigates
+        // with arrows + Enter, the confirm dialog answers y/n, Esc closes
+        // either (desktop dialog parity).
+        if self.menu.is_some() {
+            self.handle_menu_key(key);
+            return;
+        }
+        if self.confirm.is_some() {
+            self.handle_confirm_key(key);
+            return;
+        }
+        // Tab fullscreen (the desktop's ZoomIcon behavior): Esc brings the
+        // chrome back.
+        if key.code == KeyCode::Esc && self.zoomed {
+            self.zoomed = false;
+            return;
+        }
+        // Everything else belongs to the focused pane — translated to the
+        // exact bytes a real terminal would send.
+        let bytes = key_to_bytes(key.code, key.modifiers);
+        if bytes.is_empty() {
+            return;
+        }
+        let submitted = bytes.contains(&0x0d);
+        let now = self.now_ms();
+        self.write_active(&bytes);
+        if let Some(pane) = self.panes.get_mut(&self.active_pane) {
+            pane.status.on_user_input(now, submitted);
+            pane.grid.scroll_to_bottom();
+        }
+    }
+
+    fn handle_menu_key(&mut self, key: KeyEvent) {
+        let Some(state) = &mut self.menu else {
+            return;
+        };
+        let total = ui::menu_items(&state.kind).len();
+        if total == 0 {
+            self.menu = None;
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.menu = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.selected + 1 < total {
+                    state.selected += 1;
                 }
             }
+            KeyCode::Enter => {
+                let action = ui::menu_items(&state.kind)
+                    .into_iter()
+                    .flatten()
+                    .nth(state.selected);
+                let pane_area = self.pane_area_dims();
+                self.menu = None;
+                if let Some(action) = action {
+                    self.run_menu_action(action, pane_area.0, pane_area.1);
+                }
+            }
+            _ => {}
         }
+    }
+
+    fn handle_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => self.confirm = None,
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(c) = self.confirm.take() {
+                    self.delete_workspace(&c.ws_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The pane-grid dimensions (a spawned pane's PTY size) — kept from the
+    /// last input event so the keyboard-driven menu path sizes new panes the
+    /// same way the mouse path does.
+    fn pane_area_dims(&self) -> (u16, u16) {
+        self.pane_dims
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) {
@@ -577,9 +671,53 @@ impl App {
         let pane_area = ui::pane_area(area);
         let rects = self.pane_geometry(pane_area);
         match mouse.kind {
+            MouseEventKind::Down(MouseButton::Right) => {
+                // The context menu — the desktop's right-click pattern. Each
+                // chrome surface gets its own action list; the shell dropdown
+                // and any earlier menu close first (menus don't stack).
+                self.shell_menu = false;
+                if let Some(kind) = ui::context_kind(self, area, mouse.column, mouse.row) {
+                    self.menu = Some(ui::MenuState {
+                        kind,
+                        anchor: (mouse.column, mouse.row),
+                        selected: 0,
+                    });
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
-                // An open shell dropdown swallows the whole click: a row
-                // applies the pick, anything else just closes the menu.
+                // The confirm dialog is topmost: a button answers, anything
+                // else cancels.
+                if self.confirm.is_some() {
+                    match ui::confirm_hit(self, area, mouse.column, mouse.row) {
+                        Some(true) => {
+                            if let Some(c) = self.confirm.take() {
+                                self.delete_workspace(&c.ws_id);
+                            }
+                        }
+                        _ => self.confirm = None,
+                    }
+                    return;
+                }
+                // An open context menu swallows the whole click first: a row
+                // runs its action, anything else just closes the menu.
+                if self.menu.is_some() {
+                    let pick = ui::menu_hit(self, area, mouse.column, mouse.row);
+                    let dims = self.pane_area_dims();
+                    let action = match pick {
+                        Some(pick) => pick,
+                        None => {
+                            self.menu = None;
+                            None
+                        }
+                    };
+                    self.menu = None;
+                    if let Some(action) = action {
+                        self.run_menu_action(action, dims.0, dims.1);
+                    }
+                    return;
+                }
+                // Then the shell dropdown: a row applies the pick, anything
+                // else just closes the menu.
                 if self.shell_menu {
                     if let Some(pick) = ui::shell_pick_at(self, area, mouse.column, mouse.row) {
                         self.model.settings.default_shell = pick;
@@ -588,14 +726,14 @@ impl App {
                     self.shell_menu = false;
                     return;
                 }
-                // The clickable chrome first: footer buttons, tab titles and
-                // sidebar workspace rows own their rows before pane hit-tests.
+                // The clickable chrome first: tab titles, their x buttons,
+                // the sidebar — panes come last.
                 if let Some(hit) = ui::hit_test(self, area, mouse.column, mouse.row) {
+                    let dims = self.pane_area_dims();
                     match hit {
-                        ui::UiHit::Command(cmd) => {
-                            self.dispatch_command(cmd, pane_area.width, pane_area.height);
-                        }
+                        ui::UiHit::Menu(action) => self.run_menu_action(action, dims.0, dims.1),
                         ui::UiHit::Tab(tab_id) => self.activate_tab(&tab_id),
+                        ui::UiHit::TabClose(tab_id) => self.close_tab_id(&tab_id),
                         ui::UiHit::Workspace(ws_id) => self.activate_workspace(&ws_id),
                         ui::UiHit::ShellMenu => self.shell_menu = !self.shell_menu,
                     }
@@ -681,6 +819,11 @@ impl App {
     /// The shell picker dropdown is showing.
     pub fn shell_menu_open(&self) -> bool {
         self.shell_menu
+    }
+
+    /// Tab-fullscreen mode is on (the desktop's Full screen zoom).
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed
     }
 
     /// Shells found on PATH — the Terminal's mirror of the desktop's shell
@@ -920,11 +1063,7 @@ fn event_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
         }
         let now = app.now_ms();
-        if let Some(bytes) = app.prefix.tick(now) {
-            // The armed chord timed out: the buffered literal Ctrl+B goes to
-            // the focused pane.
-            app.write_active(&bytes);
-        }
+        let _ = now; // the ticks read their own clock
         app.tick();
         app.model.persist();
 
