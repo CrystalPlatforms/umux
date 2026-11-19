@@ -492,6 +492,11 @@ impl App {
                 });
                 self.menu = None;
             }
+            MenuAction::ToggleAgentStatuses => {
+                self.model.settings.agent_status_enabled =
+                    !self.model.settings.agent_status_enabled;
+                self.model.persist_settings();
+            }
             MenuAction::NewGroup => {
                 let mut n = self.model.group_count() + 1;
                 let mut name = format!("Group {n}");
@@ -1083,6 +1088,13 @@ impl App {
     /// Tab-fullscreen mode is on (the desktop's Full screen zoom).
     pub fn is_zoomed(&self) -> bool {
         self.zoomed
+    }
+
+    /// The agent-status indicators' gate — the TERM store's own copy of the
+    /// desktop's `agentStatusEnabled` (store separation: the Terminal reads
+    /// and writes only its own settings).
+    pub fn agent_statuses_enabled(&self) -> bool {
+        self.model.settings.agent_status_enabled
     }
 
     /// Shells found on PATH — the Terminal's mirror of the desktop's shell

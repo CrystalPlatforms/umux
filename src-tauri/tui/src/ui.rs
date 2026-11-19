@@ -223,7 +223,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             SidebarRow::Workspace { id, name, aggregate, indent } => {
                 let active = id == app.active_ws;
                 let marker = if active { ">" } else { " " };
-                let glyph = status_glyph(aggregate);
+                let glyph = glyph_for(app, aggregate);
                 let pad = if indent { "  " } else { "" };
                 if active || hovered(app, row_rect) {
                     style = style.add_modifier(Modifier::BOLD);
@@ -272,7 +272,7 @@ fn tab_chrome(app: &App, row: Rect) -> (Vec<TabChrome>, Option<Rect>, Option<Rec
     for (i, tab) in display {
         // Per-tab agent status (story #77 parity with the desktop's chips):
         // the tab title carries the glyph, not just the sidebar aggregate.
-        let glyph = status_glyph(app.tab_status(&tab.id));
+        let glyph = glyph_for(app, app.tab_status(&tab.id));
         let pin_mark = if tab.pinned.unwrap_or(false) {
             "▲ "
         } else {
@@ -389,7 +389,7 @@ fn pane_title_base(app: &App, leaf_id: &str, rect: Rect) -> String {
     format!(
         " {}{} ",
         truncate(tab_name, rect.width.saturating_sub(8) as usize),
-        status_glyph(status)
+        glyph_for(app, status)
     )
 }
 
@@ -561,6 +561,8 @@ pub enum MenuAction {
     DeleteGroup(String),
     /// Open a workspace row's "move to group" submenu.
     BeginMoveGroup(String),
+    /// Toggle the agent-status glyphs (the term store's own settings copy).
+    ToggleAgentStatuses,
     /// File a workspace under a group (None = top level).
     MoveToGroup(String, Option<String>),
 }
@@ -714,6 +716,8 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
         MenuKind::Header => vec![
             Some(MenuAction::NewWorkspace),
             Some(MenuAction::NewGroup),
+            None,
+            Some(MenuAction::ToggleAgentStatuses),
             None,
             Some(MenuAction::Quit),
         ],
@@ -1075,6 +1079,13 @@ fn menu_label(app: &App, action: &MenuAction) -> String {
         MenuAction::ToggleGroup(_) => "Collapse / expand".into(),
         MenuAction::DeleteGroup(_) => "Delete group".into(),
         MenuAction::BeginMoveGroup(_) => "Move to group".into(),
+        MenuAction::ToggleAgentStatuses => {
+            if app.agent_statuses_enabled() {
+                "Agent statuses: on".into()
+            } else {
+                "Agent statuses: off".into()
+            }
+        }
         MenuAction::MoveToGroup(_, None) => "No group".into(),
         MenuAction::MoveToGroup(_, Some(gid)) => app
             .model
@@ -1379,6 +1390,17 @@ fn status_glyph(status: AgentStatus) -> &'static str {
         AgentStatus::Idle => " ",
         AgentStatus::Working => "▶",
         AgentStatus::NeedsAttention => "!",
+    }
+}
+
+/// The agent-status glyph, honoring the Terminal's own `agentStatusEnabled`
+/// gate (off = a blank glyph — the machines keep running either way, the
+/// desktop's semantics).
+fn glyph_for(app: &App, status: AgentStatus) -> &'static str {
+    if app.agent_statuses_enabled() {
+        status_glyph(status)
+    } else {
+        " "
     }
 }
 
