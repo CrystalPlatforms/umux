@@ -920,6 +920,24 @@ enum ImportAction {
         #[arg(long, value_name = "FILE")]
         session: Option<std::path::PathBuf>,
     },
+    /// Merge the DESKTOP store's saved state into the target store
+    /// (v1.9.0 #80, the Desktop↔Terminal transfer: run with --term). MERGE,
+    /// never replace — collisions suffixed ` from desk`; the source store is
+    /// never written
+    Desk {
+        /// Print what would land and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Merge the TERMINAL store's saved state into the target store
+    /// (v1.9.0 #80, run with --desk). MERGE, never replace — collisions
+    /// suffixed ` from term`; the source store is never written
+    Term {
+        /// Print what would land and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
     /// Restore an umux exchange document written by `umux export` —
     /// REPLACES the chosen store with the document's state
     Umux {
@@ -4474,12 +4492,13 @@ fn run_workspaces_export(target: Target, output: Option<std::path::PathBuf>, jso
     }
 }
 
-/// `umux workspaces import` (alias `import`). The import WRITES the chosen
-/// store, so the single-writer probe (#125) runs first: while the app or
-/// the daemon answers the socket, the store is owned by the live side and
-/// the offline write is refused — close umux first, or run the import while
-/// nothing is alive.
-fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) {
+/// The single-writer gate (#125) every offline STORE WRITE runs first: while
+/// the app or the daemon answers the socket, the store is owned by the live
+/// side and the write is refused — close umux first, or run the command
+/// while nothing is alive. A stale socket is cleaned up on the way through.
+/// Shared by `workspaces import` and the v1.9.0 desk↔term transfer (the
+/// exact refusal shapes and exit codes of the v1.8.0 import).
+fn refuse_live_store_write(json_mode: bool) {
     match probe_world() {
         World::Offline { stale } => {
             if stale {
@@ -4516,6 +4535,15 @@ fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) 
             );
         }
     }
+}
+
+/// `umux workspaces import` (alias `import`). The import WRITES the chosen
+/// store, so the single-writer probe (#125) runs first: while the app or
+/// the daemon answers the socket, the store is owned by the live side and
+/// the offline write is refused — close umux first, or run the import while
+/// nothing is alive.
+fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) {
+    refuse_live_store_write(json_mode);
     match action {
         ImportAction::Cmux {
             dry_run,
@@ -4547,6 +4575,78 @@ fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) 
         ImportAction::Umux { file, dry_run } => {
             run_umux_import(target, &file, dry_run, json_mode)
         }
+        ImportAction::Desk { dry_run } => run_store_transfer(target, Target::Desk, dry_run, json_mode),
+        ImportAction::Term { dry_run } => run_store_transfer(target, Target::Term, dry_run, json_mode),
+    }
+}
+
+/// The Desktop↔Terminal transfer's import half (B7, v1.9.0 / #80): merge the
+/// SOURCE store's saved state into the TARGET store (`umux workspaces import
+/// desk --term`, `import term --desk`). The source store is opened
+/// read-only and NEVER written; the merge goes through
+/// `store_core::transfer` — the same pure code path any future UI button
+/// rides (F1 shells out to these commands, it does not reimplement the
+/// transfer). Settings are NOT transferable — per-surface app config, the
+/// exchange module's documented rule.
+fn run_store_transfer(target: Target, source: Target, dry_run: bool, json_mode: bool) {
+    if target == source {
+        let (name, other) = match target {
+            Target::Desk => ("desk", "--term"),
+            Target::Term => ("term", "--desk"),
+        };
+        fail(
+            json_mode,
+            &ErrorObj::new(
+                codes::BAD_PARAMS,
+                format!("the {name} store cannot import from itself"),
+                vec![format!("target the other store with {other}")],
+            ),
+            2,
+        );
+    }
+    let label = match source {
+        Target::Desk => "desk",
+        Target::Term => "term",
+    };
+    let incoming = workspace_store_for(source).load();
+    let live = workspace_store_for(target).load();
+    let mut ids = Ids::new();
+    let planned = store_core::transfer::merge_states(&live, &incoming, label, &mut || ids.next());
+    if dry_run {
+        if json_mode {
+            print_doc(&json!({
+                "planned": {
+                    "from": label,
+                    "workspaces": planned.workspaces.len() - live.workspaces.len(),
+                    "groups": planned.groups.len() - live.groups.len(),
+                }
+            }));
+            return;
+        }
+        let preview = build_import_preview(&live, &planned);
+        let tree = build_preview_tree(&preview);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tree).expect("preview tree is always serializable")
+        );
+        return;
+    }
+    workspace_store_for(target).save(&planned).expect("save workspace store");
+    if json_mode {
+        print_doc(&json!({
+            "imported": {
+                "from": label,
+                "workspaces": planned.workspaces.len() - live.workspaces.len(),
+                "groups": planned.groups.len() - live.groups.len(),
+            }
+        }));
+    } else {
+        println!(
+            "Merged {} workspaces and {} groups from the {label} store \
+             (collisions suffixed \" from {label}\").",
+            planned.workspaces.len() - live.workspaces.len(),
+            planned.groups.len() - live.groups.len()
+        );
     }
 }
 
@@ -5574,7 +5674,9 @@ const COMMAND_TABLE: &[CmdSpec] = &[
         notes: &[
             "cmux: imports cmux's saved files (dry-run prints the plan; not available on Windows)",
             "umux <file>: REPLACES the chosen store with the exchange document",
-            "--json: {imported: {workspaces, groups}}; failures are catalog error objects",
+            "desk (v1.9.0 #80, with --term): MERGES the desktop store's state in, collisions suffixed \" from desk\"; the source store is never written",
+            "term (v1.9.0 #80, with --desk): the reverse — the terminal store merges into the desktop store",
+            "--json: {imported: {workspaces, groups}} (desk/term add \"from\"); failures are catalog error objects",
         ],
     },
     CmdSpec {

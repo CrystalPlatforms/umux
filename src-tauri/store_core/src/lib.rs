@@ -15,9 +15,11 @@
 //! - [`paths`] — per-OS config directory + the one-time legacy migration.
 //! - [`exchange`] — the neutral exchange format export/import speak (#61).
 //! - [`cmux_import`] — the Rust cmux importer (parse → plan → apply, #63).
+//! - [`transfer`] — the Desktop↔Terminal workspace-state merge (B7, v1.9.0).
 
 pub mod cmux_import;
 pub mod exchange;
 pub mod paths;
 pub mod settings_store;
+pub mod transfer;
 pub mod workspace_store;
