@@ -350,7 +350,7 @@ mod tests {
         let moved = &next.workspaces[0];
         assert_ne!(moved.tabs[0].id, "t1", "tab ids are remapped");
         match &moved.tabs[0].layout {
-            LayoutNode::Leaf { id } => assert_ne!(id, "p1", "leaf ids are remapped"),
+            Some(LayoutNode::Leaf { id }) => assert_ne!(id, "p1", "leaf ids are remapped"),
             _ => panic!("expected a leaf"),
         }
         match &moved.layout {
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn the_source_state_is_never_mutated() {
-        let mut incoming = WorkspaceData {
+        let incoming = WorkspaceData {
             workspaces: vec![ws("w1", "proj")],
             groups: vec![group("g1", "Grp", None)],
             order: vec!["w1".into(), "g1".into()],
