@@ -201,6 +201,18 @@ impl TermModel {
         false
     }
 
+    /// Set (Some palette hex) or clear (None) a tab's color (#70).
+    pub fn set_tab_color(&mut self, tab_id: &str, color: Option<String>) -> bool {
+        for ws in &mut self.data.workspaces {
+            if let Some(tab) = ws.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.color = color;
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Close a tab (its pane sessions die in the runtime). Returns whether
     /// it existed.
     pub fn close_tab(&mut self, tab_id: &str) -> bool {

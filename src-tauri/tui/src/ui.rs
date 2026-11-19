@@ -206,6 +206,7 @@ struct TabChrome {
     label: String,
     active: bool,
     id: String,
+    color: Option<ratatui::style::Color>,
 }
 
 /// The tab bar's geometry — each tab's title + "x", then the trailing
@@ -253,6 +254,7 @@ fn tab_chrome(app: &App, row: Rect) -> (Vec<TabChrome>, Option<Rect>, Option<Rec
             label,
             active,
             id: tab.id.clone(),
+            color: tab.color.as_deref().and_then(palette_color),
         });
         x += w + 2;
     }
@@ -283,6 +285,9 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for t in &tabs {
         let mut style = Style::default();
+        if let Some(color) = t.color {
+            style = style.fg(color);
+        }
         if t.active {
             style = style.add_modifier(Modifier::REVERSED);
         } else if hovered(app, t.rect) {
@@ -484,6 +489,10 @@ pub enum MenuAction {
     ActivateWorkspace(String),
     CloseWorkspace(String),
     Quit,
+    /// Open a tab's color submenu.
+    BeginTabColor(String),
+    /// Set (Some hex) or clear (None) a tab's color.
+    SetTabColor(String, Option<String>),
 }
 
 /// Which surface a right-click landed on (the desktop's per-surface menus).
@@ -491,6 +500,8 @@ pub enum MenuAction {
 pub enum MenuKind {
     /// A tab title.
     Tab(String),
+    /// The color submenu of a tab.
+    TabColor(String),
     /// A pane in the grid.
     Pane(String),
     /// A sidebar workspace row.
@@ -526,6 +537,30 @@ pub enum UiHit {
     ShellMenu,
 }
 
+/// The fixed eight (the desktop's COLOR_PALETTE, workspaces.ts #70).
+pub const TAB_PALETTE: [(&str, &str); 8] = [
+    ("light green", "#4ade80"),
+    ("dark green", "#16a34a"),
+    ("light blue", "#60a5fa"),
+    ("dark blue", "#2563eb"),
+    ("yellow", "#eab308"),
+    ("red", "#ef4444"),
+    ("pink", "#ec4899"),
+    ("purple", "#a855f7"),
+];
+
+/// A palette hex → ratatui RGB.
+pub fn palette_color(hex: &str) -> Option<ratatui::style::Color> {
+    let h = hex.strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some(ratatui::style::Color::Rgb(r, g, b))
+}
+
 /// The context menu's rows: `None` is a separator (the desktop's
 /// menu-separator).
 pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
@@ -535,9 +570,20 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
             Some(MenuAction::SplitHorizontal),
             Some(MenuAction::SplitVertical),
             Some(MenuAction::ZoomToggle),
+            Some(MenuAction::BeginTabColor(tab_id.clone())),
             None,
             Some(MenuAction::CloseTab(tab_id.clone())),
         ],
+        MenuKind::TabColor(tab_id) => {
+            let mut items: Vec<Option<MenuAction>> = TAB_PALETTE
+                .iter()
+                .map(|(_, hex)| {
+                    Some(MenuAction::SetTabColor(tab_id.clone(), Some((*hex).to_string())))
+                })
+                .collect();
+            items.push(Some(MenuAction::SetTabColor(tab_id.clone(), None)));
+            items
+        }
         MenuKind::Pane(pane_id) => vec![
             Some(MenuAction::FocusPane(pane_id.clone())),
             Some(MenuAction::SplitHorizontal),
@@ -569,17 +615,8 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
 /// workspace").
 fn menu_title(app: &App, kind: &MenuKind) -> String {
     match kind {
-        MenuKind::Tab(tab_id) => {
-            let name = app
-                .model
-                .workspace(&app.active_ws)
-                .and_then(|ws| {
-                    let i = ws.tabs.iter().position(|t| t.id == *tab_id)?;
-                    ws.tabs.get(i).map(|t| tab_display_name(i, t))
-                })
-                .unwrap_or_else(|| "tab".into());
-            format!(" tab: {} ", name)
-        }
+        MenuKind::Tab(tab_id) => format!(" tab: {} ", app.tab_name(tab_id)),
+        MenuKind::TabColor(tab_id) => format!(" color: {} ", app.tab_name(tab_id)),
         MenuKind::Pane(_) => " pane ".into(),
         MenuKind::Workspace(ws_id) => format!(
             " workspace: {} ",
@@ -824,6 +861,16 @@ fn menu_label(action: &MenuAction) -> String {
         MenuAction::ActivateWorkspace(_) => "Switch to workspace".into(),
         MenuAction::CloseWorkspace(_) => "Close workspace".into(),
         MenuAction::Quit => "Quit".into(),
+        MenuAction::BeginTabColor(_) => "Color".into(),
+        MenuAction::SetTabColor(_, Some(hex)) => {
+            let name = TAB_PALETTE
+                .iter()
+                .find(|(_, h)| *h == hex.as_str())
+                .map(|(n, _)| *n)
+                .unwrap_or(hex.as_str());
+            format!("{name}")
+        }
+        MenuAction::SetTabColor(_, None) => "Default".into(),
     }
 }
 

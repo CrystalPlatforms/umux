@@ -425,6 +425,18 @@ impl App {
                 }
             }
             MenuAction::Quit => self.request_exit(),
+            MenuAction::BeginTabColor(tab_id) => {
+                let anchor = self.menu.as_ref().map(|m| m.anchor).unwrap_or((12, 2));
+                self.menu = Some(ui::MenuState {
+                    kind: ui::MenuKind::TabColor(tab_id),
+                    anchor,
+                    selected: 0,
+                });
+            }
+            MenuAction::SetTabColor(tab_id, color) => {
+                self.model.set_tab_color(&tab_id, color);
+                self.model.persist();
+            }
         }
     }
 
@@ -520,6 +532,21 @@ impl App {
             self.normalize_selection();
             self.redraw_all();
         }
+    }
+
+    /// A tab's display name (searched across workspaces — menus name their
+    /// target tab).
+    pub fn tab_name(&self, tab_id: &str) -> String {
+        for ws_id in self.model.workspace_order() {
+            if let Some(ws) = self.model.workspace(&ws_id) {
+                if let Some(i) = ws.tabs.iter().position(|t| t.id == tab_id) {
+                    if let Some(t) = ws.tabs.get(i) {
+                        return tab_display_name(i, t);
+                    }
+                }
+            }
+        }
+        "tab".into()
     }
 
     /// The worst live status across a tab's panes — the tab title's glyph
