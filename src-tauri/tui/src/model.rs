@@ -359,6 +359,7 @@ mod tests {
     //! reason in-process tests would race).
 
     use super::*;
+    use crate::layout;
     use std::sync::Mutex;
 
     /// Serializes every test that touches `UMUX_CONFIG_DIR`.
@@ -451,11 +452,11 @@ mod tests {
             model.persist();
 
             // The term store file exists, under term/.
-            let term_path = dir.path().join("term").join("workspaces.json");
+            let term_path = dir.join("term").join("workspaces.json");
             assert!(term_path.exists(), "the term store was written: {}", term_path.display());
 
             // The desktop store's file was NEVER created (the separation AC).
-            let desk_path = dir.path().join("workspaces.json");
+            let desk_path = dir.join("workspaces.json");
             assert!(!desk_path.exists(), "the desktop store must stay untouched");
         });
     }
