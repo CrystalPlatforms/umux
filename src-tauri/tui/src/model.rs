@@ -229,6 +229,28 @@ impl TermModel {
         false
     }
 
+    pub fn tab_pinned(&self, tab_id: &str) -> bool {
+        self.data
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.pinned)
+            .unwrap_or(false)
+    }
+
+    /// Pin / unpin a tab (pinned tabs render first).
+    pub fn set_tab_pinned(&mut self, tab_id: &str, pinned: bool) -> bool {
+        for ws in &mut self.data.workspaces {
+            if let Some(tab) = ws.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.pinned = Some(pinned);
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Close a tab (its pane sessions die in the runtime). Returns whether
     /// it existed.
     pub fn close_tab(&mut self, tab_id: &str) -> bool {

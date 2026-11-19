@@ -455,6 +455,11 @@ impl App {
             }
             MenuAction::Quit => self.request_exit(),
             MenuAction::Separate(tab_id) => self.separate_tab(&tab_id),
+            MenuAction::TogglePinTab(tab_id) => {
+                let pinned = self.model.tab_pinned(&tab_id);
+                self.model.set_tab_pinned(&tab_id, !pinned);
+                self.model.persist();
+            }
             MenuAction::BeginTabColor(tab_id) => {
                 let anchor = self.menu.as_ref().map(|m| m.anchor).unwrap_or((12, 2));
                 self.menu = Some(ui::MenuState {
@@ -1377,7 +1382,7 @@ mod tests {
     //! round-2 fixes), not to the active one.
 
     use super::*;
-    use crate::ui::{context_kind, hit_test, MenuAction, MenuKind, UiHit};
+    use crate::ui::{hit_test, MenuAction, MenuKind, UiHit};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use std::sync::Mutex;
 

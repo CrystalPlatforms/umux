@@ -264,12 +264,23 @@ fn tab_chrome(app: &App, row: Rect) -> (Vec<TabChrome>, Option<Rect>, Option<Rec
     };
     let right = row.x.saturating_add(row.width);
     let mut x = row.x;
-    for (i, tab) in ws.tabs.iter().enumerate() {
+    // Pinned tabs render first (the desktop's pin rule); within the two
+    // groups the original order holds.
+    let mut display: Vec<(usize, &store_core::workspace_store::Tab)> =
+        ws.tabs.iter().enumerate().collect();
+    display.sort_by_key(|(i, t)| (!t.pinned.unwrap_or(false), *i));
+    for (i, tab) in display {
         // Per-tab agent status (story #77 parity with the desktop's chips):
         // the tab title carries the glyph, not just the sidebar aggregate.
         let glyph = status_glyph(app.tab_status(&tab.id));
+        let pin_mark = if tab.pinned.unwrap_or(false) {
+            "▲ "
+        } else {
+            ""
+        };
         let label = format!(
-            " {}{} ",
+            " {}{}{} ",
+            pin_mark,
             truncate(tab_display_name(i, tab), 16),
             glyph
         );
@@ -540,6 +551,8 @@ pub enum MenuAction {
     BeginRenameTab(String),
     /// Pull a split tab's panes apart into their own tabs (#121).
     Separate(String),
+    /// Pin / unpin a tab.
+    TogglePinTab(String),
     /// Create a new workspace group.
     NewGroup,
     /// Collapse / expand a group header.
@@ -632,6 +645,7 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
             let mut items = vec![
                 Some(MenuAction::NewTab),
                 Some(MenuAction::BeginRenameTab(tab_id.clone())),
+                Some(MenuAction::TogglePinTab(tab_id.clone())),
                 Some(MenuAction::SplitHorizontal),
                 Some(MenuAction::SplitVertical),
                 Some(MenuAction::ZoomToggle),
@@ -1050,6 +1064,13 @@ fn menu_label(app: &App, action: &MenuAction) -> String {
         MenuAction::BeginRenameWorkspace(_) => "Rename workspace".into(),
         MenuAction::BeginRenameTab(_) => "Rename tab".into(),
         MenuAction::Separate(_) => "Separate".into(),
+        MenuAction::TogglePinTab(tab_id) => {
+            if app.model.tab_pinned(tab_id) {
+                "Unpin tab".into()
+            } else {
+                "Pin tab".into()
+            }
+        }
         MenuAction::NewGroup => "New group".into(),
         MenuAction::ToggleGroup(_) => "Collapse / expand".into(),
         MenuAction::DeleteGroup(_) => "Delete group".into(),
