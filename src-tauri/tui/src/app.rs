@@ -487,6 +487,37 @@ impl App {
                 });
                 self.menu = None;
             }
+            MenuAction::NewGroup => {
+                let mut n = self.model.group_count() + 1;
+                let mut name = format!("Group {n}");
+                while self.model.group_name_taken(&name) {
+                    n += 1;
+                    name = format!("Group {n}");
+                }
+                let gid = self.ids.next();
+                self.model.add_group(gid.clone(), name);
+                self.model.persist();
+            }
+            MenuAction::ToggleGroup(gid) => {
+                self.model.toggle_group_collapsed(&gid);
+                self.model.persist();
+            }
+            MenuAction::DeleteGroup(gid) => {
+                self.model.remove_group(&gid);
+                self.model.persist();
+            }
+            MenuAction::BeginMoveGroup(ws_id) => {
+                let anchor = self.menu.as_ref().map(|m| m.anchor).unwrap_or((12, 4));
+                self.menu = Some(ui::MenuState {
+                    kind: ui::MenuKind::MoveGroup(ws_id),
+                    anchor,
+                    selected: 0,
+                });
+            }
+            MenuAction::MoveToGroup(ws_id, group) => {
+                self.model.set_workspace_group(&ws_id, group);
+                self.model.persist();
+            }
         }
     }
 
@@ -954,6 +985,10 @@ impl App {
                         ui::UiHit::TabClose(tab_id) => self.close_tab_id(&tab_id),
                         ui::UiHit::PaneClose(leaf) => self.close_leaf(&leaf),
                         ui::UiHit::Workspace(ws_id) => self.activate_workspace(&ws_id),
+                        ui::UiHit::Group(gid) => {
+                            self.model.toggle_group_collapsed(&gid);
+                            self.model.persist();
+                        }
                         ui::UiHit::ShellMenu => self.shell_menu = !self.shell_menu,
                     }
                     return;

@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Pane};
-use crate::model::tab_display_name;
+use crate::model::{tab_display_name, SidebarEntry};
 use crate::status::AgentStatus;
 
 /// The pane area of a given terminal size — the ONE geometry both the
@@ -203,38 +203,38 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let mut lines: Vec<Line> = Vec::new();
-    for (i, ws_id) in app.model.workspace_order().into_iter().enumerate() {
-        let Some(ws) = app.model.workspace(&ws_id) else {
-            continue;
+    for (i, row) in sidebar_rows(app).into_iter().enumerate() {
+        let row_rect = Rect {
+            x: rows.x,
+            y: rows.y.saturating_add(i as u16),
+            width: rows.width,
+            height: 1,
         };
-        let aggregate = app.workspace_status(&ws_id);
-        let active = ws_id == app.active_ws;
-        let marker = if active { ">" } else { " " };
-        let glyph = status_glyph(aggregate);
-        let mut style = if active {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
+        let mut style = Style::default();
+        let text = match row {
+            SidebarRow::Header => continue,
+            SidebarRow::Group { name, collapsed, .. } => {
+                style = style
+                    .fg(ratatui::style::Color::Cyan)
+                    .add_modifier(Modifier::BOLD);
+                let arrow = if collapsed { "▶" } else { "▼" };
+                format!("{arrow} {}", truncate(name, rows.width.saturating_sub(3) as usize))
+            }
+            SidebarRow::Workspace { id, name, aggregate, indent } => {
+                let active = id == app.active_ws;
+                let marker = if active { ">" } else { " " };
+                let glyph = status_glyph(aggregate);
+                let pad = if indent { "  " } else { "" };
+                if active || hovered(app, row_rect) {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                format!(
+                    "{pad}{marker}{glyph} {}",
+                    truncate(name, rows.width.saturating_sub(6) as usize)
+                )
+            }
         };
-        // A hovered workspace row lights up (the row's click switches).
-        if hovered(
-            app,
-            Rect {
-                x: rows.x,
-                y: rows.y.saturating_add(i as u16),
-                width: rows.width,
-                height: 1,
-            },
-        ) {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        lines.push(Line::from(Span::styled(
-            format!(
-                "{marker}{glyph} {}",
-                truncate(ws.name.clone(), inner.width.saturating_sub(4) as usize)
-            ),
-            style,
-        )));
+        lines.push(Line::from(Span::styled(text, style)));
     }
     frame.render_widget(Paragraph::new(lines), rows);
 }
@@ -540,6 +540,16 @@ pub enum MenuAction {
     BeginRenameTab(String),
     /// Pull a split tab's panes apart into their own tabs (#121).
     Separate(String),
+    /// Create a new workspace group.
+    NewGroup,
+    /// Collapse / expand a group header.
+    ToggleGroup(String),
+    /// Delete a group; its workspaces return to the top level.
+    DeleteGroup(String),
+    /// Open a workspace row's "move to group" submenu.
+    BeginMoveGroup(String),
+    /// File a workspace under a group (None = top level).
+    MoveToGroup(String, Option<String>),
 }
 
 /// Which surface a right-click landed on (the desktop's per-surface menus).
@@ -553,6 +563,10 @@ pub enum MenuKind {
     Pane(String),
     /// A sidebar workspace row.
     Workspace(String),
+    /// A sidebar group header.
+    Group(String),
+    /// The "move to group" submenu of a workspace row.
+    MoveGroup(String),
     /// The chrome generally (sidebar header, tab-bar gaps, footer).
     Header,
 }
@@ -580,6 +594,8 @@ pub enum UiHit {
     PaneClose(String),
     /// A sidebar workspace row.
     Workspace(String),
+    /// A sidebar group header (click toggles collapse).
+    Group(String),
     /// The tab bar's "v" shell-picker button.
     ShellMenu,
 }
@@ -656,11 +672,34 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
         MenuKind::Workspace(ws_id) => {
             vec![
                 Some(MenuAction::BeginRenameWorkspace(ws_id.clone())),
+                Some(MenuAction::BeginMoveGroup(ws_id.clone())),
                 Some(MenuAction::CloseWorkspace(ws_id.clone())),
             ]
         }
+        MenuKind::Group(group_id) => vec![
+            Some(MenuAction::ToggleGroup(group_id.clone())),
+            None,
+            Some(MenuAction::DeleteGroup(group_id.clone())),
+        ],
+        MenuKind::MoveGroup(ws_id) => {
+            let current = app
+                .model
+                .workspace(ws_id)
+                .and_then(|ws| ws.group_id.clone());
+            let mut items = vec![Some(MenuAction::MoveToGroup(ws_id.clone(), None))];
+            for e in app.model.sidebar_tree() {
+                if let SidebarEntry::Group { id, name, .. } = e {
+                    if Some(id.clone()) != current {
+                        items.push(Some(MenuAction::MoveToGroup(ws_id.clone(), Some(id))));
+                    }
+                    let _ = name;
+                }
+            }
+            items
+        }
         MenuKind::Header => vec![
             Some(MenuAction::NewWorkspace),
+            Some(MenuAction::NewGroup),
             None,
             Some(MenuAction::Quit),
         ],
@@ -677,6 +716,25 @@ fn menu_title(app: &App, kind: &MenuKind) -> String {
         MenuKind::Pane(_) => " pane ".into(),
         MenuKind::Workspace(ws_id) => format!(
             " workspace: {} ",
+            app.model
+                .workspace(ws_id)
+                .map(|ws| ws.name.clone())
+                .unwrap_or_else(|| "?".into())
+        ),
+        MenuKind::Group(group_id) => format!(
+            " group: {} ",
+            app
+                .model
+                .sidebar_tree()
+                .into_iter()
+                .find_map(|e| match e {
+                    SidebarEntry::Group { id, name, .. } if id == *group_id => Some(name),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "?".into())
+        ),
+        MenuKind::MoveGroup(ws_id) => format!(
+            " move: {} ",
             app.model
                 .workspace(ws_id)
                 .map(|ws| ws.name.clone())
@@ -719,6 +777,67 @@ fn sidebar_header_buttons(inner: Rect) -> (Option<Rect>, Option<Rect>) {
     (Some(plus), Some(quit))
 }
 
+/// One row of the sidebar as drawn AND hit — the single geometry source
+/// (the titled-block lesson: never derive the rows twice).
+enum SidebarRow {
+    Header,
+    Group {
+        id: String,
+        name: String,
+        collapsed: bool,
+    },
+    Workspace {
+        id: String,
+        name: String,
+        aggregate: AgentStatus,
+        indent: bool,
+    },
+}
+
+fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
+    let tree = app.model.sidebar_tree();
+    let collapsed: Vec<String> = tree
+        .iter()
+        .filter_map(|e| match e {
+            SidebarEntry::Group {
+                id,
+                collapsed: true,
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut rows = vec![SidebarRow::Header];
+    for e in tree {
+        match e {
+            SidebarEntry::Group { id, name, collapsed } => {
+                rows.push(SidebarRow::Group {
+                    id,
+                    name,
+                    collapsed,
+                });
+            }
+            SidebarEntry::Workspace { id, name, group } => {
+                if group
+                    .as_deref()
+                    .map(|g| collapsed.iter().any(|c| c == g))
+                    .unwrap_or(false)
+                {
+                    continue; // members of a collapsed group hide
+                }
+                let aggregate = app.workspace_status(&id);
+                rows.push(SidebarRow::Workspace {
+                    id,
+                    name,
+                    aggregate,
+                    indent: group.is_some(),
+                });
+            }
+        }
+    }
+    rows
+}
+
 /// Which piece of chrome owns this cell? Mirrors the renderer's geometry
 /// cell for cell, so a click never lands beside what it visually hit.
 pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
@@ -748,15 +867,14 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             }
             return None;
         }
-        // Workspace rows (one row below the header).
+        // Workspace/group rows (one row below the header).
         if row > inner.y && row < inner.y.saturating_add(inner.height) {
             let idx = (row - inner.y - 1) as usize;
-            return app
-                .model
-                .workspace_order()
-                .get(idx)
-                .cloned()
-                .map(UiHit::Workspace);
+            return match sidebar_rows(app).get(idx) {
+                Some(SidebarRow::Group { id, .. }) => Some(UiHit::Group(id.clone())),
+                Some(SidebarRow::Workspace { id, .. }) => Some(UiHit::Workspace(id.clone())),
+                _ => None,
+            };
         }
         return None;
     }
@@ -838,12 +956,13 @@ pub fn context_kind(app: &App, area: Rect, col: u16, row: u16) -> Option<MenuKin
         }
         if row > inner.y && row < inner.y.saturating_add(inner.height) {
             let idx = (row - inner.y - 1) as usize;
-            return app
-                .model
-                .workspace_order()
-                .get(idx)
-                .cloned()
-                .map(MenuKind::Workspace);
+            return match sidebar_rows(app).get(idx) {
+                Some(SidebarRow::Group { id, .. }) => Some(MenuKind::Group(id.clone())),
+                Some(SidebarRow::Workspace { id, .. }) => {
+                    Some(MenuKind::Workspace(id.clone()))
+                }
+                _ => Some(MenuKind::Header),
+            };
         }
         return Some(MenuKind::Header);
     }
@@ -891,7 +1010,7 @@ pub fn menu_rect(app: &App, kind: &MenuKind, anchor: (u16, u16), area: Rect) -> 
     let title = menu_title(app, kind);
     let widest = items
         .iter()
-        .map(|i| i.as_ref().map(|a| menu_label(a).chars().count()).unwrap_or(8))
+        .map(|i| i.as_ref().map(|a| menu_label(app, a).chars().count()).unwrap_or(8))
         .max()
         .unwrap_or(8)
         .max(title.chars().count()) as u16;
@@ -905,7 +1024,7 @@ pub fn menu_rect(app: &App, kind: &MenuKind, anchor: (u16, u16), area: Rect) -> 
     Rect { x, y, width, height }
 }
 
-fn menu_label(action: &MenuAction) -> String {
+fn menu_label(app: &App, action: &MenuAction) -> String {
     match action {
         MenuAction::NewTab => "New tab".into(),
         MenuAction::CloseTab(_) => "Close tab".into(),
@@ -931,6 +1050,20 @@ fn menu_label(action: &MenuAction) -> String {
         MenuAction::BeginRenameWorkspace(_) => "Rename workspace".into(),
         MenuAction::BeginRenameTab(_) => "Rename tab".into(),
         MenuAction::Separate(_) => "Separate".into(),
+        MenuAction::NewGroup => "New group".into(),
+        MenuAction::ToggleGroup(_) => "Collapse / expand".into(),
+        MenuAction::DeleteGroup(_) => "Delete group".into(),
+        MenuAction::BeginMoveGroup(_) => "Move to group".into(),
+        MenuAction::MoveToGroup(_, None) => "No group".into(),
+        MenuAction::MoveToGroup(_, Some(gid)) => app
+            .model
+            .sidebar_tree()
+            .into_iter()
+            .find_map(|e| match e {
+                SidebarEntry::Group { id, name, .. } if id == *gid => Some(name),
+                _ => None,
+            })
+            .unwrap_or_else(|| "group".into()),
     }
 }
 
@@ -995,7 +1128,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 lines.push(Line::from(Span::styled(
-                    format!(" {}", menu_label(&action)),
+                    format!(" {}", menu_label(app, &action)),
                     style,
                 )));
                 non_sep += 1;

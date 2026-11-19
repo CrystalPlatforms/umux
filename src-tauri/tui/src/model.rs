@@ -15,8 +15,24 @@ use std::path::PathBuf;
 
 use store_core::settings_store::{Settings, SettingsStore};
 use store_core::workspace_store::{
-    LayoutNode, Orientation, Tab, Workspace, WorkspaceData, WorkspaceStore,
+    Group, LayoutNode, Orientation, Tab, Workspace, WorkspaceData, WorkspaceStore,
 };
+
+/// One sidebar row: a group header or a workspace (with its group, for the
+/// indent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarEntry {
+    Group {
+        id: String,
+        name: String,
+        collapsed: bool,
+    },
+    Workspace {
+        id: String,
+        name: String,
+        group: Option<String>,
+    },
+}
 
 /// Clock/pid-seeded id generator (the CLI's shape, dependency-free).
 pub struct Ids(u64);
@@ -333,6 +349,127 @@ impl TermModel {
             }
         }
         ids
+    }
+
+    /// One row of the sidebar tree: a group header or a workspace (with the
+    /// group it sits under, for the indent). The ONE shape the renderer,
+    /// hit-tests and menus share.
+    pub fn sidebar_tree(&self) -> Vec<SidebarEntry> {
+        let groups: std::collections::HashMap<&str, &Group> = self
+            .data
+            .groups
+            .iter()
+            .map(|g| (g.id.as_str(), g))
+            .collect();
+        let ws_by_id: std::collections::HashMap<&str, &Workspace> = self
+            .data
+            .workspaces
+            .iter()
+            .map(|w| (w.id.as_str(), w))
+            .collect();
+        let mut rows = Vec::new();
+        for id in &self.data.order {
+            if let Some(g) = groups.get(id.as_str()) {
+                rows.push(SidebarEntry::Group {
+                    id: g.id.clone(),
+                    name: g.name.clone(),
+                    collapsed: g.collapsed.unwrap_or(false),
+                });
+            } else if let Some(w) = ws_by_id.get(id.as_str()) {
+                rows.push(SidebarEntry::Workspace {
+                    id: w.id.clone(),
+                    name: w.name.clone(),
+                    group: w.group_id.clone(),
+                });
+            }
+        }
+        // Anything missing from `order` (a pre-order config, a fresh group
+        // the create path appended) joins the end: groups first, then their
+        // workspaces, then top-level workspaces.
+        for g in &self.data.groups {
+            if !self.data.order.contains(&g.id) {
+                rows.push(SidebarEntry::Group {
+                    id: g.id.clone(),
+                    name: g.name.clone(),
+                    collapsed: g.collapsed.unwrap_or(false),
+                });
+            }
+        }
+        for w in &self.data.workspaces {
+            if !self.data.order.contains(&w.id) {
+                rows.push(SidebarEntry::Workspace {
+                    id: w.id.clone(),
+                    name: w.name.clone(),
+                    group: w.group_id.clone(),
+                });
+            }
+        }
+        rows
+    }
+
+    /// A fresh group node ("Group N" naming is the caller's).
+    pub fn add_group(&mut self, id: String, name: String) {
+        self.data.groups.push(Group {
+            id: id.clone(),
+            name,
+            collapsed: Some(false),
+            pinned: None,
+            parent_id: None,
+            color: None,
+        });
+        self.data.order.push(id);
+        self.dirty = true;
+    }
+
+    /// Remove a group; its workspaces return to the top level.
+    pub fn remove_group(&mut self, group_id: &str) -> bool {
+        let Some(pos) = self.data.groups.iter().position(|g| g.id == group_id) else {
+            return false;
+        };
+        self.data.groups.remove(pos);
+        self.data.order.retain(|id| id != group_id);
+        for w in &mut self.data.workspaces {
+            if w.group_id.as_deref() == Some(group_id) {
+                w.group_id = None;
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// File a workspace under a group (None = top level).
+    pub fn set_workspace_group(&mut self, ws_id: &str, group_id: Option<String>) -> bool {
+        if let Some(gid) = &group_id {
+            if !self.data.groups.iter().any(|g| g.id == *gid) {
+                return false;
+            }
+        }
+        if let Some(w) = self.data.workspaces.iter_mut().find(|w| w.id == ws_id) {
+            w.group_id = group_id;
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Collapse / expand a group's header.
+    pub fn toggle_group_collapsed(&mut self, group_id: &str) -> bool {
+        if let Some(g) = self.data.groups.iter_mut().find(|g| g.id == group_id) {
+            g.collapsed = Some(!g.collapsed.unwrap_or(false));
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn group_count(&self) -> usize {
+        self.data.groups.len()
+    }
+
+    pub fn group_name_taken(&self, name: &str) -> bool {
+        self.data.groups.iter().any(|g| g.name == name)
     }
 }
 
