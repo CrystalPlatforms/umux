@@ -348,3 +348,191 @@ pub fn tab_display_name(tabs_before: usize, tab: &Tab) -> String {
 pub fn term_store_root() -> PathBuf {
     store_core::paths::term_config_dir()
 }
+
+#[cfg(test)]
+mod tests {
+    //! The B3 ACs that touch the store: a restart restores what the TUI
+    //! persisted (round-trip through `store_core`, tmpdir), and the TUI's
+    //! writes land ONLY in the term store — the desktop store's files are
+    //! never created (the separation test). The env-var tests serialize on a
+    //! mutex: `UMUX_CONFIG_DIR` is process-global (paths.rs's documented
+    //! reason in-process tests would race).
+
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes every test that touches `UMUX_CONFIG_DIR`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_tmp_config(test: impl FnOnce(&std::path::Path)) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("UMUX_CONFIG_DIR", dir.path());
+        test(dir.path());
+        std::env::remove_var("UMUX_CONFIG_DIR");
+    }
+
+    fn ws(ws_id: &str, name: &str) -> Workspace {
+        Workspace {
+            id: ws_id.into(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn next_workspace_name_skips_taken_numbers() {
+        let mut model = TermModel {
+            data: WorkspaceData {
+                workspaces: vec![ws("w1", "Workspace 1"), ws("w2", "Workspace 3")],
+                ..Default::default()
+            },
+            settings: Settings::default(),
+            ws_store: WorkspaceStore::new(std::env::temp_dir().join("umux-tui-test-unused")),
+            settings_store: SettingsStore::new(std::env::temp_dir().join("umux-tui-test-unused")),
+            dirty: false,
+        };
+        assert_eq!(model.next_workspace_name(), "Workspace 2");
+        model.data.workspaces.push(ws("w3", "Workspace 2"));
+        assert_eq!(model.next_workspace_name(), "Workspace 4");
+    }
+
+    #[test]
+    fn structural_changes_mark_dirty_and_persist_writes_once() {
+        with_tmp_config(|_| {
+            let mut ids = Ids::new();
+            let mut model = TermModel::open();
+            assert!(!model.dirty(), "a fresh open is clean");
+            let ws_id = model.create_workspace(&mut ids);
+            assert!(model.dirty());
+            model.persist();
+            assert!(!model.dirty(), "persist clears the flag");
+            // A second persist with nothing pending writes nothing (no error
+            // channel to observe — the flag is the observable contract).
+            model.persist();
+        });
+    }
+
+    #[test]
+    fn a_restart_restores_workspaces_tabs_and_split_layout() {
+        with_tmp_config(|_| {
+            let mut ids = Ids::new();
+            let (ws_id, tab_id, first_leaf, second_leaf);
+            {
+                let mut model = TermModel::open();
+                ws_id = model.create_workspace(&mut ids);
+                tab_id = model.create_tab(&ws_id, &mut ids).unwrap();
+                let tree = model
+                    .tab_layout(&tab_id)
+                    .expect("a fresh tab carries a one-pane layout");
+                first_leaf = layout::leaf_ids(&tree)[0].clone();
+                let (_, leaf_id) = model
+                    .split_pane(&tab_id, &first_leaf, Orientation::Horizontal, &mut ids)
+                    .expect("the pane splits");
+                second_leaf = leaf_id;
+                model.rename_workspace(&ws_id, "proj".into());
+                model.persist();
+            }
+            // A fresh open — the restart — reads back everything.
+            let model = TermModel::open();
+            let restored = model.workspace(&ws_id).expect("workspace survives");
+            assert_eq!(restored.name, "proj");
+            let tree = model.tab_layout(&tab_id).unwrap();
+            assert_eq!(layout::leaf_ids(&tree), vec![first_leaf, second_leaf]);
+        });
+    }
+
+    #[test]
+    fn the_tui_writes_only_the_term_store() {
+        with_tmp_config(|dir| {
+            let mut ids = Ids::new();
+            let mut model = TermModel::open();
+            model.create_workspace(&mut ids);
+            model.persist();
+
+            // The term store file exists, under term/.
+            let term_path = dir.path().join("term").join("workspaces.json");
+            assert!(term_path.exists(), "the term store was written: {}", term_path.display());
+
+            // The desktop store's file was NEVER created (the separation AC).
+            let desk_path = dir.path().join("workspaces.json");
+            assert!(!desk_path.exists(), "the desktop store must stay untouched");
+        });
+    }
+
+    #[test]
+    fn workspace_order_survives_deletion_and_unknown_ids() {
+        let mut model = TermModel {
+            data: WorkspaceData {
+                workspaces: vec![ws("w1", "one"), ws("w2", "two")],
+                order: vec!["w2".into(), "ghost".into(), "w1".into()],
+                ..Default::default()
+            },
+            settings: Settings::default(),
+            ws_store: WorkspaceStore::new(std::env::temp_dir().join("umux-tui-test-unused")),
+            settings_store: SettingsStore::new(std::env::temp_dir().join("umux-tui-test-unused")),
+            dirty: false,
+        };
+        assert_eq!(model.workspace_order(), vec!["w2".to_string(), "w1".to_string()]);
+        assert!(model.delete_workspace("w1"));
+        assert_eq!(model.workspace_order(), vec!["w2".to_string()]);
+        assert!(!model.delete_workspace("w1"), "deleting twice refuses");
+    }
+
+    #[test]
+    fn close_pane_refuses_the_last_pane_and_promotes_the_sibling() {
+        let mut ids = Ids::new();
+        let mut model = TermModel {
+            data: WorkspaceData::default(),
+            settings: Settings::default(),
+            ws_store: WorkspaceStore::new(std::env::temp_dir().join("umux-tui-test-unused")),
+            settings_store: SettingsStore::new(std::env::temp_dir().join("umux-tui-test-unused")),
+            dirty: false,
+        };
+        let ws_id = model.create_workspace(&mut ids);
+        let tab_id = model.workspace(&ws_id).unwrap().tabs[0].id.clone();
+        let leaves = layout::leaf_ids(&model.tab_layout(&tab_id).unwrap());
+        // The single pane of a fresh tab cannot be closed via this op.
+        assert!(!model.close_pane(&tab_id, &leaves[0]));
+
+        let (_, second) = model
+            .split_pane(&tab_id, &leaves[0], Orientation::Horizontal, &mut ids)
+            .unwrap();
+        assert!(model.close_pane(&tab_id, &second));
+        let tree = model.tab_layout(&tab_id).unwrap();
+        assert_eq!(layout::leaf_ids(&tree), leaves[..1].to_vec());
+    }
+
+    #[test]
+    fn ids_are_unique_v4_shaped_strings() {
+        let mut ids = Ids::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let id = ids.next();
+            assert_eq!(id.len(), 36, "{id}");
+            assert!(id.matches('-').count() == 4, "{id}");
+            assert!(seen.insert(id), "ids must not repeat");
+        }
+    }
+
+    #[test]
+    fn tab_display_name_falls_back_to_position() {
+        let mut ids = Ids::new();
+        let bare = |id: String| Tab {
+            id,
+            layout: None,
+            name: None,
+            pinned: None,
+            color: None,
+            shell: None,
+        };
+        let named = Tab {
+            name: Some("shell".into()),
+            ..bare(ids.next())
+        };
+        assert_eq!(tab_display_name(0, &named), "shell");
+        let unnamed = bare(ids.next());
+        assert_eq!(tab_display_name(0, &unnamed), "Tab 1");
+        assert_eq!(tab_display_name(2, &unnamed), "Tab 3");
+    }
+}

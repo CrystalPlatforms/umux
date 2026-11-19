@@ -24,3 +24,7 @@ store_core = { path = "../store_core" }
 # The daemon write payload rides base64 (the protocol's wire shape).
 base64 = "0.22"
 serde_json = "1"
+
+[dev-dependencies]
+# The store round-trip tests run on tmpdirs (the CLI suite's pattern).
+tempfile = "3"

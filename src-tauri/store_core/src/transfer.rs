@@ -176,3 +176,210 @@ pub fn merge_states(
 
     next
 }
+
+#[cfg(test)]
+mod tests {
+    //! The merge contract's pure core: collisions never overwrite, ids are
+    //! freshly minted on the target side, groups keep their nesting, the
+    //! incoming order appends remapped, and the source state is never
+    //! mutated (the result is a NEW state).
+
+    use super::*;
+    use crate::workspace_store::Tab;
+
+    fn ws(id: &str, name: &str) -> Workspace {
+        Workspace {
+            id: id.into(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn group(id: &str, name: &str, parent: Option<&str>) -> Group {
+        Group {
+            id: id.into(),
+            name: name.into(),
+            collapsed: None,
+            pinned: None,
+            parent_id: parent.map(|p| p.to_string()),
+            color: None,
+        }
+    }
+
+    fn sequential_ids() -> impl FnMut() -> String {
+        let mut n = 0u64;
+        move || {
+            n += 1;
+            format!("new-{n}")
+        }
+    }
+
+    fn tab(id: &str, leaf: &str) -> Tab {
+        Tab {
+            id: id.into(),
+            layout: Some(LayoutNode::Leaf { id: leaf.into() }),
+            name: None,
+            pinned: None,
+            color: None,
+            shell: None,
+        }
+    }
+
+    #[test]
+    fn empty_incoming_state_leaves_the_target_alone() {
+        let live = WorkspaceData {
+            workspaces: vec![ws("w1", "proj")],
+            ..Default::default()
+        };
+        let next = merge_states(&live, &WorkspaceData::default(), "desk", &mut sequential_ids());
+        assert_eq!(next, live);
+    }
+
+    #[test]
+    fn colliding_names_get_the_from_label_suffix_then_numbers() {
+        let live = WorkspaceData {
+            workspaces: vec![ws("w1", "proj")],
+            ..Default::default()
+        };
+        let incoming = WorkspaceData {
+            workspaces: vec![ws("w1", "proj"), ws("w2", "proj")],
+            ..Default::default()
+        };
+        let next = merge_states(&live, &incoming, "desk", &mut sequential_ids());
+        let names: Vec<&str> = next.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["proj", "proj from desk", "proj from desk 2"]);
+    }
+
+    #[test]
+    fn incoming_entities_get_fresh_ids_even_without_name_clashes() {
+        let live = WorkspaceData {
+            workspaces: vec![ws("w1", "alpha")],
+            ..Default::default()
+        };
+        let incoming = WorkspaceData {
+            workspaces: vec![ws("w1", "beta")],
+            ..Default::default()
+        };
+        let next = merge_states(&live, &incoming, "term", &mut sequential_ids());
+        assert_eq!(next.workspaces.len(), 2);
+        assert_eq!(next.workspaces[0].id, "w1", "the target's own ids stand");
+        assert_eq!(
+            next.workspaces[1].id, "new-1",
+            "the incoming id space is remapped"
+        );
+    }
+
+    #[test]
+    fn groups_keep_nesting_and_workspaces_re_file_under_mapped_groups() {
+        let live = WorkspaceData::default();
+        let incoming = WorkspaceData {
+            workspaces: vec![Workspace {
+                group_id: Some("g-child".into()),
+                ..ws("w1", "inner")
+            }],
+            groups: vec![group("g-root", "Root", None), group("g-child", "Child", Some("g-root"))],
+            order: vec!["g-root".into(), "w1".into()],
+            ..Default::default()
+        };
+        let next = merge_states(&live, &incoming, "desk", &mut sequential_ids());
+        // Fresh group ids, the parent link remapped through them.
+        let child = next.groups.iter().find(|g| g.name == "Child").unwrap();
+        let root = next.groups.iter().find(|g| g.name == "Root").unwrap();
+        assert_ne!(child.id, "g-child");
+        assert_ne!(root.id, "g-root");
+        assert_eq!(child.parent_id.as_deref(), Some(root.id.as_str()));
+        // The workspace hangs off the mapped group.
+        assert_eq!(next.workspaces[0].group_id.as_deref(), Some(child.id.as_str()));
+        // The nested group never joins the root order — only the root group
+        // and the workspace do, in the incoming order.
+        assert_eq!(
+            next.order,
+            vec![root.id.clone(), next.workspaces[0].id.clone()]
+        );
+    }
+
+    #[test]
+    fn a_dangling_group_reference_drops_to_top_level() {
+        let live = WorkspaceData::default();
+        let incoming = WorkspaceData {
+            workspaces: vec![Workspace {
+                group_id: Some("g-ghost".into()),
+                ..ws("w1", "lost")
+            }],
+            ..Default::default()
+        };
+        let next = merge_states(&live, &incoming, "term", &mut sequential_ids());
+        assert_eq!(next.workspaces[0].group_id, None);
+    }
+
+    #[test]
+    fn order_entries_that_reference_nothing_are_dropped() {
+        let live = WorkspaceData {
+            workspaces: vec![ws("w1", "live")],
+            order: vec!["w1".into()],
+            ..Default::default()
+        };
+        let incoming = WorkspaceData {
+            workspaces: vec![ws("w9", "new")],
+            order: vec!["w9".into(), "ghost".into()],
+            ..Default::default()
+        };
+        let next = merge_states(&live, &incoming, "desk", &mut sequential_ids());
+        assert_eq!(next.order, vec!["w1".to_string(), "new-1".to_string()]);
+    }
+
+    #[test]
+    fn tab_layouts_arrive_with_fresh_node_ids_and_kept_shape() {
+        let incoming_layout = LayoutNode::Split {
+            id: "s1".into(),
+            orientation: Orientation::Horizontal,
+            ratio: 0.7,
+            first: Box::new(LayoutNode::Leaf { id: "p1".into() }),
+            second: Box::new(LayoutNode::Leaf { id: "p2".into() }),
+        };
+        let live = WorkspaceData::default();
+        let incoming = WorkspaceData {
+            workspaces: vec![Workspace {
+                tabs: vec![tab("t1", "p1")],
+                layout: Some(incoming_layout.clone()),
+                ..ws("w1", "split")
+            }],
+            ..Default::default()
+        };
+        let next = merge_states(&live, &incoming, "desk", &mut sequential_ids());
+        let moved = &next.workspaces[0];
+        assert_ne!(moved.tabs[0].id, "t1", "tab ids are remapped");
+        match &moved.tabs[0].layout {
+            LayoutNode::Leaf { id } => assert_ne!(id, "p1", "leaf ids are remapped"),
+            _ => panic!("expected a leaf"),
+        }
+        match &moved.layout {
+            Some(LayoutNode::Split { id, ratio, first, second, .. }) => {
+                assert_ne!(id, "s1");
+                assert!((ratio - 0.7).abs() < 1e-9, "ratios are preserved");
+                let leaf_id = |n: &LayoutNode| match n {
+                    LayoutNode::Leaf { id } => id.clone(),
+                    _ => panic!("expected leaves"),
+                };
+                assert_ne!(leaf_id(first), "p1");
+                assert_ne!(leaf_id(second), "p2");
+                assert_ne!(leaf_id(first), leaf_id(second), "every node gets its own id");
+            }
+            _ => panic!("expected the split to survive"),
+        }
+    }
+
+    #[test]
+    fn the_source_state_is_never_mutated() {
+        let mut incoming = WorkspaceData {
+            workspaces: vec![ws("w1", "proj")],
+            groups: vec![group("g1", "Grp", None)],
+            order: vec!["w1".into(), "g1".into()],
+            ..Default::default()
+        };
+        let before = incoming.clone();
+        let live = WorkspaceData::default();
+        let _ = merge_states(&live, &incoming, "desk", &mut sequential_ids());
+        assert_eq!(incoming, before, "merge must not touch its input");
+    }
+}

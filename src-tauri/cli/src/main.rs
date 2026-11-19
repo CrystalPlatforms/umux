@@ -6977,3 +6977,59 @@ mod attach_resolution {
         assert!(message.contains("app gateway"), "{message}");
     }
 }
+
+#[cfg(test)]
+mod launch_decision {
+    //! The pure launcher decision (B1, #78): the saved default-launch-mode
+    //! plus the `--term` flag pick between the historical help screen and
+    //! the TUI. The plan's three covered cases — the default, the tui
+    //! setting, the `--term` override — plus the has-command guard.
+
+    use super::{decide_launch, LaunchDecision};
+
+    #[test]
+    fn the_default_launch_mode_prints_help() {
+        assert!(matches!(
+            decide_launch("gui", false, false),
+            LaunchDecision::Help
+        ));
+    }
+
+    #[test]
+    fn the_tui_setting_launches_the_terminal() {
+        assert!(matches!(
+            decide_launch("tui", false, false),
+            LaunchDecision::LaunchTui
+        ));
+    }
+
+    #[test]
+    fn the_term_flag_overrides_the_gui_setting() {
+        assert!(matches!(
+            decide_launch("gui", true, false),
+            LaunchDecision::LaunchTui
+        ));
+    }
+
+    #[test]
+    fn a_subcommand_is_store_targeting_never_a_launch() {
+        // `umux list --term` targets the term store — it must not spawn a TUI.
+        assert!(matches!(
+            decide_launch("tui", true, true),
+            LaunchDecision::Help
+        ));
+    }
+
+    #[test]
+    fn an_unknown_saved_value_falls_back_to_help() {
+        // The settings store coerces, but the launcher stays defensive.
+        assert!(matches!(
+            decide_launch("", false, false),
+            LaunchDecision::Help
+        ));
+        assert!(matches!(
+            decide_launch("something-else", false, false),
+            LaunchDecision::Help
+        ));
+    }
+}

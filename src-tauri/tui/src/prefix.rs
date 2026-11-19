@@ -167,3 +167,210 @@ fn command_of(key: &KeyEvent) -> Option<PrefixCommand> {
     let ok_mods = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
     ok_mods.then_some(cmd)
 }
+
+#[cfg(test)]
+mod tests {
+    //! The B4 ACs, as unit tests: arm → command, arm → escape/timeout disarm,
+    //! and the literal-Ctrl+B passthrough when the next key is not a bound
+    //! command within the timeout (an emacs-style binding keeps working).
+
+    use super::*;
+    use crossterm::event::KeyEventState;
+
+    fn press(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn plain(code: KeyCode) -> KeyEvent {
+        press(code, KeyModifiers::NONE)
+    }
+
+    fn prefix() -> KeyEvent {
+        press(KeyCode::Char('b'), KeyModifiers::CONTROL)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        press(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn unarmed_keys_pass_through_to_the_pane() {
+        let mut m = PrefixMachine::new();
+        assert_eq!(m.feed(0, plain(KeyCode::Char('a'))), PrefixEvent::ToPane(b"a".to_vec()));
+        assert_eq!(m.feed(0, plain(KeyCode::Enter)), PrefixEvent::ToPane(vec![0x0d]));
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn ctrl_b_arms_and_is_buffered_not_delivered() {
+        let mut m = PrefixMachine::new();
+        assert_eq!(m.feed(0, prefix()), PrefixEvent::Consumed);
+        assert!(m.is_armed());
+    }
+
+    #[test]
+    fn armed_chord_dispatches_a_command_and_disarms() {
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(m.feed(10, plain(KeyCode::Char('c'))), PrefixEvent::Command(PrefixCommand::NewTab));
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn every_bound_command_key_maps_to_its_command() {
+        let table = [
+            (KeyCode::Char('c'), PrefixCommand::NewTab),
+            (KeyCode::Char('x'), PrefixCommand::ClosePane),
+            (KeyCode::Char('&'), PrefixCommand::CloseTab),
+            (KeyCode::Char('%'), PrefixCommand::SplitRight),
+            (KeyCode::Char('"'), PrefixCommand::SplitDown),
+            (KeyCode::Left, PrefixCommand::FocusLeft),
+            (KeyCode::Char('h'), PrefixCommand::FocusLeft),
+            (KeyCode::Right, PrefixCommand::FocusRight),
+            (KeyCode::Char('l'), PrefixCommand::FocusRight),
+            (KeyCode::Up, PrefixCommand::FocusUp),
+            (KeyCode::Char('k'), PrefixCommand::FocusUp),
+            (KeyCode::Down, PrefixCommand::FocusDown),
+            (KeyCode::Char('j'), PrefixCommand::FocusDown),
+            (KeyCode::Char('n'), PrefixCommand::NextWorkspace),
+            (KeyCode::Char('p'), PrefixCommand::PrevWorkspace),
+            (KeyCode::Char('z'), PrefixCommand::ZoomPane),
+            (KeyCode::Char('q'), PrefixCommand::Quit),
+        ];
+        for (code, cmd) in table {
+            let mut m = PrefixMachine::new();
+            m.feed(0, prefix());
+            assert_eq!(
+                m.feed(1, plain(code)),
+                PrefixEvent::Command(cmd),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_after_the_prefix_passes_both_keys_through() {
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(
+            m.feed(10, plain(KeyCode::Esc)),
+            PrefixEvent::ToPane(vec![0x02, 0x1b])
+        );
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn unbound_key_delivers_the_literal_ctrl_b_then_the_key() {
+        // The AC's emacs case: a pane whose program binds Ctrl+B keeps
+        // receiving it whenever the next key is not a TUI command.
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(
+            m.feed(10, plain(KeyCode::Char('b'))),
+            PrefixEvent::ToPane(vec![0x02, b'b'])
+        );
+    }
+
+    #[test]
+    fn modifier_chords_stay_unbound_and_pass_through() {
+        // Ctrl+S belongs to the pane program (flow control), even armed.
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(
+            m.feed(10, ctrl(KeyCode::Char('s'))),
+            PrefixEvent::ToPane(vec![0x02, 0x13])
+        );
+    }
+
+    #[test]
+    fn shifted_punct_keys_still_dispatch_their_command() {
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(
+            m.feed(10, press(KeyCode::Char('%'), KeyModifiers::SHIFT)),
+            PrefixEvent::Command(PrefixCommand::SplitRight)
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_b_is_not_the_prefix() {
+        let mut m = PrefixMachine::new();
+        assert_eq!(
+            m.feed(0, press(KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+            PrefixEvent::ToPane(vec![0x02])
+        );
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn alt_ctrl_b_is_not_the_prefix() {
+        let mut m = PrefixMachine::new();
+        let event = press(KeyCode::Char('b'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        assert!(matches!(m.feed(0, event), PrefixEvent::ToPane(_)));
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn chord_inside_the_timeout_dispatches() {
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(
+            m.feed(PREFIX_TIMEOUT_MS - 1, plain(KeyCode::Char('z'))),
+            PrefixEvent::Command(PrefixCommand::ZoomPane)
+        );
+    }
+
+    #[test]
+    fn stale_chord_releases_the_buffered_prefix_and_the_key() {
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(
+            m.feed(PREFIX_TIMEOUT_MS, plain(KeyCode::Char('x'))),
+            PrefixEvent::ToPane(vec![0x02, b'x'])
+        );
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn tick_past_the_timeout_disarms_and_releases_the_literal() {
+        let mut m = PrefixMachine::new();
+        m.feed(100, prefix());
+        assert_eq!(m.tick(100 + PREFIX_TIMEOUT_MS - 1), None);
+        assert!(m.is_armed());
+        assert_eq!(m.tick(100 + PREFIX_TIMEOUT_MS), Some(vec![0x02]));
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn tick_while_disarmed_is_a_no_op() {
+        let mut m = PrefixMachine::new();
+        assert_eq!(m.tick(999_999), None);
+    }
+
+    #[test]
+    fn release_events_are_consumed_and_never_arm() {
+        let mut m = PrefixMachine::new();
+        let release = KeyEvent {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(m.feed(0, release), PrefixEvent::Consumed);
+        assert!(!m.is_armed());
+    }
+
+    #[test]
+    fn after_a_command_the_next_ctrl_b_arms_again() {
+        let mut m = PrefixMachine::new();
+        m.feed(0, prefix());
+        assert_eq!(m.feed(5, plain(KeyCode::Char('c'))), PrefixEvent::Command(PrefixCommand::NewTab));
+        assert_eq!(m.feed(10, prefix()), PrefixEvent::Consumed);
+        assert_eq!(m.feed(15, plain(KeyCode::Char('n'))), PrefixEvent::Command(PrefixCommand::NextWorkspace));
+    }
+}

@@ -564,6 +564,205 @@ impl Perform for Performer<'_> {
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_ignored: bool) {}
 }
 
+#[cfg(test)]
+mod tests {
+    //! Fixed byte fixtures — the grid is pure (the B2 AC: unit-testable
+    //! without a live PTY). The byte stream itself is never mutated; these
+    //! tests pin what the RENDERED state does with the sequences a shell and
+    //! an AI-CLI TUI actually paint with.
+
+    use super::*;
+    use ratatui::style::Color;
+
+    fn row_text(g: &Grid, y: u16) -> String {
+        (0..g.cols).map(|x| g.cell(x, y).ch).collect()
+    }
+
+    fn screen_text(g: &Grid) -> String {
+        (0..g.rows).map(|y| row_text(g, y)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn plain_text_lands_at_the_cursor() {
+        let mut g = Grid::new(20, 5);
+        g.feed(b"hello");
+        assert_eq!(row_text(&g, 0), "hello               ");
+        // The cursor sits after the last printed char.
+        assert_eq!(g.view_cursor(), Some((5, 0)));
+    }
+
+    #[test]
+    fn newline_and_carriage_return_move_the_cursor() {
+        let mut g = Grid::new(20, 5);
+        g.feed(b"one\r\ntwo");
+        assert_eq!(row_text(&g, 0), "one                 ");
+        assert_eq!(row_text(&g, 1), "two                 ");
+        assert_eq!(g.view_cursor(), Some((3, 1)));
+    }
+
+    #[test]
+    fn cursor_addressing_plays_where_am_i() {
+        let mut g = Grid::new(20, 5);
+        g.feed(b"\x1b[2;3HX");
+        assert_eq!(g.view_cursor(), Some((3, 1)));
+        assert_eq!(g.cell(2, 1).ch, 'X');
+    }
+
+    #[test]
+    fn erase_in_line_clears_from_the_cursor() {
+        let mut g = Grid::new(20, 5);
+        g.feed(b"hello world");
+        g.feed(b"\r\x1b[5G\x1b[K"); // cursor to col 5, erase to end of line
+        assert_eq!(row_text(&g, 0), "hell                ");
+    }
+
+    #[test]
+    fn sgr_colors_and_attrs_land_on_the_painted_cells() {
+        let mut g = Grid::new(20, 5);
+        g.feed(b"\x1b[1;31mX\x1b[0mY");
+        let x = g.cell(0, 0);
+        assert_eq!(x.ch, 'X');
+        assert!(x.bold);
+        assert_eq!(x.fg, Color::Indexed(1));
+        let y = g.cell(1, 0);
+        assert_eq!(y.ch, 'Y');
+        assert!(!y.bold);
+        assert_eq!(y.fg, Color::Reset);
+    }
+
+    #[test]
+    fn sgr_256_and_rgb_extensions_parse() {
+        let mut g = Grid::new(20, 5);
+        g.feed(b"\x1b[38;5;196mA\x1b[38;2;10;20;30mB");
+        assert_eq!(g.cell(0, 0).fg, Color::Indexed(196));
+        assert_eq!(g.cell(1, 0).fg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn autowrap_wraps_at_the_last_column() {
+        let mut g = Grid::new(5, 3);
+        g.feed(b"abcdefgh");
+        assert_eq!(row_text(&g, 0), "abcde");
+        assert_eq!(row_text(&g, 1), "fgh  ");
+    }
+
+    #[test]
+    fn bottom_row_scrolls_into_scrollback() {
+        let mut g = Grid::new(5, 2);
+        g.feed(b"one\r\ntwo\r\nthree");
+        assert_eq!(g.scrollback_len(), 1);
+        assert_eq!(row_text(&g, 0), "two  ");
+        assert_eq!(row_text(&g, 1), "three");
+    }
+
+    #[test]
+    fn scrolling_away_reveals_scrollback_and_new_output_regrounds() {
+        let mut g = Grid::new(5, 2);
+        g.feed(b"l1\r\nl2\r\nl3\r\nl4");
+        // Scrollback: l1, l2 (l3 scrolled when l4 fed? verify live bottom).
+        assert_eq!(screen_text(&g), "l3  \nl4  ");
+
+        g.scroll_up(1);
+        assert_eq!(g.view_cursor(), None, "scrolled away from the live bottom");
+        assert_eq!(screen_text(&g), "l2  \nl3  ");
+
+        // Fresh output snaps the view back to the live bottom.
+        g.feed(b"!");
+        assert_eq!(g.view_offset, 0);
+    }
+
+    #[test]
+    fn scroll_clamps_at_the_scrollback_bounds() {
+        let mut g = Grid::new(5, 2);
+        g.feed(b"a\r\nb");
+        g.scroll_up(100);
+        assert_eq!(g.view_offset, g.scrollback_len());
+        g.scroll_down(100);
+        assert_eq!(g.view_offset, 0);
+    }
+
+    #[test]
+    fn resize_keeps_the_overlapping_content_top_left() {
+        let mut g = Grid::new(10, 2);
+        g.feed(b"hello");
+        g.resize(4, 1);
+        assert_eq!(g.cols, 4);
+        assert_eq!(row_text(&g, 0), "hell");
+        assert_eq!(g.view_cursor(), Some((3, 0)), "cursor clamps into bounds");
+    }
+
+    #[test]
+    fn alt_screen_enter_clears_and_keeps_no_history() {
+        let mut g = Grid::new(5, 2);
+        g.feed(b"primary\r\nprimary2");
+        let before = g.scrollback_len();
+        g.feed(b"\x1b[?1049h");
+        assert_eq!(screen_text(&g), "     \n     ");
+        // Alt-screen content never joins the scrollback (tmux/WT rules).
+        g.feed(b"\r\n\r\n\r\nalt");
+        assert_eq!(g.scrollback_len(), before);
+        g.feed(b"\x1b[?1049l");
+        assert_eq!(screen_text(&g), "     \n     ");
+    }
+
+    #[test]
+    fn cursor_hide_and_show_switches_visibility() {
+        let mut g = Grid::new(10, 2);
+        assert!(g.cursor_visible);
+        g.feed(b"\x1b[?25l");
+        assert!(!g.cursor_visible);
+        g.feed(b"\x1b[?25h");
+        assert!(g.cursor_visible);
+    }
+
+    #[test]
+    fn full_reset_ris_clears_everything() {
+        let mut g = Grid::new(5, 2);
+        g.feed(b"junk\r\njunk2\r\njunk3");
+        g.feed(b"\x1b[?25l\x1bc");
+        assert_eq!(screen_text(&g), "     \n     ");
+        assert!(g.cursor_visible);
+        assert_eq!(g.scrollback_len(), 0);
+        assert_eq!(g.view_offset, 0);
+    }
+
+    #[test]
+    fn unknown_sequences_are_ignored_without_corrupting_the_grid() {
+        // A interrogation probe (DA) and a window-op CSI the minimal emulator
+        // does not implement: the grid must not panic and must not paint.
+        let mut g = Grid::new(10, 2);
+        g.feed(b"ok\x1b[c\x1b[?1047h\x1b[>0q");
+        assert_eq!(row_text(&g, 0), "ok        ");
+    }
+
+    #[test]
+    fn tab_moves_to_the_next_eight_column_stop() {
+        let mut g = Grid::new(20, 2);
+        g.feed(b"a\tb");
+        assert_eq!(g.cell(0, 0).ch, 'a');
+        assert_eq!(g.cell(8, 0).ch, 'b');
+    }
+
+    #[test]
+    fn insert_and_delete_lines_shift_rows() {
+        let mut g = Grid::new(10, 4);
+        g.feed(b"a\r\nb\r\nc");
+        g.feed(b"\x1b[1;1H\x1b[1L"); // insert a line at the top
+        assert_eq!(row_text(&g, 0), "          ");
+        assert_eq!(row_text(&g, 1), "a         ");
+        g.feed(b"\x1b[1;1H\x1b[1M"); // delete it again
+        assert_eq!(row_text(&g, 0), "a         ");
+        assert_eq!(row_text(&g, 2), "c         ");
+    }
+
+    #[test]
+    fn backspace_moves_left_without_erasing() {
+        let mut g = Grid::new(10, 2);
+        g.feed(b"ab\x08X");
+        assert_eq!(row_text(&g, 0), "aX        ");
+    }
+}
+
 /// Apply one SGR run (parameters after `m`-dispatch, empty = reset 0).
 fn apply_sgr(g: &mut Grid, nums: &[u64]) {
     if nums.is_empty() {

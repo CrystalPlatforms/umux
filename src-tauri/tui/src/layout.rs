@@ -341,3 +341,286 @@ pub fn drag_ratio(divider: &Divider, x: u16, y: u16, min_size: u16) -> Option<f6
     }
     Some((pos / usable).clamp(lo, hi))
 }
+
+#[cfg(test)]
+mod tests {
+    //! The B3 ACs: unlimited splits with enforced per-pane minimums, the
+    //! store round-trip model (`LayoutNode`), size-adaptive geometry without
+    //! panic. Case shapes mirror the TS PaneLayout suite.
+
+    use super::*;
+    use store_core::workspace_store::{LayoutNode, Orientation};
+
+    fn leaf(id: &str) -> LayoutNode {
+        LayoutNode::Leaf { id: id.into() }
+    }
+
+    fn hsplit(id: &str, ratio: f64, first: LayoutNode, second: LayoutNode) -> LayoutNode {
+        LayoutNode::Split {
+            id: id.into(),
+            orientation: Orientation::Horizontal,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    fn vsplit(id: &str, ratio: f64, first: LayoutNode, second: LayoutNode) -> LayoutNode {
+        LayoutNode::Split {
+            id: id.into(),
+            orientation: Orientation::Vertical,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect { x, y, width: w, height: h }
+    }
+
+    // --- split_leaf -------------------------------------------------------------
+
+    #[test]
+    fn split_leaf_becomes_a_fifty_fifty_split() {
+        let tree = leaf("a");
+        let next = split_leaf(&tree, "a", Orientation::Horizontal, "s1", "b").unwrap();
+        assert_eq!(next, hsplit("s1", 0.5, leaf("a"), leaf("b")));
+    }
+
+    #[test]
+    fn split_nests_into_the_matching_leaf_only() {
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        let next = split_leaf(&tree, "b", Orientation::Vertical, "s2", "c").unwrap();
+        assert_eq!(
+            next,
+            hsplit("s1", 0.5, leaf("a"), vsplit("s2", 0.5, leaf("b"), leaf("c")))
+        );
+        // The untouched sibling keeps its id.
+        assert_eq!(leaf_ids(&next), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn split_of_a_missing_leaf_is_none() {
+        let tree = leaf("a");
+        assert!(split_leaf(&tree, "zz", Orientation::Horizontal, "s", "b").is_none());
+    }
+
+    #[test]
+    fn splits_are_unlimited_in_depth() {
+        let mut tree = leaf("p0");
+        for i in 0..20 {
+            tree = split_leaf(&tree, &format!("p{i}"), Orientation::Horizontal, &format!("s{i}"), &format!("p{}", i + 1)).unwrap();
+        }
+        assert_eq!(leaf_ids(&tree).len(), 21);
+    }
+
+    // --- close_leaf ---------------------------------------------------------------
+
+    #[test]
+    fn close_leaf_promotes_the_sibling() {
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        assert_eq!(close_leaf(&tree, "a").unwrap(), leaf("b"));
+        assert_eq!(close_leaf(&tree, "b").unwrap(), leaf("a"));
+    }
+
+    #[test]
+    fn close_deep_leaf_promotes_the_whole_sibling_subtree() {
+        let tree = hsplit("s1", 0.5, vsplit("s2", 0.5, leaf("a"), leaf("b")), leaf("c"));
+        let next = close_leaf(&tree, "a").unwrap();
+        assert_eq!(next, hsplit("s1", 0.5, leaf("b"), leaf("c")));
+    }
+
+    #[test]
+    fn closing_the_last_pane_is_refused() {
+        // The last pane closes with the tab, never via this op.
+        assert!(close_leaf(&leaf("a"), "a").is_none());
+    }
+
+    #[test]
+    fn closing_a_missing_leaf_is_none() {
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        assert!(close_leaf(&tree, "zz").is_none());
+    }
+
+    #[test]
+    fn leaf_ids_keep_tree_order_first_child_first() {
+        let tree = hsplit("s1", 0.5, leaf("a"), vsplit("s2", 0.5, leaf("b"), leaf("c")));
+        assert_eq!(leaf_ids(&tree), vec!["a", "b", "c"]);
+    }
+
+    // --- set_ratio ---------------------------------------------------------------
+
+    #[test]
+    fn set_ratio_clamps_to_the_minimum_on_both_sides() {
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        // Axis 41, gap 1 → 40 usable cells; min 10 → ratio clamped to
+        // [10/40, 30/40] = [0.25, 0.75].
+        let next = set_ratio(&tree, "s1", 0.9, 41, 10);
+        assert_eq!(next, hsplit("s1", 0.75, leaf("a"), leaf("b")));
+
+        let next = set_ratio(&tree, "s1", 0.1, 41, 10);
+        assert_eq!(next, hsplit("s1", 0.25, leaf("a"), leaf("b")));
+    }
+
+    #[test]
+    fn set_ratio_inside_the_range_applies_verbatim() {
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        let next = set_ratio(&tree, "s1", 0.7, 41, 10);
+        assert_eq!(next, hsplit("s1", 0.7, leaf("a"), leaf("b")));
+    }
+
+    #[test]
+    fn set_ratio_on_a_degenerate_axis_leaves_the_tree_unchanged() {
+        // Axis 8 with min 4: usable 7, lo = 4/7 ≈ 0.57, hi ≈ 0.43 → lo >= hi.
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        let next = set_ratio(&tree, "s1", 0.9, 8, MIN_PANE_COLS);
+        assert_eq!(next, tree);
+    }
+
+    #[test]
+    fn set_ratio_targets_only_the_named_split() {
+        let tree = hsplit("s1", 0.5, vsplit("s2", 0.5, leaf("a"), leaf("b")), leaf("c"));
+        let next = set_ratio(&tree, "s2", 0.9, 41, 10);
+        match next {
+            LayoutNode::Split { first, .. } => match *first {
+                LayoutNode::Split { ratio, .. } => assert_eq!(ratio, 0.75),
+                _ => panic!("expected the nested split"),
+            },
+            _ => panic!("expected the root split"),
+        }
+    }
+
+    // --- geometry -----------------------------------------------------------------
+
+    #[test]
+    fn geometry_carves_a_horizontal_split_with_one_gap_column() {
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        let (panes, dividers) = geometry(&tree, rect(0, 0, 41, 10), 1);
+        assert_eq!(
+            panes,
+            vec![
+                ("a".to_string(), rect(0, 0, 20, 10)),
+                ("b".to_string(), rect(21, 0, 20, 10)),
+            ]
+        );
+        assert_eq!(dividers.len(), 1);
+        assert_eq!(dividers[0].rect, rect(20, 0, 1, 10));
+        assert_eq!(dividers[0].split_rect, rect(0, 0, 41, 10));
+    }
+
+    #[test]
+    fn geometry_carves_a_vertical_split_by_height() {
+        let tree = vsplit("s1", 0.5, leaf("a"), leaf("b"));
+        let (panes, dividers) = geometry(&tree, rect(0, 0, 20, 31), 1);
+        assert_eq!(
+            panes,
+            vec![
+                ("a".to_string(), rect(0, 0, 20, 15)),
+                ("b".to_string(), rect(0, 16, 20, 15)),
+            ]
+        );
+        assert_eq!(dividers[0].rect, rect(0, 15, 20, 1));
+    }
+
+    #[test]
+    fn geometry_returns_panes_in_tree_order() {
+        let tree = hsplit("s1", 0.5, vsplit("s2", 0.5, leaf("a"), leaf("b")), leaf("c"));
+        let (panes, _) = geometry(&tree, rect(0, 0, 40, 20), 1);
+        let ids: Vec<&str> = panes.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn geometry_sums_to_the_area_on_a_nested_tree() {
+        // Every cell belongs to exactly one pane (the gap columns excepted).
+        let tree = hsplit(
+            "s1",
+            0.5,
+            vsplit("s2", 0.5, leaf("a"), leaf("b")),
+            vsplit("s3", 0.5, leaf("c"), leaf("d")),
+        );
+        let (panes, dividers) = geometry(&tree, rect(0, 0, 41, 21), 1);
+        let pane_cells: usize = panes.iter().map(|(_, r)| r.width as usize * r.height as usize).sum();
+        let divider_cells: usize = dividers.iter().map(|d| d.rect.width as usize * d.rect.height as usize).sum();
+        assert_eq!(pane_cells + divider_cells, 41 * 21);
+    }
+
+    #[test]
+    fn geometry_at_a_tiny_size_never_panics() {
+        // The size-adaptive floor (AC): degenerate areas collapse to slivers.
+        let tree = hsplit(
+            "s1",
+            0.5,
+            vsplit("s2", 0.5, leaf("a"), leaf("b")),
+            leaf("c"),
+        );
+        for w in 0..=6u16 {
+            for h in 0..=6u16 {
+                let (panes, _) = geometry(&tree, rect(0, 0, w, h), 1);
+                assert_eq!(panes.len(), 3, "{w}x{h}");
+            }
+        }
+    }
+
+    // --- hit tests + drag arithmetic ---------------------------------------------
+
+    #[test]
+    fn pane_at_finds_the_containing_pane() {
+        let panes = vec![
+            ("a".to_string(), rect(0, 0, 10, 10)),
+            ("b".to_string(), rect(11, 0, 10, 10)),
+        ];
+        assert_eq!(pane_at(&panes, 5, 5).as_deref(), Some("a"));
+        assert_eq!(pane_at(&panes, 15, 5).as_deref(), Some("b"));
+        // The gap column and the outside hit nothing.
+        assert_eq!(pane_at(&panes, 10, 5), None);
+        assert_eq!(pane_at(&panes, 100, 100), None);
+    }
+
+    #[test]
+    fn divider_at_finds_the_drag_strip() {
+        let tree = hsplit("s1", 0.5, leaf("a"), leaf("b"));
+        let (_, dividers) = geometry(&tree, rect(0, 0, 41, 10), 1);
+        assert_eq!(divider_at(&dividers, 20, 3).unwrap().id, "s1");
+        assert_eq!(divider_at(&dividers, 5, 3), None);
+    }
+
+    #[test]
+    fn drag_ratio_follows_the_pointer_and_clamps_to_the_minimum() {
+        let divider = Divider {
+            id: "s1".into(),
+            orientation: Orientation::Horizontal,
+            rect: rect(20, 0, 1, 10),
+            split_rect: rect(0, 0, 41, 10),
+        };
+        // usable = 40; pointer at column 20 → 0.5.
+        assert!((drag_ratio(&divider, 20, 0, MIN_PANE_COLS).unwrap() - 0.5).abs() < 1e-9);
+        // Clamps: left of the minimum and right of it.
+        assert!((drag_ratio(&divider, 0, 0, MIN_PANE_COLS).unwrap() - 0.1).abs() < 1e-9);
+        assert!((drag_ratio(&divider, 40, 0, MIN_PANE_COLS).unwrap() - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drag_ratio_vertical_uses_rows() {
+        let divider = Divider {
+            id: "s1".into(),
+            orientation: Orientation::Vertical,
+            rect: rect(0, 15, 20, 1),
+            split_rect: rect(0, 0, 20, 31),
+        };
+        // usable = 30; pointer at row 15 → 0.5.
+        assert!((drag_ratio(&divider, 0, 15, MIN_PANE_ROWS).unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drag_ratio_on_a_degenerate_extent_is_none() {
+        let divider = Divider {
+            id: "s1".into(),
+            orientation: Orientation::Horizontal,
+            rect: rect(0, 0, 1, 1),
+            split_rect: rect(0, 0, 1, 1),
+        };
+        assert_eq!(drag_ratio(&divider, 0, 0, MIN_PANE_COLS), None);
+    }
+}
