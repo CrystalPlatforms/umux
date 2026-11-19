@@ -10,6 +10,11 @@
 //! - [`pty_service`] — the PTY engine moved verbatim from the app crate
 //!   (a behavior-identical refactor): spawn/write/resize/close, busy and
 //!   cwd and foreground-name lookups, shell-argv shaping.
+//! - [`osc_parser`] — the completion-notification parser (OSC 9 / 99 / 777),
+//!   moved HERE from the app crate in v1.9.0 (issue B5): the umux Terminal
+//!   needs the SAME completion detection as the desktop, and a shared crate
+//!   beats a copy (the plan's drift rule). Pure — bytes in, passthrough +
+//!   events out, no I/O.
 //! - [`ring`] — the bounded per-session scrollback ring. Captures from
 //!   birth; replay is consumed by phase 5.
 //! - [`escape_boundary`] — where a replay window may start so it never
@@ -21,12 +26,13 @@
 //!   to NOTICE a title change, never mutates anything — the byte-identical
 //!   rule (normal output passes through untouched) holds everywhere.
 //!
-//! Parsing policy (unchanged): the daemon streams raw bytes untouched and
-//! umux's OscParser (notifications, completion) stays client-side. The
-//! title scanner below is a READ-only side channel for the registry's
-//! title field — it strips nothing and alters nothing.
+//! Parsing policy (v1.9.0 update): the daemon still streams raw bytes
+//! untouched; the OscParser runs CLIENT-side — in the app and, since B5, in
+//! the TUI — inspecting the stream for completion events on a side channel
+//! and never mutating the passthrough.
 
 pub mod escape_boundary;
+pub mod osc_parser;
 pub mod pty_service;
 pub mod queries;
 pub mod ring;

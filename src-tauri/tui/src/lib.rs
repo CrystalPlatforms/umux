@@ -19,6 +19,9 @@
 //!   sibling of the frontend PaneLayout, on the same store model).
 //! - [`model`] — the term store (workspaces/tabs/panes) over `store_core`
 //!   ONLY — the TUI never touches the desktop store's paths.
+//! - [`prefix`] — the Ctrl+B chord state machine (pure, injected clock).
+//! - [`status`] — the agent-status machine, the Rust port of
+//!   `src/agentStatus.ts` (pure, injected clock; OSC + presence feeds).
 
 pub mod app;
 pub mod driver;
@@ -26,5 +29,7 @@ pub mod grid;
 pub mod keymap;
 pub mod layout;
 pub mod model;
+pub mod prefix;
+pub mod status;
 
 pub use app::run;
