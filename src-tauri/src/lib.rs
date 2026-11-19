@@ -1300,6 +1300,133 @@ async fn save_workspaces(
     .map_err(|e| e.to_string())?
 }
 
+// --- Desktop↔Terminal transfer (F1, v1.9.0 / #80; stories #79–#80) ----------
+
+/// Id generator for the transfer's fresh ids — the CLI's `Ids` semantics
+/// (clock/pid-seeded xorshift minting v4-format UUID strings; the store and
+/// app treat ids as opaque strings). Incoming entities must never collide
+/// with the target store's ids, so the ids are random, not sequential.
+struct TransferIds(u64);
+
+impl TransferIds {
+    fn new() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        TransferIds(nanos ^ ((std::process::id() as u64) << 32) ^ 0x9E37_79B9_7F4A_7C15)
+    }
+
+    /// A random v4-format UUID string (version/variant bits set), the exact
+    /// shape the CLI's generator mints.
+    fn next(&mut self) -> String {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        let a = x.to_le_bytes();
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        let b = x.to_le_bytes();
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&a);
+        bytes[8..].copy_from_slice(&b);
+        let mut hex = String::with_capacity(36);
+        for (i, byte) in bytes.iter().enumerate() {
+            if matches!(i, 4 | 6 | 8 | 10) {
+                hex.push('-');
+            }
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        // Version 4 + RFC 4122 variant, so the shape matches the app's ids.
+        hex.replace_range(14..15, "4");
+        hex.replace_range(
+            19..20,
+            &format!("{:x}", 0x8 | (u8::from_str_radix(&hex[19..20], 16).unwrap_or(0) & 0x3)),
+        );
+        hex
+    }
+}
+
+/// The Desktop↔Terminal transfer's UI half (F1, v1.9.0 / #80): the Settings
+/// buttons perform the SAME moves the B7 CLI commands do — through
+/// `store_core::transfer::merge_states`, the one merge implementation any
+/// UI button rides (no second implementation on either side).
+///
+/// The buttons do NOT shell out to the `umux` CLI on purpose: the CLI's
+/// import is an offline store write, refused by the single-writer gate
+/// (#125) whenever the app answers the socket — i.e. in the only context
+/// the buttons exist — and a merge INTO the desk store must reach the app's
+/// LIVE state (a child process writing the file behind the running app
+/// would be clobbered by its next save). So "export" writes the TERM store
+/// here (it has no live owner), while "import" returns the merged tree for
+/// the frontend to adopt and persist through its normal save_workspaces
+/// path — the app stays the single writer of its own store. Same merge
+/// semantics as `umux workspaces import desk --term` / `import term --desk`:
+/// additive, collisions suffixed ` from desk|term`, fresh ids, the source
+/// store is never written.
+#[tauri::command]
+async fn workspaces_transfer(
+    direction: String,
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let term_store = WorkspaceStore::new(store_core::paths::term_config_path());
+        let desk_store = app.state::<WorkspaceStore>();
+        let mut ids = TransferIds::new();
+        match direction.as_str() {
+            // "Export to Terminal": merge the DESK store's saved state into
+            // the TERM store (`umux workspaces import desk --term`'s twin).
+            "export" => {
+                let desk = desk_store.load();
+                let live_term = term_store.load();
+                let planned =
+                    store_core::transfer::merge_states(&live_term, &desk, "desk", &mut || {
+                        ids.next()
+                    });
+                let doc = serde_json::json!({
+                    "imported": {
+                        "from": "desk",
+                        "workspaces": planned.workspaces.len() - live_term.workspaces.len(),
+                        "groups": planned.groups.len() - live_term.groups.len(),
+                    }
+                });
+                term_store.save(&planned).map_err(|e| e.to_string())?;
+                Ok(doc)
+            }
+            // "Import from Terminal": merge the TERM store's saved state into
+            // the desk store's LIVE state (`import term --desk`'s twin). The
+            // merged tree rides back whole; the frontend adopts it and
+            // persists through save_workspaces.
+            "import" => {
+                let desk = desk_store.load();
+                let live_term = term_store.load();
+                let planned =
+                    store_core::transfer::merge_states(&desk, &live_term, "term", &mut || {
+                        ids.next()
+                    });
+                Ok(serde_json::json!({
+                    "imported": {
+                        "from": "term",
+                        "workspaces": planned.workspaces.len() - desk.workspaces.len(),
+                        "groups": planned.groups.len() - desk.groups.len(),
+                    },
+                    "state": planned,
+                }))
+            }
+            other => Err(format!(
+                "unknown transfer direction \"{other}\" — use \"export\" or \"import\""
+            )),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Toggle the app-wide notification mute. Returns the new state so the frontend
 /// can update its indicator from the source of truth (the flag is shared with
 /// every panel's notification thread, so this is the only way to flip it).
@@ -2141,6 +2268,7 @@ pub fn run() {
             ssh_close,
             load_workspaces,
             save_workspaces,
+            workspaces_transfer,
             set_notifications_muted,
             notifications_muted,
             notify_panel_needs_input,
