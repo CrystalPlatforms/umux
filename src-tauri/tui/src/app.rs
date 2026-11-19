@@ -74,6 +74,20 @@ pub struct ConfirmClose {
     pub live: usize,
 }
 
+/// What an open rename modal edits.
+#[derive(Clone, Debug)]
+pub enum RenameTarget {
+    Workspace(String),
+    Tab(String),
+}
+
+/// The rename modal's state: the target plus the typed name.
+#[derive(Clone, Debug)]
+pub struct RenameState {
+    pub target: RenameTarget,
+    pub value: String,
+}
+
 pub struct App {
     pub model: TermModel,
     pub driver: Arc<dyn SessionDriver>,
@@ -104,6 +118,8 @@ pub struct App {
     /// The pending "close workspace" confirmation (desktop CloseConfirmDialog
     /// parity: only when the workspace holds live panes).
     pub confirm: Option<ConfirmClose>,
+    /// The open rename modal, if any.
+    pub rename: Option<RenameState>,
     should_exit: bool,
     start: Instant,
     last_status_tick: u64,
@@ -149,6 +165,7 @@ impl App {
             shell_menu: false,
             menu: None,
             confirm: None,
+            rename: None,
             should_exit: false,
             start: Instant::now(),
             last_status_tick: 0,
@@ -449,6 +466,26 @@ impl App {
                 self.model.set_tab_color(&tab_id, color);
                 self.model.persist();
             }
+            MenuAction::BeginRenameWorkspace(ws_id) => {
+                let value = self
+                    .model
+                    .workspace(&ws_id)
+                    .map(|ws| ws.name.clone())
+                    .unwrap_or_default();
+                self.rename = Some(RenameState {
+                    target: RenameTarget::Workspace(ws_id),
+                    value,
+                });
+                self.menu = None;
+            }
+            MenuAction::BeginRenameTab(tab_id) => {
+                let value = self.tab_name(&tab_id);
+                self.rename = Some(RenameState {
+                    target: RenameTarget::Tab(tab_id),
+                    value,
+                });
+                self.menu = None;
+            }
         }
     }
 
@@ -663,9 +700,14 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        // Modal chrome owns the keyboard first: the context menu navigates
-        // with arrows + Enter, the confirm dialog answers y/n, Esc closes
-        // either (desktop dialog parity).
+        // Modal chrome owns the keyboard first: the rename modal takes the
+        // raw typing, the context menu navigates with arrows + Enter, the
+        // confirm dialog answers y/n, Esc closes any of them (desktop
+        // dialog parity).
+        if self.rename.is_some() {
+            self.handle_rename_key(key);
+            return;
+        }
         if self.menu.is_some() {
             self.handle_menu_key(key);
             return;
@@ -741,6 +783,46 @@ impl App {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 if let Some(c) = self.confirm.take() {
                     self.delete_workspace(&c.ws_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The rename modal's typing: printable chars append, Backspace erases,
+    /// Enter saves, Esc cancels.
+    fn handle_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.rename = None,
+            KeyCode::Backspace => {
+                if let Some(r) = self.rename.as_mut() {
+                    r.value.pop();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(r) = self.rename.take() {
+                    let name = r.value.trim().to_string();
+                    if name.is_empty() {
+                        return;
+                    }
+                    match r.target {
+                        RenameTarget::Workspace(ws_id) => {
+                            self.model.rename_workspace(&ws_id, name);
+                        }
+                        RenameTarget::Tab(tab_id) => {
+                            self.model.rename_tab(&tab_id, name);
+                        }
+                    }
+                    self.model.persist();
+                    self.redraw_all();
+                }
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty()
+                    || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+            {
+                if let Some(r) = self.rename.as_mut() {
+                    r.value.push(c);
                 }
             }
             _ => {}

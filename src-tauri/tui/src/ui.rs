@@ -99,6 +99,48 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.confirm.is_some() {
         draw_confirm(frame, app, area);
     }
+    if app.rename.is_some() {
+        draw_rename(frame, app, area);
+    }
+}
+
+// --- the rename modal ---------------------------------------------------------
+
+fn draw_rename(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(r) = app.rename.as_ref() else {
+        return;
+    };
+    let width = 48.min(area.width.saturating_sub(2)).max(20);
+    let rect = Rect {
+        x: area.x.saturating_add((area.width.saturating_sub(width)) / 2),
+        y: area.y.saturating_add((area.height.saturating_sub(5)) / 2),
+        width,
+        height: 5,
+    };
+    frame.render_widget(Clear, rect);
+    let title = match &r.target {
+        crate::app::RenameTarget::Workspace(_) => " rename workspace ",
+        crate::app::RenameTarget::Tab(_) => " rename tab ",
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    // The typed value with a block cursor, then the key hints.
+    let value = truncate(r.value.clone(), inner.width.saturating_sub(3) as usize);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!(" {value}█"),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter: save · Esc: cancel",
+        Style::default().fg(ratatui::style::Color::DarkGray),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -493,6 +535,9 @@ pub enum MenuAction {
     BeginTabColor(String),
     /// Set (Some hex) or clear (None) a tab's color.
     SetTabColor(String, Option<String>),
+    /// Open the rename modal for a workspace / tab.
+    BeginRenameWorkspace(String),
+    BeginRenameTab(String),
 }
 
 /// Which surface a right-click landed on (the desktop's per-surface menus).
@@ -567,6 +612,7 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
     match kind {
         MenuKind::Tab(tab_id) => vec![
             Some(MenuAction::NewTab),
+            Some(MenuAction::BeginRenameTab(tab_id.clone())),
             Some(MenuAction::SplitHorizontal),
             Some(MenuAction::SplitVertical),
             Some(MenuAction::ZoomToggle),
@@ -593,14 +639,10 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
             Some(MenuAction::ClosePane(pane_id.clone())),
         ],
         MenuKind::Workspace(ws_id) => {
-            let mut items = Vec::new();
-            // A row that is NOT the active workspace offers the switch —
-            // the active one only closes (the desktop's row menu).
-            if app.active_ws != *ws_id {
-                items.push(Some(MenuAction::ActivateWorkspace(ws_id.clone())));
-            }
-            items.push(Some(MenuAction::CloseWorkspace(ws_id.clone())));
-            items
+            vec![
+                Some(MenuAction::BeginRenameWorkspace(ws_id.clone())),
+                Some(MenuAction::CloseWorkspace(ws_id.clone())),
+            ]
         }
         MenuKind::Header => vec![
             Some(MenuAction::NewWorkspace),
@@ -871,6 +913,8 @@ fn menu_label(action: &MenuAction) -> String {
             format!("{name}")
         }
         MenuAction::SetTabColor(_, None) => "Default".into(),
+        MenuAction::BeginRenameWorkspace(_) => "Rename workspace".into(),
+        MenuAction::BeginRenameTab(_) => "Rename tab".into(),
     }
 }
 
