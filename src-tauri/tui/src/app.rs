@@ -290,6 +290,7 @@ impl App {
             .panes
             .get(&self.active_pane)
             .and_then(|p| p.cwd.clone())
+            .map(std::path::PathBuf::from)
             .unwrap_or_else(default_cwd);
         let params = OpenParams {
             shell,
