@@ -937,7 +937,6 @@ enum ImportAction {
         #[arg(long)]
         dry_run: bool,
     },
-}
     /// Restore an umux exchange document written by `umux export` —
     /// REPLACES the chosen store with the document's state
     Umux {
