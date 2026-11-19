@@ -87,6 +87,8 @@ pub struct App {
     /// highlights; `Moved` events only arrive under mouse capture, which the
     /// run() setup enables.
     hover: Option<(u16, u16)>,
+    /// The shell picker dropdown (the tab bar's "v" button) is showing.
+    shell_menu: bool,
     should_exit: bool,
     start: Instant,
     last_status_tick: u64,
@@ -129,6 +131,7 @@ impl App {
             msg_rx,
             drag: None,
             hover: None,
+            shell_menu: false,
             should_exit: false,
             start: Instant::now(),
             last_status_tick: 0,
@@ -575,6 +578,16 @@ impl App {
         let rects = self.pane_geometry(pane_area);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // An open shell dropdown swallows the whole click: a row
+                // applies the pick, anything else just closes the menu.
+                if self.shell_menu {
+                    if let Some(pick) = ui::shell_pick_at(self, area, mouse.column, mouse.row) {
+                        self.model.settings.default_shell = pick;
+                        self.model.persist_settings();
+                    }
+                    self.shell_menu = false;
+                    return;
+                }
                 // The clickable chrome first: footer buttons, tab titles and
                 // sidebar workspace rows own their rows before pane hit-tests.
                 if let Some(hit) = ui::hit_test(self, area, mouse.column, mouse.row) {
@@ -584,6 +597,7 @@ impl App {
                         }
                         ui::UiHit::Tab(tab_id) => self.activate_tab(&tab_id),
                         ui::UiHit::Workspace(ws_id) => self.activate_workspace(&ws_id),
+                        ui::UiHit::ShellMenu => self.shell_menu = !self.shell_menu,
                     }
                     return;
                 }
@@ -662,6 +676,66 @@ impl App {
     /// The last mouse position (ui reads it for hover highlights).
     pub fn hover_pos(&self) -> Option<(u16, u16)> {
         self.hover
+    }
+
+    /// The shell picker dropdown is showing.
+    pub fn shell_menu_open(&self) -> bool {
+        self.shell_menu
+    }
+
+    /// Shells found on PATH — the Terminal's mirror of the desktop's shell
+    /// detector: "Auto" (the None entry) plus whatever actually exists, so
+    /// the dropdown never offers a shell the machine doesn't have.
+    pub fn detect_shells() -> Vec<String> {
+        const UNIX: &[&str] = &["bash", "zsh", "fish", "sh", "pwsh", "dash", "ksh"];
+        const WINDOWS: &[&str] = &[
+            "powershell.exe",
+            "pwsh.exe",
+            "cmd.exe",
+            "bash.exe",
+            "wsl.exe",
+            "nu.exe",
+        ];
+        let windows = cfg!(windows);
+        let candidates: &[&str] = if windows { WINDOWS } else { UNIX };
+        let path = std::env::var("PATH").unwrap_or_default();
+        let sep = if windows { ';' } else { ':' };
+        let exts: &[&str] = if windows {
+            &[".exe", ".bat", ".cmd", ""]
+        } else {
+            &[""]
+        };
+        let mut found: Vec<String> = Vec::new();
+        for cand in candidates {
+            'dirs: for dir in path.split(sep) {
+                if dir.is_empty() {
+                    continue;
+                }
+                for ext in exts {
+                    let p = std::path::Path::new(dir).join(format!("{cand}{ext}"));
+                    if p.is_file() {
+                        if !found.iter().any(|s| s == cand) {
+                            found.push((*cand).to_string());
+                        }
+                        break 'dirs;
+                    }
+                }
+            }
+        }
+        // The login shell ($SHELL) belongs on the list even when it lives
+        // outside PATH (unix).
+        if !windows {
+            if let Ok(shell) = std::env::var("SHELL") {
+                let name = std::path::Path::new(&shell)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !name.is_empty() && !found.iter().any(|s| *s == name) {
+                    found.push(name);
+                }
+            }
+        }
+        found
     }
 
     /// Raw PTY output arrived for a pane: the OSC parser runs on the side

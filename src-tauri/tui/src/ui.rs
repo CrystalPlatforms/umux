@@ -9,7 +9,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Pane};
@@ -78,6 +78,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_panes(frame, app, pane_area);
     draw_footer(frame, app, area);
+    // The dropdown paints LAST — it overlays the panes.
+    if app.shell_menu_open() {
+        draw_shell_menu(frame, app, area);
+    }
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -113,11 +117,19 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 /// flag) plus the trailing "+" (new tab) button. The ONE geometry the
 /// renderer and [`hit_test`] share; `row` is the single-row slice draw()
 /// paints the tabs into.
-fn tab_chrome(app: &App, row: Rect) -> (Vec<(Rect, String, bool, String)>, Option<Rect>) {
+fn tab_chrome(
+    app: &App,
+    row: Rect,
+) -> (
+    Vec<(Rect, String, bool, String)>,
+    Option<Rect>,
+    Option<Rect>,
+) {
     let mut tabs = Vec::new();
     let mut plus = None;
+    let mut vdown = None;
     let Some(ws) = app.model.workspace(&app.active_ws) else {
-        return (tabs, plus);
+        return (tabs, plus, vdown);
     };
     let right = row.x.saturating_add(row.width);
     let mut x = row.x;
@@ -148,14 +160,23 @@ fn tab_chrome(app: &App, row: Rect) -> (Vec<(Rect, String, bool, String)>, Optio
             width: 3,
             height: 1,
         });
+        x += 3;
+        if x.saturating_add(3) <= right {
+            vdown = Some(Rect {
+                x,
+                y: row.y,
+                width: 3,
+                height: 1,
+            });
+        }
     }
-    (tabs, plus)
+    (tabs, plus, vdown)
 }
 
 fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Hand-drawn spans (not the Tabs widget) so the hit-test walks the exact
     // same left-to-right geometry — a click lands on the tab it hit.
-    let (tabs, plus) = tab_chrome(app, area);
+    let (tabs, plus, vdown) = tab_chrome(app, area);
     let mut spans: Vec<Span> = Vec::new();
     for (rect, label, active, _) in &tabs {
         let mut style = Style::default();
@@ -166,12 +187,15 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
         spans.push(Span::styled(label.clone(), style));
     }
-    if let Some(rect) = plus {
-        let mut style = Style::default().fg(ratatui::style::Color::Cyan);
-        if hovered(app, rect) {
-            style = style.add_modifier(Modifier::REVERSED);
+    for button in [plus, vdown] {
+        if let Some(rect) = button {
+            let mut style = Style::default().fg(ratatui::style::Color::Cyan);
+            if hovered(app, rect) {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            let text = if Some(rect) == plus { " + " } else { " v " };
+            spans.push(Span::styled(text, style));
         }
-        spans.push(Span::styled(" + ", style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -349,6 +373,8 @@ pub enum UiHit {
     Tab(String),
     /// A sidebar workspace row.
     Workspace(String),
+    /// The tab bar's "v" shell-picker button.
+    ShellMenu,
 }
 
 /// The footer's buttons, label → chord command (draw order = hit order).
@@ -422,19 +448,129 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             width: main.width,
             height: 1,
         };
-        let (tabs, plus) = tab_chrome(app, row_rect);
+        let (tabs, plus, vdown) = tab_chrome(app, row_rect);
         for (rect, _, _, tab_id) in &tabs {
             if col >= rect.x && col < rect.x.saturating_add(rect.width) {
                 return Some(UiHit::Tab(tab_id.clone()));
             }
         }
-        if let Some(rect) = plus {
-            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
-                return Some(UiHit::Command(PrefixCommand::NewTab));
+        for (rect, hit) in [(plus, None), (vdown, Some(UiHit::ShellMenu))] {
+            if let Some(rect) = rect {
+                if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                    return match hit {
+                        Some(hit) => Some(hit),
+                        None => Some(UiHit::Command(PrefixCommand::NewTab)),
+                    };
+                }
             }
         }
     }
     None
+}
+
+// --- the shell picker dropdown ------------------------------------------------
+
+/// One row of the shell dropdown: the value to store (None = Auto, the
+/// backend's fallback chain — the desktop picker's shape) and its label.
+pub fn shell_items(_app: &App) -> Vec<(Option<String>, String)> {
+    let mut items = vec![(None, "Auto".to_string())];
+    for shell in App::detect_shells() {
+        items.push((Some(shell.clone()), shell));
+    }
+    items
+}
+
+fn shell_menu_rect(app: &App, area: Rect) -> Option<Rect> {
+    let sidebar_w = (area.width / 5).clamp(if area.width > 30 { 14 } else { 0 }, 30);
+    let main = Rect {
+        x: area.x.saturating_add(sidebar_w),
+        width: area.width.saturating_sub(sidebar_w),
+        ..area
+    };
+    if main.height < 4 {
+        return None;
+    }
+    let row = Rect {
+        x: main.x,
+        y: main.y,
+        width: main.width,
+        height: 1,
+    };
+    let (_, _, vdown) = tab_chrome(app, row);
+    let vdown = vdown?;
+    let items = shell_items(app).len() as u16;
+    let width = 32.min(area.width.saturating_sub(2)).max(10);
+    let height = (items + 2).min(area.height.saturating_sub(1)).max(3);
+    let x = vdown.x.min(area.x.saturating_add(area.width.saturating_sub(width + 1)));
+    let mut y = vdown.y.saturating_add(1);
+    if y.saturating_add(height) > area.y.saturating_add(area.height) {
+        y = area.y.saturating_add(area.height.saturating_sub(height));
+    }
+    Some(Rect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+/// A click while the dropdown is open: `Some(pick)` = a row was clicked
+/// (pick = the value to store); `None` = the click landed outside the menu
+/// (the caller closes it). The bordered box's own row is never a pick.
+pub fn shell_pick_at(app: &App, area: Rect, col: u16, row: u16) -> Option<Option<String>> {
+    let rect = shell_menu_rect(app, area)?;
+    if col < rect.x || col >= rect.x.saturating_add(rect.width) {
+        return None;
+    }
+    if row < rect.y || row >= rect.y.saturating_add(rect.height) {
+        return None;
+    }
+    let inner_y = rect.y + 1;
+    if row < inner_y || row >= rect.y.saturating_add(rect.height - 1) {
+        return None; // the border rows close nothing, pick nothing
+    }
+    let idx = (row - inner_y) as usize;
+    shell_items(app).get(idx).map(|(v, _)| v.clone())
+}
+
+/// The dropdown's paint (a cleared, bordered box over the panes).
+fn draw_shell_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(rect) = shell_menu_rect(app, area) else {
+        return;
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL).title(" shell ");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let current = app.model.settings.default_shell.clone();
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (value, label)) in shell_items(app).into_iter().enumerate() {
+        let mut text = if value.is_none() {
+            format!("{label} (the backend's fallback chain)")
+        } else {
+            format!("{label} ")
+        };
+        if value == current {
+            text.push_str("*");
+        }
+        let mut style = Style::default();
+        if hovered(
+            app,
+            Rect {
+                x: inner.x,
+                y: inner.y.saturating_add(i as u16),
+                width: inner.width,
+                height: 1,
+            },
+        ) {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // --- helpers -----------------------------------------------------------------
