@@ -28,10 +28,10 @@ pub fn pane_area(area: Rect) -> Rect {
         width: area.width.saturating_sub(sidebar_w),
         ..area
     };
-    // Tab bar (1 row) on top, footer (1 row) at the bottom.
+    // Tab bar (1 row) on top. No footer — the desktop has none.
     Rect {
         y: main.y.saturating_add(1),
-        height: main.height.saturating_sub(2),
+        height: main.height.saturating_sub(1),
         ..main
     }
 }
@@ -60,8 +60,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_sidebar(frame, app, sidebar);
     }
 
-    // Main: tab bar on top, panes below, footer line at the bottom — the
-    // same slices [`pane_area`] names.
+    // Main: tab bar on top, panes below — the same slices [`pane_area`]
+    // names. There is no footer (desktop parity).
     let (_tab_bar, pane_area) = if main.height >= 4 {
         let chunks =
             Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(main);
@@ -70,13 +70,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         (Rect::default(), main)
     };
-    let pane_area = Rect {
-        height: pane_area.height.saturating_sub(1),
-        ..pane_area
-    };
 
     draw_panes(frame, app, pane_area);
-    draw_footer(frame, app, area);
+    // The zoomed pane's restore hint rides the bottom row OVER the pane —
+    // the only remnant of the old footer row.
+    if app.is_zoomed() && area.height >= 3 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " zoomed — Esc restores ",
+                Style::default().fg(ratatui::style::Color::Cyan),
+            ))),
+            Rect {
+                x: area.x,
+                y: area.y.saturating_add(area.height - 1),
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
     // Overlays paint LAST, in stacking order: shell dropdown, context menu,
     // confirm dialog.
     if app.shell_menu_open() {
@@ -91,16 +102,40 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().title(" umux ").borders(Borders::RIGHT);
+    // NO Block title here: ratatui 0.29's `Block::inner()` reserves the
+    // title's row, which silently shifted the header/rows down one line and
+    // desynced the hit-tests (the round-2 "sidebar clicks do nothing" bug).
+    // The whole sidebar is hand-geometry now — [`sidebar_inner`] is the ONE
+    // truth the renderer and the hit-tests share.
+    let block = Block::default().borders(Borders::RIGHT);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    // Header row: "+" (New workspace) and "Q" (quit) at the right edge —
-    // the desktop's header pattern. Row 0 belongs to them; workspace rows
-    // start below.
+    // Header row: the " umux" label at the left, then "+" (New workspace)
+    // and "Q" (quit) at the right edge — the desktop's header pattern.
+    // Row 0 belongs to them; workspace rows start below.
     let (plus, quit) = sidebar_header_buttons(inner);
+    let label_width = if plus.is_some() {
+        inner.width.saturating_sub(6)
+    } else {
+        inner.width
+    };
+    if label_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " umux",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: label_width,
+                height: 1,
+            },
+        );
+    }
     for (rect, label, base) in [
         (plus, " + ", ratatui::style::Color::Cyan),
         (quit, " Q ", ratatui::style::Color::Red),
@@ -388,26 +423,6 @@ fn hovered(app: &App, r: Rect) -> bool {
     app.hover_pos()
         .map(|(c, rw)| c >= r.x && c < r.x.saturating_add(r.width) && rw == r.y)
         .unwrap_or(false)
-}
-
-/// The status footer — desktop parity says the bottom bar carries NO
-/// toolbar (actions live in the tab bar and the context menus), so this is
-/// a plain status line now.
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let footer = Rect {
-        y: area.y + area.height - 1,
-        height: 1,
-        ..area
-    };
-    let mut spans: Vec<Span> = vec![Span::styled(
-        format!(" {} ", app.driver_kind.label()),
-        Style::default().fg(ratatui::style::Color::Cyan),
-    )];
-    if app.is_zoomed() {
-        spans.push(Span::raw("  zoomed — Esc restores"));
-    }
-    spans.push(Span::raw("  right-click pane/tab/workspace for actions · header menu: quit"));
-    frame.render_widget(Paragraph::new(Line::from(spans)), footer);
 }
 
 // --- mouse hit-testing -------------------------------------------------------
