@@ -869,7 +869,7 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
         }
         // Workspace/group rows (one row below the header).
         if row > inner.y && row < inner.y.saturating_add(inner.height) {
-            let idx = (row - inner.y - 1) as usize;
+            let idx = (row - inner.y) as usize;
             return match sidebar_rows(app).get(idx) {
                 Some(SidebarRow::Group { id, .. }) => Some(UiHit::Group(id.clone())),
                 Some(SidebarRow::Workspace { id, .. }) => Some(UiHit::Workspace(id.clone())),
@@ -955,7 +955,7 @@ pub fn context_kind(app: &App, area: Rect, col: u16, row: u16) -> Option<MenuKin
             return Some(MenuKind::Header);
         }
         if row > inner.y && row < inner.y.saturating_add(inner.height) {
-            let idx = (row - inner.y - 1) as usize;
+            let idx = (row - inner.y) as usize;
             return match sidebar_rows(app).get(idx) {
                 Some(SidebarRow::Group { id, .. }) => Some(MenuKind::Group(id.clone())),
                 Some(SidebarRow::Workspace { id, .. }) => {
