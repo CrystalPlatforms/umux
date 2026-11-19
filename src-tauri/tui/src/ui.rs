@@ -319,11 +319,8 @@ fn pane_title_base(app: &App, leaf_id: &str, rect: Rect) -> String {
         .workspace(&app.active_ws)
         .and_then(|ws| {
             let tab_id = app.active_tab_id()?;
-            ws.tabs
-                .iter()
-                .position(|t| t.id == tab_id)
-                .and_then(|i| ws.tabs.get(i))
-                .map(|t| tab_display_name(i, t))
+            let i = ws.tabs.iter().position(|t| t.id == tab_id)?;
+            ws.tabs.get(i).map(|t| tab_display_name(i, t))
         })
         .unwrap_or_default();
     let status = app
