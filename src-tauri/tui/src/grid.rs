@@ -137,10 +137,15 @@ impl Grid {
         if !bytes.is_empty() && self.view_offset != 0 {
             self.view_offset = 0;
         }
+        // The parser and the paint target are both fields of Grid; taking
+        // the parser out splits the borrows (it returns after the loop).
+        let mut parser = std::mem::take(&mut self.parser);
         let mut performer = Performer { g: self };
         for byte in bytes {
-            performer.g.parser.advance(&mut performer, *byte);
+            parser.advance(&mut performer, *byte);
         }
+        drop(performer);
+        self.parser = parser;
     }
 
     /// The visible cell at (x, y) — the view is `view_offset` lines up from
@@ -312,7 +317,10 @@ impl Perform for Performer<'_> {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: u8) {
+    fn csi_dispatch(&mut self, params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: char) {
+        // vte 0.13 hands the action over as `char`; the whole dispatch below
+        // speaks ASCII bytes, so fold it once at the top.
+        let action = action as u8;
         let g = &mut *self.g;
         let nums: Vec<u64> = params
             .iter()

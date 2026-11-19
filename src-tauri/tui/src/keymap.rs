@@ -26,7 +26,7 @@ pub fn key_to_bytes(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
                 if lower == ' ' || lower == '@' {
                     out.push(0x00);
                 } else if ('a'..='z').contains(&lower) {
-                    out.push(lower - b'a' + 1);
+                    out.push(lower as u8 - b'a' + 1);
                 } else {
                     out.extend_from_slice(c.to_string().as_bytes());
                 }

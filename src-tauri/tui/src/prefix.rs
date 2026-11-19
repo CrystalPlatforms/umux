@@ -58,7 +58,6 @@ enum State {
     Armed { at_ms: u64 },
 }
 
-#[derive(Default)]
 pub struct PrefixMachine {
     state: State,
 }
