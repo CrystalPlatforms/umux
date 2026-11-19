@@ -10,6 +10,9 @@ rust-version = "1.77.2"
 
 [dependencies]
 store_core = { path = "../store_core" }
+# v1.9.0 (B1): `umux --term` and the `default-launch-mode = "tui"` bare launch
+# run the umux Terminal in-process — the CLI ships the launcher.
+umux-tui = { path = "../tui" }
 # Storestation additions (#83): `umux status` and (later) the live commands talk to
 # the daemon through the same client library the desktop app will use.
 umux-storestation = { path = "../storestation" }

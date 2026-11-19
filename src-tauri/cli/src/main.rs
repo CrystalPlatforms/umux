@@ -4192,13 +4192,62 @@ fn layout_offline(
     }
 }
 
+/// What `umux` does when it is not running a subcommand (B1, v1.9.0):
+/// `Help` is the historical behavior — the full command list on stdout,
+/// exit 0; `LaunchTui` runs the umux Terminal in-process on this terminal.
+enum LaunchDecision {
+    Help,
+    LaunchTui,
+}
+
+/// The pure launcher decision (B1): the saved `default-launch-mode` plus the
+/// presence of the `--term`/`--terminal` flag decide between the help screen
+/// and the TUI. `--term` ALWAYS overrides the setting (it names the Terminal
+/// explicitly); a subcommand (`umux list --term`) is store targeting, never a
+/// launch. Unit-tested on the default, the tui setting, and the override.
+fn decide_launch(default_launch_mode: &str, term_flag: bool, has_command: bool) -> LaunchDecision {
+    if has_command {
+        return LaunchDecision::Help;
+    }
+    if term_flag || default_launch_mode == "tui" {
+        return LaunchDecision::LaunchTui;
+    }
+    LaunchDecision::Help
+}
+
+/// The saved default-launch-mode, read from the DESKTOP settings (the store
+/// the GUI Settings screen writes, F1's switch included): the launcher's one
+/// source of truth. A missing or corrupt file loads the default "gui" —
+/// the read never writes.
+fn launch_mode_saved() -> String {
+    settings_store_for(Target::Desk).load().default_launch_mode
+}
+
+/// Run the umux Terminal in-process. A failure (no tty — a spawned test, a
+/// pipe) prints the honest message on stderr and exits 1; success leaves the
+/// terminal restored and exits 0.
+fn launch_tui() {
+    if let Err(message) = umux_tui::run() {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Bare `umux` is the "what can this do?" entry: the full command list on
-    // stdout, exit 0 — friendlier than a usage error.
+    // stdout, exit 0 — friendlier than a usage error. With
+    // `default-launch-mode = "tui"` (story #78) it launches the Terminal
+    // instead; the default stays byte-identical help. The launcher consults
+    // the saved setting ONLY here — no other invocation gains a settings
+    // read.
     if args.len() == 1 {
-        let _ = Cli::command().print_help();
-        return;
+        return match decide_launch(&launch_mode_saved(), false, false) {
+            LaunchDecision::LaunchTui => launch_tui(),
+            LaunchDecision::Help => {
+                let _ = Cli::command().print_help();
+            }
+        };
     }
     let cli = Cli::parse();
 
@@ -4210,11 +4259,14 @@ fn main() {
         std::env::set_var("UMUX_CONFIG_DIR", dir.as_os_str());
     }
 
-    // The bare `--term` launcher: the TUI itself ships in v1.7.0 — say so,
-    // launch nothing, touch no store.
+    // The bare `--term` launcher (B1, v1.9.0): the umux Terminal runs here,
+    // in-process, on this terminal. The flag always overrides the saved
+    // default-launch-mode — it names the Terminal explicitly — and a
+    // `--term` WITH a command never reaches this arm (that is store
+    // targeting, dispatched below). The old "nothing to launch yet" notice
+    // from v1.7.0 is gone.
     if cli.term && cli.command.is_none() {
-        println!("The umux terminal UI (TUI) ships in v1.7.0 — nothing to launch yet.");
-        println!("Manage saved workspaces for it today: umux list --term, umux new <name> --term");
+        launch_tui();
         return;
     }
 

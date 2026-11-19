@@ -1,0 +1,15 @@
+[package]
+name = "umux-tui"
+version = "1.8.5"
+edition = "2021"
+rust-version = "1.77.2"
+description = "umux Terminal — the terminal-native UI (TUI, v1.9.0): sidebar, tabs, unlimited panes, Ctrl+B prefix shortcuts, agent statuses"
+
+# Member crate versions move with the workspace version (autom/release rule):
+# every crate in src-tauri carries the same number and CI builds --locked.
+
+[dependencies]
+# Pure-Rust TUI stack (PRD decision: no webview). ratatui renders the widgets,
+# crossterm owns raw mode / the alternate screen / input events.
+ratatui = "0.29"
+crossterm = "0.28"
