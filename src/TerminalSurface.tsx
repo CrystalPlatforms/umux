@@ -246,8 +246,14 @@ export function TerminalSurface({
       // Claude Code agent in a background workspace literally stopped running
       // until its workspace was revealed again (HITL round 6). Skipping the fit
       // keeps the last real geometry; the reveal's ResizeObserver pass re-fits.
+      let fitRan = 0
+      let fitSkipped = 0
       const fitIfVisible = () => {
-        if (container.clientWidth === 0 || container.clientHeight === 0) return
+        if (container.clientWidth === 0 || container.clientHeight === 0) {
+          fitSkipped++
+          return
+        }
+        fitRan++
         fit.fit()
       }
 
@@ -311,7 +317,22 @@ export function TerminalSurface({
         const text = container.textContent ?? ''
         let visible = 0
         for (const c of text) if (!/\s/.test(c)) visible++
-        void invoke('pty_debug_paint', { id: panelId, chars: text.length, visible }).catch(() => {})
+        // HITL 2026-11-19 black-panels diagnosis: the geometry numbers ride
+        // the same opt-in debug line — a black panel with full DOM content
+        // means the visible layer never laid out, and cols/rows/box tell us
+        // which side (fit vs container) skipped it. rows = the DOM renderer's
+        // row count; fit counters answer whether the reveal fit fired at all.
+        void invoke('pty_debug_paint', {
+          id: panelId,
+          chars: text.length,
+          visible,
+          cols: term.cols,
+          rows: term.rows,
+          boxW: container.offsetWidth,
+          boxH: container.offsetHeight,
+          fitRan,
+          fitSkipped,
+        }).catch(() => {})
       }, 4000)
 
       const writeIfOurs = (payload: { id: number; data: string }) => {

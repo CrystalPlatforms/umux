@@ -57,8 +57,20 @@ pub fn chunk_line(id: u32, total: u64, bytes: usize, first: &[u8]) -> String {
 /// spaces (≈0 non-whitespace); a painted TUI carries hundreds/thousands of
 /// visible characters — the pair answers "did it paint?" without storing any
 /// content.
-pub fn paint_line(id: u32, chars: usize, visible: usize) -> String {
-    format!("[paint] id={id} dom_chars={chars} dom_visible={visible}")
+pub fn paint_line(
+    id: u32,
+    chars: usize,
+    visible: usize,
+    cols: u16,
+    rows: u16,
+    box_w: u32,
+    box_h: u32,
+    fit_ran: u32,
+    fit_skipped: u32,
+) -> String {
+    format!(
+        "[paint] id={id} dom_chars={chars} dom_visible={visible} term={cols}x{rows} box={box_w}x{box_h} fit={fit_ran}+{fit_skipped}"
+    )
 }
 
 /// One line per keystroke batch the frontend wrote to the PTY (Ctrl+C lands
@@ -135,8 +147,14 @@ mod tests {
     // T3 (paint line): the id, total chars, and non-whitespace chars.
     #[test]
     fn paint_line_reports_dom_char_count() {
-        assert_eq!(paint_line(7, 0, 0), "[paint] id=7 dom_chars=0 dom_visible=0");
-        assert_eq!(paint_line(3, 4_512, 612), "[paint] id=3 dom_chars=4512 dom_visible=612");
+        assert_eq!(
+            paint_line(7, 0, 0, 80, 24, 800, 400, 1, 3),
+            "[paint] id=7 dom_chars=0 dom_visible=0 term=80x24 box=800x400 fit=1+3"
+        );
+        assert_eq!(
+            paint_line(3, 4_512, 612, 120, 30, 960, 480, 2, 0),
+            "[paint] id=3 dom_chars=4512 dom_visible=612 term=120x30 box=960x480 fit=2+0"
+        );
     }
 
     // T4 (append): lines accumulate; exceeding the cap truncates instead of

@@ -270,10 +270,24 @@ fn pty_close(driver: State<'_, RouterDriver>, id: u32) -> Result<(), String> {
 /// `debug-pty.flag` file exists, so a normal install does zero work here
 /// (the frontend calls this unconditionally; the backend is the gate).
 #[tauri::command]
-fn pty_debug_paint(id: u32, chars: usize, visible: usize) -> Result<(), String> {
+fn pty_debug_paint(
+    id: u32,
+    chars: usize,
+    visible: usize,
+    cols: u16,
+    rows: u16,
+    box_w: u32,
+    box_h: u32,
+    fit_ran: u32,
+    fit_skipped: u32,
+) -> Result<(), String> {
     let dir = config_dir();
     if pty_debug::enabled(&dir) {
-        pty_debug::append(&dir, &pty_debug::paint_line(id, chars, visible), pty_debug::max_log_bytes());
+        pty_debug::append(
+            &dir,
+            &pty_debug::paint_line(id, chars, visible, cols, rows, box_w, box_h, fit_ran, fit_skipped),
+            pty_debug::max_log_bytes(),
+        );
     }
     Ok(())
 }
@@ -2337,8 +2351,17 @@ pub fn run() {
             // exit path (the daemon's rule, #124); a crash leaves them for
             // the next prepare on either side to sweep.
             if let tauri::RunEvent::Exit = event {
-                gateway_service::GatewayService::global().stop_for_exit();
-                umux_storestation::gateway::cleanup(&config_dir());
+                let gateway = gateway_service::GatewayService::global();
+                gateway.stop_for_exit();
+                // The gateway's socket/pid files are ours to clean on the
+                // clean exit path ONLY when the gateway served them. With
+                // the Storestation toggle ON the files belong to the daemon
+                // process, which outlives us — deleting them leaves a live
+                // daemon deaf (its listener holds an unlinked inode; the
+                // next probe answers "not running").
+                if gateway_service::GatewayService::should_clean_files(gateway.daemon_enabled()) {
+                    umux_storestation::gateway::cleanup(&config_dir());
+                }
             }
         });
 }

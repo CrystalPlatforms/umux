@@ -256,7 +256,6 @@ pub struct DaemonDriver {
 pub const DAEMON_APP_ID_BASE: u32 = 0x8000_0000;
 
 struct IdMap {
-    next_id: u32,
     /// app id → (daemon session id, dispatcher feed token). pty_close uses
     /// the token to detach; when it was the session's last panel, the whole
     /// dispatcher tears down.
@@ -264,11 +263,23 @@ struct IdMap {
 }
 
 impl IdMap {
+    #[allow(dead_code)] // kept for tests and future per-map queries
     fn new() -> Self {
         IdMap {
-            next_id: DAEMON_APP_ID_BASE,
             by_app: HashMap::new(),
         }
+    }
+
+    /// The next daemon app id, from the PROCESS-GLOBAL counter. A fresh
+    /// DaemonDriver after a daemon recovery must never restart at the base:
+    /// ids minted by the previous driver still belong to live panels, and a
+    /// reused id puts two panels on one route (crossed keystrokes, shared
+    /// cwd — the 2026-11-19 HITL report). With 2^31 ids per process, the
+    /// counter cannot realistically exhaust.
+    fn next_app_id() -> u32 {
+        use std::sync::atomic::AtomicU32;
+        static DAEMON_NEXT_APP_ID: AtomicU32 = AtomicU32::new(DAEMON_APP_ID_BASE);
+        DAEMON_NEXT_APP_ID.fetch_add(1, Ordering::SeqCst)
     }
 }
 
@@ -509,11 +520,13 @@ impl DaemonDriver {
     }
 
     /// Mint the next app-side id for a daemon session, remembering the
-    /// panel's dispatcher feed (dropped by pty_close).
+    /// panel's dispatcher feed (dropped by pty_close). The counter is
+    /// process-global (see [`IdMap::next_app_id`]): daemon recoveries
+    /// recreate this driver, and the new instance must never mint an id
+    /// a previous instance handed to a still-mounted panel.
     fn mint_app_id(&self, session_id: String, feed_token: u64) -> u32 {
+        let app_id = IdMap::next_app_id();
         let mut map = self.map.lock().expect("daemon id map lock");
-        let app_id = map.next_id;
-        map.next_id += 1;
         map.by_app.insert(app_id, (session_id, feed_token));
         app_id
     }
@@ -1301,15 +1314,37 @@ mod connect_error_tests {
     // the exact shape of the wrong-tab-history / wrong-folder-name bug.
     #[test]
     fn daemon_app_ids_start_disjoint_from_in_process() {
-        let map = IdMap::new();
+        let id = IdMap::next_app_id();
         assert!(
-            map.next_id >= DAEMON_APP_ID_BASE,
+            id >= DAEMON_APP_ID_BASE,
             "the daemon id counter must start at the disjoint base, got {}",
-            map.next_id
+            id
         );
         assert!(
             DAEMON_APP_ID_BASE >= 0x8000_0000,
             "the base must sit beyond any plausible in-process counter value"
+        );
+    }
+
+    // The crossed-keystrokes guard (HITL 2026-11-19): the daemon id counter
+    // is PROCESS-GLOBAL, not per-driver. A daemon recovery mid-session
+    // (the v1.8.4 self-heal makes it routine) creates a fresh DaemonDriver;
+    // a per-instance counter restarting at the base would mint ids that
+    // still belong to LIVE panels from the previous connection — two panels
+    // on one app id: keystrokes typed in one land in the other's session,
+    // and both tabs' folder chips follow one shared cwd. Ids never repeat
+    // within the process lifetime.
+    #[test]
+    fn daemon_app_ids_never_repeat_across_driver_instances() {
+        let a = IdMap::next_app_id();
+        let b = IdMap::next_app_id();
+        assert_ne!(
+            a, b,
+            "a fresh daemon driver must never mint an id another driver already handed out"
+        );
+        assert!(
+            a >= DAEMON_APP_ID_BASE && b >= DAEMON_APP_ID_BASE,
+            "both ids stay in the daemon range"
         );
     }
 

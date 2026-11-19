@@ -75,6 +75,23 @@ impl GatewayService {
         self.daemon_enabled.store(on, Ordering::SeqCst);
     }
 
+    /// The live mirror of the Storestation toggle (the exit path reads it
+    /// to decide who owns the gateway files).
+    pub fn daemon_enabled(&self) -> bool {
+        self.daemon_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Whether the app-exit path may delete the gateway socket/pid files:
+    /// ONLY when the gateway served them (toggle OFF). With the toggle ON
+    /// those files belong to the DAEMON process, which outlives the app —
+    /// deleting them deafens a live daemon: its listener keeps the old
+    /// inode while the path is gone, every later probe answers "not
+    /// running", and a fresh daemon has to take over (HITL 2026-11-19).
+    /// Mirrors the bind condition in `serve`.
+    pub fn should_clean_files(daemon_enabled: bool) -> bool {
+        !daemon_enabled
+    }
+
     /// The Storestation-enable window (and app exit): stop serving now and
     /// do not re-bind until [`GatewayService::resume`]. Unblocks a running
     /// serve loop within one accept tick.
@@ -365,4 +382,28 @@ fn daemon_client_dead(app: &AppHandle) -> bool {
     app.try_state::<crate::session_driver::RouterDriver>()
         .map(|driver| driver.daemon_connection_dead())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The deaf-daemon guard (HITL 2026-11-19): the app-exit cleanup deletes
+    // the gateway socket/pid files — but with the Storestation toggle ON
+    // those files belong to the DAEMON process, which outlives the app.
+    // Deleting them leaves a live daemon deaf: its listener keeps the old
+    // inode while the path is gone, so every later probe answers "not
+    // running" and a fresh daemon has to take over. The files are the
+    // app's to clean ONLY when the gateway served them (toggle OFF).
+    #[test]
+    fn gateway_files_clean_on_exit_only_when_the_daemon_is_off() {
+        assert!(
+            GatewayService::should_clean_files(false),
+            "toggle OFF: the gateway served the socket, the files are ours to clean"
+        );
+        assert!(
+            !GatewayService::should_clean_files(true),
+            "toggle ON: the daemon owns the socket, deleting the files deafens it"
+        );
+    }
 }
