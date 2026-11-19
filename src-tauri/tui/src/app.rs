@@ -232,16 +232,52 @@ impl App {
         }
     }
 
+    /// A shell-picker pick: ONE new tab spawns in the picked shell (the
+    /// desktop's #78 semantics — spawn-time only, nothing persists; `None`
+    /// means Auto, the backend's fallback chain).
+    fn new_tab_in_shell(&mut self, shell: Option<String>, cols: u16, rows: u16) {
+        let Some(tab_id) = self.model.create_tab(&self.active_ws, &mut self.ids) else {
+            return;
+        };
+        self.active_tabs
+            .insert(self.active_ws.clone(), tab_id.clone());
+        self.normalize_selection();
+        self.model.persist();
+        let ws = self.active_ws.clone();
+        let leaf = self
+            .model
+            .tab_layout(&tab_id)
+            .map(|t| crate::layout::leaf_ids(&t))
+            .unwrap_or_default()
+            .into_iter()
+            .next();
+        if let Some(leaf) = leaf {
+            self.spawn_pane_in(&ws, &tab_id, &leaf, cols.max(10), rows.max(4), shell);
+            self.active_pane = leaf;
+        }
+    }
+
     /// Spawn one pane's PTY session through the driver seam and start its
     /// output pump.
     fn spawn_pane(&mut self, ws_id: &str, tab_id: &str, leaf_id: &str, cols: u16, rows: u16) {
-        // The chosen shell wins: term store first, then the desktop store's
-        // choice, then $SHELL, then the per-OS default (driver's chain).
+        self.spawn_pane_in(ws_id, tab_id, leaf_id, cols, rows, None);
+    }
+
+    fn spawn_pane_in(
+        &mut self,
+        ws_id: &str,
+        tab_id: &str,
+        leaf_id: &str,
+        cols: u16,
+        rows: u16,
+        shell_override: Option<String>,
+    ) {
+        // The shell: a picker override first, then the chosen chain — term
+        // store, the desktop store's choice, $SHELL, the per-OS default.
         let shell = resolve_shell(
-            self.model
-                .settings
-                .default_shell
+            shell_override
                 .as_deref()
+                .or(self.model.settings.default_shell.as_deref())
                 .or(self.desk_shell.as_deref()),
             Some(&std::env::var("SHELL").unwrap_or_default()),
         );
@@ -377,6 +413,7 @@ impl App {
             MenuAction::FocusPane(leaf_id) => self.focus_pane(&leaf_id),
             MenuAction::ClosePane(leaf_id) => self.close_leaf(&leaf_id),
             MenuAction::NewWorkspace => self.create_workspace_active(),
+            MenuAction::ActivateWorkspace(ws_id) => self.activate_workspace(&ws_id),
             MenuAction::CloseWorkspace(ws_id) => {
                 let live = self.live_panes_of_workspace(&ws_id);
                 if live > 0 {
@@ -613,10 +650,11 @@ impl App {
     }
 
     fn handle_menu_key(&mut self, key: KeyEvent) {
-        let Some(state) = &mut self.menu else {
-            return;
+        let kind = match self.menu.as_ref() {
+            Some(state) => state.kind.clone(),
+            None => return,
         };
-        let total = ui::menu_items(&state.kind).len();
+        let total = ui::menu_items(self, &kind).len();
         if total == 0 {
             self.menu = None;
             return;
@@ -624,22 +662,27 @@ impl App {
         match key.code {
             KeyCode::Esc => self.menu = None,
             KeyCode::Up | KeyCode::Char('k') => {
-                state.selected = state.selected.saturating_sub(1);
+                if let Some(state) = self.menu.as_mut() {
+                    state.selected = state.selected.saturating_sub(1);
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if state.selected + 1 < total {
-                    state.selected += 1;
+                if let Some(state) = self.menu.as_mut() {
+                    if state.selected + 1 < total {
+                        state.selected += 1;
+                    }
                 }
             }
             KeyCode::Enter => {
-                let action = ui::menu_items(&state.kind)
+                let selected = self.menu.as_ref().map(|m| m.selected).unwrap_or(0);
+                let action = ui::menu_items(self, &kind)
                     .into_iter()
                     .flatten()
-                    .nth(state.selected);
-                let pane_area = self.pane_area_dims();
+                    .nth(selected);
+                let dims = self.pane_area_dims();
                 self.menu = None;
                 if let Some(action) = action {
-                    self.run_menu_action(action, pane_area.0, pane_area.1);
+                    self.run_menu_action(action, dims.0, dims.1);
                 }
             }
             _ => {}
@@ -666,6 +709,9 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) {
+        // Hover follows EVERY pointer event — moves, drags and clicks alike
+        // (a menu opening under a still cursor must highlight at once).
+        self.hover = Some((mouse.column, mouse.row));
         // The hit tests use the SAME rects the renderer drew — ui::pane_area
         // is the one geometry both sides share.
         let pane_area = ui::pane_area(area);
@@ -677,6 +723,11 @@ impl App {
                 // and any earlier menu close first (menus don't stack).
                 self.shell_menu = false;
                 if let Some(kind) = ui::context_kind(self, area, mouse.column, mouse.row) {
+                    // Right-clicking a pane focuses it too (the desktop rule:
+                    // the menu belongs to the pane UNDER the pointer).
+                    if let ui::MenuKind::Pane(leaf) = &kind {
+                        self.focus_pane(leaf);
+                    }
                     self.menu = Some(ui::MenuState {
                         kind,
                         anchor: (mouse.column, mouse.row),
@@ -716,14 +767,16 @@ impl App {
                     }
                     return;
                 }
-                // Then the shell dropdown: a row applies the pick, anything
-                // else just closes the menu.
+                // Then the shell dropdown: a row spawns ONE new tab in that
+                // shell (the desktop's #78 rule — spawn-time only, nothing
+                // persists); any click outside just closes it.
                 if self.shell_menu {
-                    if let Some(pick) = ui::shell_pick_at(self, area, mouse.column, mouse.row) {
-                        self.model.settings.default_shell = pick;
-                        self.model.persist_settings();
-                    }
+                    let pick = ui::shell_pick_at(self, area, mouse.column, mouse.row);
                     self.shell_menu = false;
+                    if let Some(shell) = pick {
+                        let dims = self.pane_area_dims();
+                        self.new_tab_in_shell(shell, dims.0, dims.1);
+                    }
                     return;
                 }
                 // The clickable chrome first: tab titles, their x buttons,
@@ -1110,5 +1163,114 @@ impl App {
     /// through the prefix dispatch).
     pub fn request_exit(&mut self) {
         self.should_exit = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The chrome hit-tests against a synthetic two-workspace app: clicks
+    //! and right-clicks must map to the element UNDER THE POINTER (the
+    //! round-2 fixes), not to the active one.
+
+    use super::*;
+    use crate::ui::{context_kind, hit_test, MenuAction, MenuKind, UiHit};
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use std::sync::Mutex;
+
+    /// `UMUX_CONFIG_DIR` is process-global (paths.rs's documented reason
+    /// in-process tests would race) — serialize and sandbox it.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_two_ws_app(test: impl FnOnce(&mut App)) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("UMUX_CONFIG_DIR", dir.path());
+        {
+            // A first-run store boots one workspace; the sidebar "+" adds
+            // the second — the exact path under test.
+            let mut app = App::new();
+            app.create_workspace_active();
+            test(&mut app);
+        }
+        std::env::remove_var("UMUX_CONFIG_DIR");
+    }
+
+    fn click(app: &mut App, area: Rect, col: u16, row: u16, button: MouseButton) {
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(button),
+                column: col,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            area,
+        );
+    }
+
+    #[test]
+    fn the_sidebar_maps_clicks_to_the_row_under_the_pointer() {
+        with_two_ws_app(|app| {
+            let area = Rect::new(0, 0, 80, 24);
+            let order = app.model.workspace_order();
+            assert!(order.len() >= 2, "the test needs two workspaces");
+            // Row 0 is the header ("+" at its right edge); rows 1.. are the
+            // workspaces, in the sidebar's own order.
+            assert_eq!(
+                hit_test(app, area, 3, 1),
+                Some(UiHit::Workspace(order[0].clone()))
+            );
+            assert_eq!(
+                hit_test(app, area, 3, 2),
+                Some(UiHit::Workspace(order[1].clone()))
+            );
+            // A real left click on the second row switches to it.
+            click(app, area, 3, 2, MouseButton::Left);
+            assert_eq!(app.active_ws, order[1], "the row under the pointer wins");
+        });
+    }
+
+    #[test]
+    fn the_sidebar_header_buttons_hit_their_own_cells() {
+        with_two_ws_app(|app| {
+            let area = Rect::new(0, 0, 80, 24);
+            // The header buttons at the row's right edge: " + " then " Q ".
+            assert_eq!(
+                hit_test(app, area, 10, 0),
+                Some(UiHit::Menu(MenuAction::NewWorkspace))
+            );
+            assert_eq!(
+                hit_test(app, area, 13, 0),
+                Some(UiHit::Menu(MenuAction::Quit))
+            );
+            click(app, area, 10, 0, MouseButton::Left);
+            assert_eq!(
+                app.model.workspace_order().len(),
+                3,
+                "the header + creates a workspace"
+            );
+        });
+    }
+
+    #[test]
+    fn the_right_click_menu_belongs_to_the_element_under_the_pointer() {
+        with_two_ws_app(|app| {
+            let area = Rect::new(0, 0, 80, 24);
+            let order = app.model.workspace_order();
+            // PPM on the SECOND (inactive) workspace row must carry THAT
+            // workspace's id, never the active one's.
+            click(app, area, 3, 2, MouseButton::Right);
+            let kind = app.menu.as_ref().map(|m| m.kind.clone());
+            assert_eq!(
+                kind,
+                Some(MenuKind::Workspace(order[1].clone())),
+                "the menu sits on the row under the pointer"
+            );
+            app.menu = None;
+            // A pane's PPM focuses that pane too (the desktop rule).
+            let leaf = app.active_pane.clone();
+            click(app, area, 40, 10, MouseButton::Right);
+            assert_eq!(app.active_pane, leaf, "single-pane tab keeps its pane");
+            assert!(matches!(app.menu, Some(ref m) if matches!(m.kind, MenuKind::Pane(_))));
+        });
     }
 }

@@ -97,17 +97,24 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    // Header row: the "+" (New workspace) at the right edge — the desktop's
-    // sidebar-header button. Row 0 belongs to it; workspace rows start below.
-    if let Some(plus) = sidebar_plus_rect(inner) {
-        let mut style = Style::default().fg(ratatui::style::Color::Cyan);
-        if hovered(app, plus) {
-            style = style.add_modifier(Modifier::REVERSED);
+    // Header row: "+" (New workspace) and "Q" (quit) at the right edge —
+    // the desktop's header pattern. Row 0 belongs to them; workspace rows
+    // start below.
+    let (plus, quit) = sidebar_header_buttons(inner);
+    for (rect, label, base) in [
+        (plus, " + ", ratatui::style::Color::Cyan),
+        (quit, " Q ", ratatui::style::Color::Red),
+    ] {
+        if let Some(rect) = rect {
+            let mut style = Style::default().fg(base);
+            if hovered(app, rect) {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, style))),
+                rect,
+            );
         }
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(" + ", style))),
-            plus,
-        );
     }
     let rows = Rect {
         x: inner.x,
@@ -417,12 +424,13 @@ pub enum MenuAction {
     FocusPane(String),
     ClosePane(String),
     NewWorkspace,
+    ActivateWorkspace(String),
     CloseWorkspace(String),
     Quit,
 }
 
 /// Which surface a right-click landed on (the desktop's per-surface menus).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MenuKind {
     /// A tab title.
     Tab(String),
@@ -445,7 +453,7 @@ pub struct MenuState {
 
 /// What a left click on the chrome landed on (panes/dividers are app.rs's
 /// own geometry).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiHit {
     /// A chrome action (tab "+" and sidebar "+" buttons).
     Menu(MenuAction),
@@ -461,7 +469,7 @@ pub enum UiHit {
 
 /// The context menu's rows: `None` is a separator (the desktop's
 /// menu-separator).
-pub fn menu_items(kind: &MenuKind) -> Vec<Option<MenuAction>> {
+pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
     match kind {
         MenuKind::Tab(tab_id) => vec![
             Some(MenuAction::NewTab),
@@ -479,12 +487,49 @@ pub fn menu_items(kind: &MenuKind) -> Vec<Option<MenuAction>> {
             None,
             Some(MenuAction::ClosePane(pane_id.clone())),
         ],
-        MenuKind::Workspace(ws_id) => vec![Some(MenuAction::CloseWorkspace(ws_id.clone()))],
+        MenuKind::Workspace(ws_id) => {
+            let mut items = Vec::new();
+            // A row that is NOT the active workspace offers the switch —
+            // the active one only closes (the desktop's row menu).
+            if app.active_ws != *ws_id {
+                items.push(Some(MenuAction::ActivateWorkspace(ws_id.clone())));
+            }
+            items.push(Some(MenuAction::CloseWorkspace(ws_id.clone())));
+            items
+        }
         MenuKind::Header => vec![
             Some(MenuAction::NewWorkspace),
             None,
             Some(MenuAction::Quit),
         ],
+    }
+}
+
+/// Which element does this menu sit on? — the box's title, so the menu
+/// never lies about its target (the round-2 complaint: "the menu of ANOTHER
+/// workspace").
+fn menu_title(app: &App, kind: &MenuKind) -> String {
+    match kind {
+        MenuKind::Tab(tab_id) => {
+            let name = app
+                .model
+                .workspace(&app.active_ws)
+                .and_then(|ws| {
+                    let i = ws.tabs.iter().position(|t| t.id == *tab_id)?;
+                    ws.tabs.get(i).map(|t| tab_display_name(i, t))
+                })
+                .unwrap_or_else(|| "tab".into());
+            format!(" tab: {} ", name)
+        }
+        MenuKind::Pane(_) => " pane ".into(),
+        MenuKind::Workspace(ws_id) => format!(
+            " workspace: {} ",
+            app.model
+                .workspace(ws_id)
+                .map(|ws| ws.name.clone())
+                .unwrap_or_else(|| "?".into())
+        ),
+        MenuKind::Header => " menu ".into(),
     }
 }
 
@@ -499,18 +544,26 @@ fn sidebar_inner(area: Rect) -> Rect {
     }
 }
 
-/// The sidebar header row's "+" (New workspace — the desktop's sidebar
-/// header button), at the row's right edge.
-fn sidebar_plus_rect(inner: Rect) -> Option<Rect> {
-    if inner.width < 5 {
-        return None;
+/// The sidebar header row's two buttons: "+" (New workspace) and "Q" (quit
+/// the Terminal) — the desktop header's create button + window close, at
+/// the row's right edge.
+fn sidebar_header_buttons(inner: Rect) -> (Option<Rect>, Option<Rect>) {
+    if inner.width < 8 {
+        return (None, None);
     }
-    Some(Rect {
+    let quit = Rect {
         x: inner.x.saturating_add(inner.width.saturating_sub(3)),
         y: inner.y,
         width: 3,
         height: 1,
-    })
+    };
+    let plus = Rect {
+        x: inner.x.saturating_add(inner.width.saturating_sub(6)),
+        y: inner.y,
+        width: 3,
+        height: 1,
+    };
+    (Some(plus), Some(quit))
 }
 
 /// Which piece of chrome owns this cell? Mirrors the renderer's geometry
@@ -527,11 +580,17 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             width: sidebar_w,
             height: area.height,
         });
-        // Header row: only its "+" button is clickable (New workspace).
+        // Header row: its two buttons only ("+" new workspace, "Q" quit).
         if row == inner.y {
-            if let Some(plus) = sidebar_plus_rect(inner) {
-                if col >= plus.x && col < plus.x.saturating_add(plus.width) {
-                    return Some(UiHit::Menu(MenuAction::NewWorkspace));
+            let (plus, quit) = sidebar_header_buttons(inner);
+            for (rect, action) in [
+                (plus, MenuAction::NewWorkspace),
+                (quit, MenuAction::Quit),
+            ] {
+                if let Some(rect) = rect {
+                    if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                        return Some(UiHit::Menu(action));
+                    }
                 }
             }
             return None;
@@ -661,13 +720,15 @@ pub fn context_kind(app: &App, area: Rect, col: u16, row: u16) -> Option<MenuKin
 
 /// The menu's box for its kind — anchored at the click, clamped to the
 /// frame (the shell dropdown's shape).
-pub fn menu_rect(kind: &MenuKind, anchor: (u16, u16), area: Rect) -> Rect {
-    let items = menu_items(kind);
+pub fn menu_rect(app: &App, kind: &MenuKind, anchor: (u16, u16), area: Rect) -> Rect {
+    let items = menu_items(app, kind);
+    let title = menu_title(app, kind);
     let widest = items
         .iter()
         .map(|i| i.as_ref().map(|a| menu_label(a).chars().count()).unwrap_or(8))
         .max()
-        .unwrap_or(8) as u16;
+        .unwrap_or(8)
+        .max(title.chars().count()) as u16;
     let width = (widest + 4).clamp(12, area.width.saturating_sub(2).max(12));
     let height = (items.len() as u16 + 2).min(area.height.saturating_sub(1)).max(3);
     let x = anchor.0.min(area.x.saturating_add(area.width.saturating_sub(width + 1)));
@@ -688,6 +749,7 @@ fn menu_label(action: &MenuAction) -> String {
         MenuAction::FocusPane(_) => "Focus pane".into(),
         MenuAction::ClosePane(_) => "Close pane".into(),
         MenuAction::NewWorkspace => "New workspace".into(),
+        MenuAction::ActivateWorkspace(_) => "Switch to workspace".into(),
         MenuAction::CloseWorkspace(_) => "Close workspace".into(),
         MenuAction::Quit => "Quit".into(),
     }
@@ -702,7 +764,7 @@ pub fn menu_hit(
     row: u16,
 ) -> Option<Option<MenuAction>> {
     let state = app.menu.as_ref()?;
-    let rect = menu_rect(&state.kind, state.anchor, area);
+    let rect = menu_rect(app, &state.kind, state.anchor, area);
     if col < rect.x || col >= rect.x.saturating_add(rect.width) {
         return None;
     }
@@ -713,16 +775,20 @@ pub fn menu_hit(
     if row < inner_y || row >= rect.y.saturating_add(rect.height - 1) {
         return None; // border rows: neither pick nor close
     }
-    menu_items(&state.kind).get((row - inner_y) as usize).cloned()
+    menu_items(app, &state.kind)
+        .get((row - inner_y) as usize)
+        .cloned()
 }
 
 fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
     let Some(state) = app.menu.as_ref() else {
         return;
     };
-    let rect = menu_rect(&state.kind, state.anchor, area);
+    let rect = menu_rect(app, &state.kind, state.anchor, area);
     frame.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(menu_title(app, &state.kind));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     if inner.width == 0 || inner.height == 0 {
@@ -730,7 +796,7 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
     }
     let mut non_sep = 0usize;
     let mut lines: Vec<Line> = Vec::new();
-    for item in menu_items(&state.kind) {
+    for item in menu_items(app, &state.kind) {
         match item {
             None => lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
@@ -738,7 +804,15 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
             ))),
             Some(action) => {
                 let mut style = Style::default();
-                if non_sep == state.selected {
+                // The keyboard selection AND the pointer both highlight —
+                // whichever is on the row.
+                let row_rect = Rect {
+                    x: inner.x,
+                    y: inner.y.saturating_add(lines.len() as u16),
+                    width: inner.width,
+                    height: 1,
+                };
+                if non_sep == state.selected || hovered(app, row_rect) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 lines.push(Line::from(Span::styled(
