@@ -9,8 +9,9 @@
 //!   entry point the `umux` binary calls; it never panics on the way out
 //!   (the terminal is always restored) and reports failure as `Err(String)`
 //!   so the launcher can print an honest error instead of half a TUI.
-//! - [`driver`] — the SessionCore driver seam (today: the in-process
-//!   engine; B6 adds the daemon client behind the same trait).
+//! - [`driver`] — the SessionCore driver seam: the in-process engine
+//!   (Storestation OFF) or the umux-storestation daemon client (Core ON) —
+//!   one seam decision at startup, no TUI-specific socket code.
 //! - [`grid`] — the per-pane terminal emulator (vte-based, pure): the
 //!   xterm.js equivalent. Rendering only — the byte stream is never mutated.
 //! - [`keymap`] — keystroke → PTY bytes (pure, the input path's testable
@@ -22,6 +23,7 @@
 //! - [`prefix`] — the Ctrl+B chord state machine (pure, injected clock).
 //! - [`status`] — the agent-status machine, the Rust port of
 //!   `src/agentStatus.ts` (pure, injected clock; OSC + presence feeds).
+//! - [`ui`] — the ratatui rendering (sidebar, tabs, panes, footer).
 
 pub mod app;
 pub mod driver;
@@ -31,5 +33,6 @@ pub mod layout;
 pub mod model;
 pub mod prefix;
 pub mod status;
+pub mod ui;
 
 pub use app::run;

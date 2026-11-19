@@ -15,9 +15,12 @@ ratatui = "0.29"
 crossterm = "0.28"
 # The vte parser (alacritty's) — the state machine under grid.rs.
 vte = "0.13"
-# The ONE session engine (B2): panes spawn through session_core::pty_service,
-# the exact engine the desktop app and daemon use. No TUI-specific PTY code.
+# The ONE session engine (B2) and the daemon client (B6) — no TUI-specific
+# PTY or socket code.
 session_core = { path = "../session_core" }
-# The term store (B3): workspaces/tabs/panes persist through store_core ONLY
-# — the TUI never touches the desktop store's paths.
+umux-storestation = { path = "../storestation" }
+# Term-store access goes through store_core ONLY (the one-code-path rule).
 store_core = { path = "../store_core" }
+# The daemon write payload rides base64 (the protocol's wire shape).
+base64 = "0.22"
+serde_json = "1"
