@@ -728,10 +728,10 @@ mod tests {
 
     #[test]
     fn unknown_sequences_are_ignored_without_corrupting_the_grid() {
-        // A interrogation probe (DA) and a window-op CSI the minimal emulator
-        // does not implement: the grid must not panic and must not paint.
+        // An interrogation probe (DA) and mode sets the minimal emulator does
+        // not implement: the grid must not panic and must not paint.
         let mut g = Grid::new(10, 2);
-        g.feed(b"ok\x1b[c\x1b[?1047h\x1b[>0q");
+        g.feed(b"ok\x1b[c\x1b[?1000h\x1b[5i");
         assert_eq!(row_text(&g, 0), "ok        ");
     }
 
