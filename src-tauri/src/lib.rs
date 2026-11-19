@@ -399,6 +399,23 @@ async fn panel_processes(
 // before the first panel mounts — that ordering never depended on the
 // splash, only on the boot effect's own sequencing.
 
+/// Window-geometry persistence flags (quickupdate 2026-09-18): size, position
+/// and maximized restore at window creation. FULLSCREEN is platform-split
+/// since the invisible-window HITL (2026-11-19, macOS): restoring fullscreen
+/// onto a window that is visible from process start happens before anything
+/// can show, and macOS leaves that window off every Space (the process runs,
+/// no window anywhere, single-instance swallows every relaunch). On macOS the
+/// fullscreen state is therefore session-local: never saved, never restored.
+/// Windows and Linux keep the plain restore.
+fn window_state_flags() -> tauri_plugin_window_state::StateFlags {
+    let flags = tauri_plugin_window_state::StateFlags::SIZE
+        | tauri_plugin_window_state::StateFlags::POSITION
+        | tauri_plugin_window_state::StateFlags::MAXIMIZED;
+    #[cfg(not(target_os = "macos"))]
+    let flags = flags | tauri_plugin_window_state::StateFlags::FULLSCREEN;
+    flags
+}
+
 // --- Sidebar tab metadata: git branch (v1.0 Phase 14 / #41) -------------------
 //
 // One read-only batch query answers the branch label for every tab row at
@@ -2175,12 +2192,7 @@ pub fn run() {
         // plugin from ever saving the hidden Windows banner window's box.
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
-                        | tauri_plugin_window_state::StateFlags::FULLSCREEN,
-                )
+                .with_state_flags(window_state_flags())
                 .with_denylist(&["notification-banner"])
                 .build(),
         );
@@ -2965,5 +2977,36 @@ mod tests {
         assert_eq!(v["payload"], r#"{"kind":"waiting"}"#);
 
         assert_eq!(pending.take(), None);
+    }
+
+    // The invisible-window guard (HITL 2026-11-19, macOS): a saved
+    // fullscreen:true restored at window creation leaves the macOS window off
+    // every Space — the process runs, no window shows anywhere, and the
+    // single-instance forward swallows every relaunch, so "the app won't
+    // start". The window is visible from process start now, so the restore
+    // happens before anything can show. On macOS the fullscreen flag is
+    // therefore session-local (never saved, never restored); the other
+    // platforms keep the plain restore.
+    #[test]
+    fn window_state_flags_match_platform_fullscreen_policy() {
+        let flags = window_state_flags();
+        assert!(
+            flags.contains(tauri_plugin_window_state::StateFlags::SIZE),
+            "size must keep restoring"
+        );
+        assert!(
+            flags.contains(tauri_plugin_window_state::StateFlags::POSITION),
+            "position must keep restoring"
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            !flags.contains(tauri_plugin_window_state::StateFlags::FULLSCREEN),
+            "macOS must never restore fullscreen at creation (the off-Space invisible window)"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            flags.contains(tauri_plugin_window_state::StateFlags::FULLSCREEN),
+            "Windows and Linux keep the fullscreen restore"
+        );
     }
 }
