@@ -185,7 +185,7 @@ mod tests {
     //! mutated (the result is a NEW state).
 
     use super::*;
-    use crate::workspace_store::Tab;
+    use crate::workspace_store::{Orientation, Tab};
 
     fn ws(id: &str, name: &str) -> Workspace {
         Workspace {
