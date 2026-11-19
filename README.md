@@ -535,14 +535,15 @@ The Terminal has no reserved keyboard shortcuts — **every keystroke reaches th
 | Where | What |
 | ----- | ---- |
 | Tab bar | titles switch tabs (each carries the tab's agent-status glyph), the inline **`x`** closes a tab, **`+`** opens a new tab, **`v`** opens the shell picker |
-| Shell picker (`v`) | **Auto** (the backend's fallback chain) or any shell found on your `PATH` — the pick becomes the Terminal's default shell (the same shape as the desktop Settings picker) |
-| Sidebar | the header **`+`** creates a workspace; clicking a row switches to it; each row carries the workspace's aggregate status |
+| Shell picker (`v`) | **Auto** (the backend's fallback chain) or any shell found on your `PATH` — a pick spawns **one new tab in that shell** (spawn-time only, nothing persists) |
+| Sidebar | the header **`+`** creates a workspace, **`Q`** quits; group headers collapse/expand; clicking a workspace row switches to it; each row carries the workspace's aggregate status |
 | Right-click a **pane** | focus, split horizontal / vertical, zoom, close |
-| Right-click a **tab** | new tab, split horizontal / vertical, zoom, close |
-| Right-click a **workspace row** | close workspace — with a confirmation dialog when it holds live panes |
-| Right-click the **header/footer** | new workspace, quit |
+| Right-click a **tab** | rename, pin / unpin, new tab, split horizontal / vertical, zoom, color (the eight-color palette), separate (a split tab's panes become their own tabs), close |
+| Right-click a **workspace row** | rename, move to group, close workspace — with a confirmation dialog when it holds live panes |
+| Right-click a **group header** | collapse / expand, delete the group (its workspaces return to the top level) |
+| Right-click the **header/footer** | new workspace, new group, the agent-statuses toggle, quit |
 
-Context menus navigate with the mouse or the **arrow keys + Enter** (`Esc` closes). **`Esc`** also restores the chrome when a zoomed pane fills the screen. Minimum pane sizes are enforced — no pane collapses to nothing — and narrow terminals degrade gracefully (sections shrink instead of crashing).
+Context menus navigate with the mouse or the **arrow keys + Enter** (`Esc` closes). **`Esc`** also restores the chrome when a zoomed pane fills the screen. New tabs and panels **inherit the focused pane's folder** (the same `OSC 9;9` tracking the desktop uses). Minimum pane sizes are enforced — no pane collapses to nothing — and narrow terminals degrade gracefully (sections shrink instead of crashing).
 
 ### Agent status
 
