@@ -15,10 +15,16 @@
 //!   xterm.js equivalent. Rendering only — the byte stream is never mutated.
 //! - [`keymap`] — keystroke → PTY bytes (pure, the input path's testable
 //!   half).
+//! - [`layout`] — the pane split tree + cell geometry (pure, the Rust
+//!   sibling of the frontend PaneLayout, on the same store model).
+//! - [`model`] — the term store (workspaces/tabs/panes) over `store_core`
+//!   ONLY — the TUI never touches the desktop store's paths.
 
 pub mod app;
 pub mod driver;
 pub mod grid;
 pub mod keymap;
+pub mod layout;
+pub mod model;
 
 pub use app::run;

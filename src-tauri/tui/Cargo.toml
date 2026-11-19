@@ -18,3 +18,6 @@ vte = "0.13"
 # The ONE session engine (B2): panes spawn through session_core::pty_service,
 # the exact engine the desktop app and daemon use. No TUI-specific PTY code.
 session_core = { path = "../session_core" }
+# The term store (B3): workspaces/tabs/panes persist through store_core ONLY
+# — the TUI never touches the desktop store's paths.
+store_core = { path = "../store_core" }
