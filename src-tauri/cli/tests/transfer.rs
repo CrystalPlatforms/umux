@@ -134,8 +134,14 @@ fn desk_to_term_round_trips_workspaces_groups_and_order() {
     let mapped_group = term.groups[0].id.clone();
     assert_eq!(term.workspaces[0].group_id.as_deref(), Some(mapped_group.as_str()));
     // The incoming order appended (remapped, nested group excluded).
-    assert_eq!(term.order, vec![mapped_group, term.workspaces[0].id.clone(), term.workspaces[1].id.clone()]);
-    assert_eq!(term.groups[0].id, mapped_group);
+    assert_eq!(
+        term.order,
+        vec![
+            mapped_group.clone(),
+            term.workspaces[0].id.clone(),
+            term.workspaces[1].id.clone()
+        ]
+    );
 }
 
 #[test]
