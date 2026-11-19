@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(key_to_bytes(Char('a'), KeyModifiers::NONE), b"a");
         assert_eq!(key_to_bytes(Char('Z'), KeyModifiers::NONE), b"Z");
         assert_eq!(key_to_bytes(Char(' '), KeyModifiers::NONE), b" ");
-        assert_eq!(key_to_bytes(Char(''), KeyModifiers::NONE), "é".as_bytes());
+        assert_eq!(key_to_bytes(Char('é'), KeyModifiers::NONE), "é".as_bytes());
         assert_eq!(key_to_bytes(Char('1'), KeyModifiers::NONE), b"1");
     }
 
