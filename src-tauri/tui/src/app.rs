@@ -454,6 +454,7 @@ impl App {
                 }
             }
             MenuAction::Quit => self.request_exit(),
+            MenuAction::Separate(tab_id) => self.separate_tab(&tab_id),
             MenuAction::BeginTabColor(tab_id) => {
                 let anchor = self.menu.as_ref().map(|m| m.anchor).unwrap_or((12, 2));
                 self.menu = Some(ui::MenuState {
@@ -502,6 +503,42 @@ impl App {
             self.model.persist();
             self.spawn_pane(&ws, &tab_id, &new_leaf, cols.max(10), rows.max(4));
             self.active_pane = new_leaf;
+        }
+    }
+
+    /// Pull a split tab's panes apart into their own tabs (#121, the
+    /// desktop's "Separate"): each extra leaf becomes its own tab KEEPING
+    /// its live session — the leaf id (and with it the session, grid and
+    /// status) moves untouched.
+    fn separate_tab(&mut self, tab_id: &str) {
+        let Some(tree) = self.model.tab_layout(tab_id) else {
+            return;
+        };
+        let leaves = crate::layout::leaf_ids(&tree);
+        if leaves.len() <= 1 {
+            return;
+        }
+        let ws = self.active_ws.clone();
+        let mut last_new_tab: Option<String> = None;
+        for leaf in leaves.iter().skip(1) {
+            let Some(new_tab) = self.model.create_tab(&ws, &mut self.ids) else {
+                break;
+            };
+            let node = LayoutNode::Leaf {
+                id: leaf.clone(),
+            };
+            if self.model.apply_layout(&new_tab, node) {
+                // Cut the leaf out of the original tree WITHOUT killing its
+                // session — the session's ownership moves to the new tab.
+                self.model.close_pane(tab_id, leaf);
+                last_new_tab = Some(new_tab);
+            }
+        }
+        self.model.persist();
+        if let Some(new_tab) = last_new_tab {
+            self.active_tabs.insert(ws, new_tab);
+            self.normalize_selection();
+            self.redraw_all();
         }
     }
 

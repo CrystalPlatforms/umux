@@ -538,6 +538,8 @@ pub enum MenuAction {
     /// Open the rename modal for a workspace / tab.
     BeginRenameWorkspace(String),
     BeginRenameTab(String),
+    /// Pull a split tab's panes apart into their own tabs (#121).
+    Separate(String),
 }
 
 /// Which surface a right-click landed on (the desktop's per-surface menus).
@@ -610,16 +612,29 @@ pub fn palette_color(hex: &str) -> Option<ratatui::style::Color> {
 /// menu-separator).
 pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
     match kind {
-        MenuKind::Tab(tab_id) => vec![
-            Some(MenuAction::NewTab),
-            Some(MenuAction::BeginRenameTab(tab_id.clone())),
-            Some(MenuAction::SplitHorizontal),
-            Some(MenuAction::SplitVertical),
-            Some(MenuAction::ZoomToggle),
-            Some(MenuAction::BeginTabColor(tab_id.clone())),
-            None,
-            Some(MenuAction::CloseTab(tab_id.clone())),
-        ],
+        MenuKind::Tab(tab_id) => {
+            let mut items = vec![
+                Some(MenuAction::NewTab),
+                Some(MenuAction::BeginRenameTab(tab_id.clone())),
+                Some(MenuAction::SplitHorizontal),
+                Some(MenuAction::SplitVertical),
+                Some(MenuAction::ZoomToggle),
+                Some(MenuAction::BeginTabColor(tab_id.clone())),
+            ];
+            // "Separate" only means something when the tab HOLDS a split
+            // (the desktop's disabled-state rule, #121).
+            if app
+                .model
+                .tab_layout(tab_id)
+                .map(|t| crate::layout::leaf_ids(&t).len() > 1)
+                .unwrap_or(false)
+            {
+                items.push(Some(MenuAction::Separate(tab_id.clone())));
+            }
+            items.push(None);
+            items.push(Some(MenuAction::CloseTab(tab_id.clone())));
+            items
+        }
         MenuKind::TabColor(tab_id) => {
             let mut items: Vec<Option<MenuAction>> = TAB_PALETTE
                 .iter()
@@ -915,6 +930,7 @@ fn menu_label(action: &MenuAction) -> String {
         MenuAction::SetTabColor(_, None) => "Default".into(),
         MenuAction::BeginRenameWorkspace(_) => "Rename workspace".into(),
         MenuAction::BeginRenameTab(_) => "Rename tab".into(),
+        MenuAction::Separate(_) => "Separate".into(),
     }
 }
 
