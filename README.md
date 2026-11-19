@@ -24,7 +24,7 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 - **Session restore** — reopening umux brings back your workspaces, panels, layout, working directories, and shells.
 - **In-app updates** — umux checks quietly on startup and via **Settings → App updates → Check for updates**. When a new release is found, one click downloads, applies, and relaunches. Updates come from GitHub Releases only and are signature-verified — a tampered or unsigned bundle is rejected.
 - **Keyboard-first** — switch workspaces, split/close panels, and more without leaving the keyboard.
-- **umux Terminal (v1.9.0)** — the same workspaces, tabs, and unlimited panes as a **full-screen terminal UI**: `umux --term` runs umux inside any terminal, over SSH, or headless, with tmux-style `Ctrl+B` shortcuts, mouse support, the same agent statuses, and Core attach. See [umux Terminal](#umux-terminal-v190).
+- **umux Terminal (v1.9.0)** — the same workspaces, tabs, and unlimited panes as a **full-screen terminal UI**: `umux --term` runs umux inside any terminal, over SSH, or headless, with full mouse support (buttons, context menus, drag-resize), the same agent statuses, and Core attach. See [umux Terminal](#umux-terminal-v190).
 
 ---
 
@@ -528,27 +528,21 @@ or flip the **"Plain umux opens the Terminal"** switch in the desktop app's Sett
 
 Desktop and Terminal keep **separate saved states** — the `--desk` and `--term` stores from the [CLI](#cli-umux) section. Neither mode surprises the other, and **Settings are not exchanged**: each surface carries its own. Moving workspace state between them is always explicit (see [Moving state between Desktop and Terminal](#moving-state-between-desktop-and-terminal)).
 
-### Keyboard: the Ctrl+B prefix
+### Chrome: buttons and context menus
 
-Everything the Terminal does itself goes through a tmux-style **`Ctrl+B` prefix**, so shortcuts never collide with programs running inside a panel: press `Ctrl+B`, release, then a command key.
+The Terminal has no reserved keyboard shortcuts — **every keystroke reaches the focused pane** (emacs-style bindings, `Ctrl+C`, everything). All Terminal actions live on the chrome, the way the desktop app arranges them:
 
-| Chord                        | Action                                                  |
-| ---------------------------- | ------------------------------------------------------- |
-| `Ctrl+B c`                   | new tab                                                 |
-| `Ctrl+B x`                   | close the focused pane                                  |
-| `Ctrl+B &`                   | close the tab                                           |
-| `Ctrl+B %`                   | split side-by-side (left \| right)                      |
-| `Ctrl+B "`                   | split stacked (top / bottom)                            |
-| `Ctrl+B h` `j` `k` `l`       | move focus between panes (arrow keys work too)          |
-| `Ctrl+B n` / `Ctrl+B p`      | next / previous workspace                               |
-| `Ctrl+B z`                   | zoom the focused pane (the same action restores it)     |
-| `Ctrl+B q`                   | quit the Terminal                                       |
+| Where | What |
+| ----- | ---- |
+| Tab bar | titles switch tabs (each carries the tab's agent-status glyph), the inline **`x`** closes a tab, **`+`** opens a new tab, **`v`** opens the shell picker |
+| Shell picker (`v`) | **Auto** (the backend's fallback chain) or any shell found on your `PATH` — the pick becomes the Terminal's default shell (the same shape as the desktop Settings picker) |
+| Sidebar | the header **`+`** creates a workspace; clicking a row switches to it; each row carries the workspace's aggregate status |
+| Right-click a **pane** | focus, split horizontal / vertical, zoom, close |
+| Right-click a **tab** | new tab, split horizontal / vertical, zoom, close |
+| Right-click a **workspace row** | close workspace — with a confirmation dialog when it holds live panes |
+| Right-click the **header/footer** | new workspace, quit |
 
-An armed chord waits **2 seconds** for its command key (tmux's default timeout). Anything not bound passes straight through to the focused pane — including a literal `Ctrl+B`, so emacs-style shell bindings keep working, and a slow typist's lone `Ctrl+B` still reaches the pane once the chord times out. `Ctrl+B q` is the only way to quit (a bare `q` belongs to the shell and never quits).
-
-### Mouse
-
-Click a pane to focus it, click a workspace in the sidebar to switch to it, and **drag the dividers** to resize panes. Minimum pane sizes are enforced — no pane collapses to nothing — and narrow terminals degrade gracefully (sections shrink instead of crashing).
+Context menus navigate with the mouse or the **arrow keys + Enter** (`Esc` closes). **`Esc`** also restores the chrome when a zoomed pane fills the screen. Minimum pane sizes are enforced — no pane collapses to nothing — and narrow terminals degrade gracefully (sections shrink instead of crashing).
 
 ### Agent status
 
