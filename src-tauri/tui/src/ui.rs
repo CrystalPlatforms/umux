@@ -109,29 +109,70 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, inner);
 }
 
-fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
-    // Hand-drawn spans (not the Tabs widget) so the hit-test below walks the
-    // exact same left-to-right geometry — a click lands on the tab it hit.
+/// The tab bar's geometry — each tab's clickable rect (id + label + active
+/// flag) plus the trailing "+" (new tab) button. The ONE geometry the
+/// renderer and [`hit_test`] share; `row` is the single-row slice draw()
+/// paints the tabs into.
+fn tab_chrome(app: &App, row: Rect) -> (Vec<(Rect, String, bool, String)>, Option<Rect>) {
+    let mut tabs = Vec::new();
+    let mut plus = None;
     let Some(ws) = app.model.workspace(&app.active_ws) else {
-        return;
+        return (tabs, plus);
     };
-    let spans: Vec<Span> = ws
-        .tabs
-        .iter()
-        .enumerate()
-        .map(|(i, tab)| {
-            let name = tab_display_name(i, tab);
-            let active = app.active_tab_id().as_deref() == Some(tab.id.as_str());
-            Span::styled(
-                format!(" {} ", truncate(name, 16)),
-                if active {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                },
-            )
-        })
-        .collect();
+    let right = row.x.saturating_add(row.width);
+    let mut x = row.x;
+    for (i, tab) in ws.tabs.iter().enumerate() {
+        let label = format!(" {} ", truncate(tab_display_name(i, tab), 16));
+        let w = label.chars().count() as u16;
+        if x.saturating_add(w) > right {
+            break;
+        }
+        let active = app.active_tab_id().as_deref() == Some(tab.id.as_str());
+        tabs.push((
+            Rect {
+                x,
+                y: row.y,
+                width: w,
+                height: 1,
+            },
+            label,
+            active,
+            tab.id.clone(),
+        ));
+        x += w;
+    }
+    if x.saturating_add(3) <= right {
+        plus = Some(Rect {
+            x,
+            y: row.y,
+            width: 3,
+            height: 1,
+        });
+    }
+    (tabs, plus)
+}
+
+fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+    // Hand-drawn spans (not the Tabs widget) so the hit-test walks the exact
+    // same left-to-right geometry — a click lands on the tab it hit.
+    let (tabs, plus) = tab_chrome(app, area);
+    let mut spans: Vec<Span> = Vec::new();
+    for (rect, label, active, _) in &tabs {
+        let mut style = Style::default();
+        if *active {
+            style = style.add_modifier(Modifier::REVERSED);
+        } else if hovered(app, *rect) {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(label.clone(), style));
+    }
+    if let Some(rect) = plus {
+        let mut style = Style::default().fg(ratatui::style::Color::Cyan);
+        if hovered(app, rect) {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        spans.push(Span::styled(" + ", style));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -375,15 +416,21 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
     // Tab bar row (the shape draw() uses: only when the main column is tall
     // enough to slice a dedicated row).
     if main.height >= 4 && row == main.y {
-        if let Some(ws) = app.model.workspace(&app.active_ws) {
-            let mut x = main.x;
-            for (i, tab) in ws.tabs.iter().enumerate() {
-                let label = format!(" {} ", truncate(tab_display_name(i, tab), 16));
-                let w = label.chars().count() as u16;
-                if col >= x && col < x.saturating_add(w) {
-                    return Some(UiHit::Tab(tab.id.clone()));
-                }
-                x += w;
+        let row_rect = Rect {
+            x: main.x,
+            y: main.y,
+            width: main.width,
+            height: 1,
+        };
+        let (tabs, plus) = tab_chrome(app, row_rect);
+        for (rect, _, _, tab_id) in &tabs {
+            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                return Some(UiHit::Tab(tab_id.clone()));
+            }
+        }
+        if let Some(rect) = plus {
+            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                return Some(UiHit::Command(PrefixCommand::NewTab));
             }
         }
     }
