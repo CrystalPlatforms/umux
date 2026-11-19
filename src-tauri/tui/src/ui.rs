@@ -310,6 +310,51 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// A pane's title base — " {tab name}{glyph} " — the ONE string the renderer
+/// and the title-"x" hit-test share. `rect` is the pane's full (bordered)
+/// rect.
+fn pane_title_base(app: &App, leaf_id: &str, rect: Rect) -> String {
+    let tab_name = app
+        .model
+        .workspace(&app.active_ws)
+        .and_then(|ws| {
+            let tab_id = app.active_tab_id()?;
+            ws.tabs
+                .iter()
+                .position(|t| t.id == tab_id)
+                .and_then(|i| ws.tabs.get(i))
+                .map(|t| tab_display_name(i, t))
+        })
+        .unwrap_or_default();
+    let status = app
+        .panes
+        .get(leaf_id)
+        .map(|p| p.status.status())
+        .unwrap_or(AgentStatus::Idle);
+    format!(
+        " {}{} ",
+        truncate(tab_name, rect.width.saturating_sub(8) as usize),
+        status_glyph(status)
+    )
+}
+
+/// The clickable "x" cell pair at the end of a pane's title row.
+fn pane_title_x_rect(rect: Rect, base: &str) -> Option<Rect> {
+    let x = rect.x.saturating_add(1).saturating_add(base.chars().count() as u16);
+    let end = x.saturating_add(2);
+    if x < rect.x.saturating_add(rect.width.saturating_sub(1)) {
+        Some(Rect {
+            x,
+            y: rect.y,
+            width: 2,
+            height: 1,
+        })
+    } else {
+        let _ = end;
+        None
+    }
+}
+
 fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(tree) = app.active_tree() else {
         return;
@@ -317,38 +362,38 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
     let (panes, dividers) = crate::layout::geometry(&tree, area, 0);
     for (leaf_id, rect) in &panes {
         let focused = *leaf_id == app.active_pane;
-        let Some(ws) = app.model.workspace(&app.active_ws) else {
-            continue;
-        };
-        let tab_index = ws
-            .tabs
-            .iter()
-            .position(|t| t.id == app.active_tab_id().unwrap_or_default());
-        let tab_name = tab_index
-            .and_then(|i| ws.tabs.get(i))
-            .map(|t| tab_display_name(tab_index.unwrap(), t))
-            .unwrap_or_default();
-        let status = app
-            .panes
-            .get(leaf_id)
-            .map(|p| p.status.status())
-            .unwrap_or(AgentStatus::Idle);
-        let glyph = status_glyph(status);
-        let title = format!(
-            " {}{} ",
-            truncate(tab_name, (rect.width.saturating_sub(4)) as usize),
-            glyph
-        );
+        let title_base = pane_title_base(app, leaf_id, *rect);
+        let x_rect = pane_title_x_rect(*rect, &title_base);
+        let mut title_spans: Vec<Span> = vec![Span::styled(
+            title_base.clone(),
+            if focused {
+                Style::default()
+                    .fg(status_color(
+                        app.panes
+                            .get(leaf_id)
+                            .map(|p| p.status.status())
+                            .unwrap_or(AgentStatus::Idle),
+                    ))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(status_color(
+                    app.panes
+                        .get(leaf_id)
+                        .map(|p| p.status.status())
+                        .unwrap_or(AgentStatus::Idle),
+                ))
+            },
+        )];
+        if let Some(xr) = x_rect {
+            let mut xs = Style::default().fg(ratatui::style::Color::DarkGray);
+            if hovered(app, xr) {
+                xs = xs.add_modifier(Modifier::REVERSED);
+            }
+            title_spans.push(Span::styled(" x", xs));
+        }
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(
-                title,
-                if focused {
-                    Style::default().fg(status_color(status)).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(status_color(status))
-                },
-            ))
+            .title(Line::from(title_spans))
             .border_style(if focused {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -476,6 +521,8 @@ pub enum UiHit {
     Tab(String),
     /// A tab's inline "x" (close this tab).
     TabClose(String),
+    /// A pane title's inline "x" (close this pane).
+    PaneClose(String),
     /// A sidebar workspace row.
     Workspace(String),
     /// The tab bar's "v" shell-picker button.
@@ -659,6 +706,19 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             }
         }
         return None;
+    }
+    // A pane title's inline "x" (close this pane).
+    let pane_area = pane_area(area);
+    for (leaf, rect) in app.pane_geometry(pane_area) {
+        if row != rect.y || rect.width < 8 {
+            continue;
+        }
+        let base = pane_title_base(app, &leaf, rect);
+        if let Some(xr) = pane_title_x_rect(rect, &base) {
+            if col >= xr.x && col < xr.x.saturating_add(xr.width) {
+                return Some(UiHit::PaneClose(leaf));
+            }
+        }
     }
     None
 }

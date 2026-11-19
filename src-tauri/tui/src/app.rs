@@ -597,6 +597,13 @@ impl App {
     // --- event handling -------------------------------------------------------
 
     fn handle_input(&mut self, event: Event, area: Rect) {
+        if std::env::var("UMUX_TUI_TRACE").is_ok() {
+            eprintln!("[tui-trace] event {:?}", match &event {
+                Event::Key(k) => format!("Key {:?}", k.code) as String,
+                Event::Mouse(m) => format!("Mouse {:?} {},{}", m.kind, m.column, m.row),
+                _ => "Other".into(),
+            });
+        }
         match event {
             Event::Key(key) => {
                 // Windows consoles deliver BOTH the press and the release of
@@ -787,6 +794,7 @@ impl App {
                         ui::UiHit::Menu(action) => self.run_menu_action(action, dims.0, dims.1),
                         ui::UiHit::Tab(tab_id) => self.activate_tab(&tab_id),
                         ui::UiHit::TabClose(tab_id) => self.close_tab_id(&tab_id),
+                        ui::UiHit::PaneClose(leaf) => self.close_leaf(&leaf),
                         ui::UiHit::Workspace(ws_id) => self.activate_workspace(&ws_id),
                         ui::UiHit::ShellMenu => self.shell_menu = !self.shell_menu,
                     }
