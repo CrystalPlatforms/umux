@@ -50,6 +50,9 @@ pub struct Pane {
     pub parser: session_core::osc_parser::OscParser,
     pub pty_cols: u16,
     pub pty_rows: u16,
+    /// The last `OSC 9;9` directory the shell reported (the desktop's cwd
+    /// tracking) — new tabs/panels inherit it.
+    pub cwd: Option<String>,
 }
 
 /// The messages the main loop consumes.
@@ -281,9 +284,16 @@ impl App {
                 .or(self.desk_shell.as_deref()),
             Some(&std::env::var("SHELL").unwrap_or_default()),
         );
+        // The folder: the focused pane's last reported cwd (the desktop's
+        // inherit-CWD rule), else the launch default.
+        let cwd = self
+            .panes
+            .get(&self.active_pane)
+            .and_then(|p| p.cwd.clone())
+            .unwrap_or_else(default_cwd);
         let params = OpenParams {
             shell,
-            cwd: default_cwd(),
+            cwd,
             cols,
             rows,
             workspace_id: ws_id.to_string(),
@@ -301,6 +311,7 @@ impl App {
                         parser: session_core::osc_parser::OscParser::new(),
                         pty_cols: cols,
                         pty_rows: rows,
+                        cwd: None,
                     },
                 );
                 let tx = self.msg_tx.clone();
@@ -983,6 +994,9 @@ impl App {
         pane.status.on_activity(now, len);
         for _event in &parsed.events {
             pane.status.on_completion(now);
+        }
+        if let Some(cwd) = &parsed.cwd_report {
+            pane.cwd = Some(cwd.clone());
         }
         pane.grid.feed(&parsed.passthrough);
     }
