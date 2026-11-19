@@ -13,3 +13,8 @@ description = "umux Terminal — the terminal-native UI (TUI, v1.9.0): sidebar, 
 # crossterm owns raw mode / the alternate screen / input events.
 ratatui = "0.29"
 crossterm = "0.28"
+# The vte parser (alacritty's) — the state machine under grid.rs.
+vte = "0.13"
+# The ONE session engine (B2): panes spawn through session_core::pty_service,
+# the exact engine the desktop app and daemon use. No TUI-specific PTY code.
+session_core = { path = "../session_core" }

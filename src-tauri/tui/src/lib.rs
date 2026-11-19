@@ -1,4 +1,4 @@
-//! umux Terminal — the terminal-native UI (v1.9.0, plan Issue B1).
+//! umux Terminal — the terminal-native UI (v1.9.0).
 //!
 //! The TUI face of umux: a full-screen multiplexer rendered with ratatui +
 //! crossterm (pure Rust, no webview — the PRD decision), launched by
@@ -9,7 +9,16 @@
 //!   entry point the `umux` binary calls; it never panics on the way out
 //!   (the terminal is always restored) and reports failure as `Err(String)`
 //!   so the launcher can print an honest error instead of half a TUI.
+//! - [`driver`] — the SessionCore driver seam (today: the in-process
+//!   engine; B6 adds the daemon client behind the same trait).
+//! - [`grid`] — the per-pane terminal emulator (vte-based, pure): the
+//!   xterm.js equivalent. Rendering only — the byte stream is never mutated.
+//! - [`keymap`] — keystroke → PTY bytes (pure, the input path's testable
+//!   half).
 
 pub mod app;
+pub mod driver;
+pub mod grid;
+pub mod keymap;
 
 pub use app::run;
