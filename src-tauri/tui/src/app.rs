@@ -83,6 +83,10 @@ pub struct App {
     msg_tx: Sender<Msg>,
     msg_rx: Receiver<Msg>,
     drag: Option<Drag>,
+    /// The last mouse position — the chrome (footer/tabs) uses it for hover
+    /// highlights; `Moved` events only arrive under mouse capture, which the
+    /// run() setup enables.
+    hover: Option<(u16, u16)>,
     should_exit: bool,
     start: Instant,
     last_status_tick: u64,
@@ -124,6 +128,7 @@ impl App {
             msg_tx,
             msg_rx,
             drag: None,
+            hover: None,
             should_exit: false,
             start: Instant::now(),
             last_status_tick: 0,
@@ -647,8 +652,16 @@ impl App {
                     pane.grid.scroll_down(3);
                 }
             }
+            MouseEventKind::Moved => {
+                self.hover = Some((mouse.column, mouse.row));
+            }
             _ => {}
         }
+    }
+
+    /// The last mouse position (ui reads it for hover highlights).
+    pub fn hover_pos(&self) -> Option<(u16, u16)> {
+        self.hover
     }
 
     /// Raw PTY output arrived for a pane: the OSC parser runs on the side

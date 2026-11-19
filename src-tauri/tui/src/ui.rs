@@ -243,23 +243,54 @@ fn render_grid(frame: &mut Frame, pane: &Pane, inner: Rect, focused: bool) {
     }
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+/// The footer row and its clickable buttons — the ONE geometry the renderer
+/// and [`hit_test`] share.
+fn footer_layout(app: &App, area: Rect) -> (Rect, Vec<(Rect, &'static str, PrefixCommand)>) {
     let footer = Rect {
         y: area.y + area.height - 1,
         height: 1,
         ..area
     };
+    let mut x = footer.x.saturating_add(app.driver_kind.label().chars().count() as u16 + 2);
+    let mut buttons = Vec::new();
+    for (label, cmd) in footer_button_specs() {
+        let w = label.chars().count() as u16 + 4; // " [label] "
+        buttons.push((
+            Rect {
+                x,
+                y: footer.y,
+                width: w,
+                height: 1,
+            },
+            *label,
+            *cmd,
+        ));
+        x += w;
+    }
+    (footer, buttons)
+}
+
+/// Is the last mouse position inside this rect? (hover highlighting)
+fn hovered(app: &App, r: Rect) -> bool {
+    app.hover_pos()
+        .map(|(c, rw)| c >= r.x && c < r.x.saturating_add(r.width) && rw == r.y)
+        .unwrap_or(false)
+}
+
+fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let (footer, buttons) = footer_layout(app, area);
     // The same left-to-right walk [`hit_test`] does — each button owns
     // exactly the columns its span paints.
     let mut spans: Vec<Span> = vec![Span::styled(
         format!(" {} ", app.driver_kind.label()),
         Style::default().fg(ratatui::style::Color::Cyan),
     )];
-    for (label, _) in footer_button_specs() {
-        spans.push(Span::styled(
-            format!(" [{label}] "),
-            Style::default().fg(ratatui::style::Color::Blue),
-        ));
+    for (rect, label, _) in &buttons {
+        let mut style = Style::default().fg(ratatui::style::Color::Blue);
+        if hovered(app, *rect) {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        spans.push(Span::styled(format!(" [{label}] "), style));
     }
     spans.push(Span::raw("Ctrl+B prefix"));
     frame.render_widget(Paragraph::new(Line::from(spans)), footer);
@@ -309,14 +340,11 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
     }
     // Footer row (the full width, exactly what draw_footer paints).
     if row == area.y + area.height - 1 {
-        let mut x = area.x;
-        x = x.saturating_add(app.driver_kind.label().chars().count() as u16 + 2);
-        for (label, cmd) in footer_button_specs() {
-            let w = label.chars().count() as u16 + 4; // " [label] "
-            if col >= x && col < x.saturating_add(w) {
+        let (_, buttons) = footer_layout(app, area);
+        for (rect, _, cmd) in &buttons {
+            if col >= rect.x && col < rect.x.saturating_add(rect.width) {
                 return Some(UiHit::Command(*cmd));
             }
-            x += w;
         }
         return None;
     }
