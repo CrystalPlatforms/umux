@@ -380,6 +380,14 @@ pub fn resolve_shell(shell: Option<&str>, env_shell: Option<&str>) -> String {
 /// $USERPROFILE), never umux's own current dir (the app's home-dir rule — a
 /// terminal opened "in a dot" was the macOS report's bug).
 pub fn default_cwd() -> PathBuf {
+    // A terminal starts in the directory it was LAUNCHED from (the shell
+    // convention) — this also feeds the tab folder/branch labels for shells
+    // that never report OSC 9;9. Home is the fallback.
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.is_dir() {
+            return cwd;
+        }
+    }
     #[cfg(windows)]
     let key = "USERPROFILE";
     #[cfg(not(windows))]
