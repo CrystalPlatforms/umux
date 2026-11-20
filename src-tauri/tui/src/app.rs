@@ -1316,6 +1316,20 @@ impl App {
                         ui::UiHit::TabClose(tab_id) => self.close_tab_id(&tab_id),
                         ui::UiHit::PaneClose(leaf) => self.close_leaf(&leaf),
                         ui::UiHit::Workspace(ws_id) => self.activate_workspace(&ws_id),
+                        // A folder line is its OWN target: open the pane's
+                        // folder in the system explorer — never the row
+                        // above/below (the round-10 hit-identity fix).
+                        ui::UiHit::OpenFolder(path) => {
+                            let _ = std::process::Command::new(if cfg!(target_os = "windows") {
+                                "explorer"
+                            } else if cfg!(target_os = "macos") {
+                                "open"
+                            } else {
+                                "xdg-open"
+                            })
+                            .arg(&path)
+                            .spawn();
+                        }
                         ui::UiHit::Group(gid) => {
                             self.model.toggle_group_collapsed(&gid);
                             self.model.persist();

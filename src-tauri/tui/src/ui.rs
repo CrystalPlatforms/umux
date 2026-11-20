@@ -365,7 +365,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(spans));
                 // The per-panel folder lines (#81): colored chip + folder
                 // tail, dim text, each a click target that selects the ws.
-                for (status, tail, _active) in folder_lines {
+                for (status, tail, _active, _path) in folder_lines {
                     let line_rect = Rect {
                         x: rows.x,
                         y: rows.y.saturating_add(lines.len() as u16),
@@ -839,6 +839,8 @@ pub enum UiHit {
     Group(String),
     /// The sidebar header's "+" — opens the create dropdown.
     BeginCreate,
+    /// Open a pane's folder in the system file explorer.
+    OpenFolder(String),
     /// The tab bar's "v" shell-picker button.
     ShellMenu,
 }
@@ -1133,12 +1135,15 @@ enum SidebarRow {
         pinned: bool,
         color: Option<String>,
         chips: Option<Vec<AgentStatus>>,
-        folder_lines: Vec<(AgentStatus, String, bool)>,
+        folder_lines: Vec<(AgentStatus, String, bool, Option<String>)>,
     },
     FolderLine {
         ws_id: String,
         status: AgentStatus,
         text: String,
+        /// The pane's FULL cwd — a click on this line opens it in the system
+        /// file explorer (the desktop's double-click open, one click here).
+        path: Option<String>,
     },
 }
 
@@ -1212,7 +1217,7 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                 let statuses_on = app.agent_statuses_enabled();
                 let folders_on = app.model.settings.show_tab_folders;
                 let mut chips: Vec<AgentStatus> = Vec::new();
-                let mut folder_lines: Vec<(AgentStatus, String, bool)> = Vec::new();
+                let mut folder_lines: Vec<(AgentStatus, String, bool, Option<String>)> = Vec::new();
                 let tabs: Vec<String> = app
                     .model
                     .workspace(id)
@@ -1236,10 +1241,13 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                                 .as_deref()
                                 .map(folder_tail)
                                 .unwrap_or_default();
+                            // The line carries the pane's FULL cwd — a click
+                            // opens it in the system file explorer.
+                            let path = pane.cwd.clone();
                             if !tail.is_empty() {
-                                folder_lines.push((status, tail, leaf == *id));
+                                folder_lines.push((status, tail, leaf == *id, path));
                             } else if statuses_on {
-                                folder_lines.push((status, String::new(), false));
+                                folder_lines.push((status, String::new(), false, None));
                             }
                         }
                     }
@@ -1299,11 +1307,14 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             return match sidebar_rows(app).get(idx) {
                 Some(SidebarRow::Group { id, .. }) => Some(UiHit::Group(id.clone())),
                 Some(SidebarRow::Workspace { id, .. }) => Some(UiHit::Workspace(id.clone())),
-                // A folder line click selects its workspace (the desktop's
-                // single-click gesture on the line).
-                Some(SidebarRow::FolderLine { ws_id, .. }) => {
-                    Some(UiHit::Workspace(ws_id.clone()))
+                // A folder line is ITS OWN hit target: a click opens that
+                // pane's folder in the system explorer (the desktop's
+                // double-click open, one click here). A chip-only line (no
+                // cwd) does NOTHING — never a neighbour's action.
+                Some(SidebarRow::FolderLine { path: Some(path), .. }) => {
+                    Some(UiHit::OpenFolder(path.clone()))
                 }
+                Some(SidebarRow::FolderLine { .. }) => None,
                 _ => None,
             };
         }
