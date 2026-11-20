@@ -564,9 +564,11 @@ mod tests {
             settings_store: SettingsStore::new(std::env::temp_dir().join("umux-tui-test-unused")),
             dirty: false,
         };
-        assert_eq!(model.next_workspace_name(), "Workspace 2");
-        model.data.workspaces.push(ws("w3", "Workspace 2"));
+        // Browser-style: the count sets the next number (len + 1); a taken
+        // name bumps the number until unique.
         assert_eq!(model.next_workspace_name(), "Workspace 4");
+        model.data.workspaces.push(ws("w3", "Workspace 2"));
+        assert_eq!(model.next_workspace_name(), "Workspace 5");
     }
 
     #[test]

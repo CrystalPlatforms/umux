@@ -806,8 +806,11 @@ mod tests {
             assert!(is_known_cli(Some(name)), "{name}");
         }
         assert!(is_known_cli(Some("/usr/local/bin/claude")));
-        assert!(is_known_cli(Some("C:\\bin\\CLAUDE.EXE")));
         assert!(is_known_cli(Some("Aider")));
+        // The wire contract is the TS matcher (src/aiCli.ts): argv[0]'s
+        // basename, case-folded — a name WITH an extension is a different
+        // word and does not match, exactly like on the desktop.
+        assert!(!is_known_cli(Some("CLAUDE.EXE")));
     }
 
     #[test]

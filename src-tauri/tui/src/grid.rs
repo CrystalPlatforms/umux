@@ -660,11 +660,11 @@ mod tests {
         let mut g = Grid::new(5, 2);
         g.feed(b"l1\r\nl2\r\nl3\r\nl4");
         // Scrollback: l1, l2 (l3 scrolled when l4 fed? verify live bottom).
-        assert_eq!(screen_text(&g), "l3  \nl4  ");
+        assert_eq!(screen_text(&g), "l3   \nl4   ");
 
         g.scroll_up(1);
         assert_eq!(g.view_cursor(), None, "scrolled away from the live bottom");
-        assert_eq!(screen_text(&g), "l2  \nl3  ");
+        assert_eq!(screen_text(&g), "l2   \nl3   ");
 
         // Fresh output snaps the view back to the live bottom.
         g.feed(b"!");
