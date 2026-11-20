@@ -281,8 +281,8 @@ fn importing_from_itself_is_refused_with_bad_params() {
     let doc: serde_json::Value = serde_json::from_str(stderr.trim())
         .or_else(|_| serde_json::from_str(stdout.trim()))
         .unwrap();
-    assert_eq!(doc["error"]["code"], "badParams");
-    assert!(doc["error"]["message"].as_str().unwrap().contains("cannot import from itself"));
+    assert_eq!(doc["code"], "badParams");
+    assert!(doc["message"].as_str().unwrap().contains("cannot import from itself"));
 }
 
 #[test]
@@ -324,9 +324,9 @@ fn an_unknown_exchange_version_stays_refused_for_the_import_consumers() {
     let doc: serde_json::Value = serde_json::from_str(stderr.trim())
         .or_else(|_| serde_json::from_str(stdout.trim()))
         .unwrap();
-    assert_eq!(doc["error"]["code"], "badParams");
+    assert_eq!(doc["code"], "badParams");
     assert!(
-        doc["error"]["message"]
+        doc["message"]
             .as_str()
             .unwrap()
             .contains("unsupported exchange version 99"),
