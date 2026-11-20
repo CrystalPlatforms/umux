@@ -214,9 +214,12 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         let text = match row {
             SidebarRow::Header => continue,
             SidebarRow::Group { name, collapsed, .. } => {
-                style = style
-                    .fg(ratatui::style::Color::Cyan)
-                    .add_modifier(Modifier::BOLD);
+                style = style.fg(ratatui::style::Color::Cyan);
+                if hovered(app, row_rect) {
+                    style = style.add_modifier(Modifier::REVERSED);
+                } else {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
                 let arrow = if collapsed { "▶" } else { "▼" };
                 format!("{arrow} {}", truncate(name, rows.width.saturating_sub(3) as usize))
             }
@@ -225,8 +228,10 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 let marker = if active { ">" } else { " " };
                 let glyph = glyph_for(app, aggregate);
                 let pad = if indent { "  " } else { "" };
-                if active || hovered(app, row_rect) {
+                if active {
                     style = style.add_modifier(Modifier::BOLD);
+                } else if hovered(app, row_rect) {
+                    style = style.add_modifier(Modifier::REVERSED);
                 }
                 format!(
                     "{pad}{marker}{glyph} {}",
@@ -341,10 +346,10 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(color) = t.color {
             style = style.fg(color);
         }
-        if t.active {
+        // ONE hover style everywhere: the menu's REVERSED (the round-4
+        // demand — no dimming look-alikes).
+        if t.active || hovered(app, t.rect) {
             style = style.add_modifier(Modifier::REVERSED);
-        } else if hovered(app, t.rect) {
-            style = style.add_modifier(Modifier::BOLD);
         }
         spans.push(Span::styled(t.label.clone(), style));
         if let Some(xr) = t.x_rect {
@@ -414,31 +419,33 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(tree) = app.active_tree() else {
         return;
     };
-    let (panes, dividers) = crate::layout::geometry(&tree, area, 0);
+    // The zoom rule lives in ONE place — app.pane_geometry: zoomed gives the
+    // focused pane the whole area and the others nothing. Drawing from the
+    // raw tree here (instead of that geometry) is what made Zoom a visual
+    // no-op in the round-4 report.
+    let panes = app.pane_geometry(area);
+    let dividers = if app.zoomed {
+        Vec::new()
+    } else {
+        crate::layout::geometry(&tree, area, 0).1
+    };
     for (leaf_id, rect) in &panes {
+        if rect.width == 0 || rect.height == 0 {
+            continue; // a zoomed-out pane renders nothing
+        }
         let focused = *leaf_id == app.active_pane;
         let title_base = pane_title_base(app, leaf_id, *rect);
         let x_rect = pane_title_x_rect(*rect, &title_base);
-        let mut title_spans: Vec<Span> = vec![Span::styled(
-            title_base.clone(),
-            if focused {
-                Style::default()
-                    .fg(status_color(
-                        app.panes
-                            .get(leaf_id)
-                            .map(|p| p.status.status())
-                            .unwrap_or(AgentStatus::Idle),
-                    ))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(status_color(
-                    app.panes
-                        .get(leaf_id)
-                        .map(|p| p.status.status())
-                        .unwrap_or(AgentStatus::Idle),
-                ))
-            },
-        )];
+        let status = app
+            .panes
+            .get(leaf_id)
+            .map(|p| p.status.status())
+            .unwrap_or(AgentStatus::Idle);
+        let mut title_style = Style::default().fg(status_color(status));
+        if focused {
+            title_style = title_style.add_modifier(Modifier::BOLD);
+        }
+        let mut title_spans: Vec<Span> = vec![Span::styled(title_base.clone(), title_style)];
         if let Some(xr) = x_rect {
             let mut xs = Style::default().fg(ratatui::style::Color::DarkGray);
             if hovered(app, xr) {
