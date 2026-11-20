@@ -1253,8 +1253,17 @@ impl Pane {
 
 /// Take the terminal over: raw mode + alternate screen + mouse capture.
 fn setup() -> io::Result<Stdout> {
-    // Raw mode is the tty gate: piped stdio (a spawned test) fails here on
-    // every platform — the honest "there is no terminal" answer.
+    // Raw mode is NOT a reliable tty gate: on Linux enable_raw_mode opens
+    // /dev/tty and SUCCEEDS even with piped stdio (a spawned test with a
+    // controlling terminal) — the TUI then paints into the pipe and blocks
+    // forever on input. The honest "there is no terminal" answer needs an
+    // explicit isatty check (the launcher's documented no-tty contract).
+    if !crossterm::tty::IsTty::is_tty(&io::stdin()) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "no terminal attached (stdin is not a tty)",
+        ));
+    }
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;

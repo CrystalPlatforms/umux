@@ -543,24 +543,25 @@ fn config_get_without_key_prints_all_and_invalid_values_are_refused() {
     assert_eq!(before, after, "refused sets never touch the file");
 }
 
-// Assumption: `umux --term` (no subcommand) is the future TUI launcher. It
-// launches nothing today — it says so on stdout and exits 0, so scripts and
-// muscle memory survive until v1.7.0 wires the real launcher.
+// Assumption (v1.9.0 B1): `umux --term` LAUNCHES the umux Terminal now. A
+// spawned test has no real terminal on stdin, so the launcher's documented
+// no-tty contract applies: an honest error on stderr, exit 1, nothing
+// written, and — crucially — no hang.
 #[test]
-fn bare_term_responds_that_the_tui_ships_in_v1_3_0() {
+fn bare_term_without_a_tty_fails_honestly_and_fast() {
     let store = tempfile::tempdir().unwrap();
 
     let (stdout, stderr, code) = run(store.path(), &["--term"]);
 
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(code, Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert!(stdout.is_empty(), "no TUI frame is painted into the pipe: {stdout}");
     assert!(
-        stdout.contains("v1.7.0") && stdout.to_lowercase().contains("tui"),
-        "the message names the TUI and its milestone; got: {stdout}"
+        stderr.contains("terminal"),
+        "the error names the terminal requirement: {stderr}"
     );
-    assert!(stderr.is_empty());
     assert!(
         !store.path().join("term").exists(),
-        "the launcher writes nothing"
+        "the failed launch writes nothing"
     );
 }
 
