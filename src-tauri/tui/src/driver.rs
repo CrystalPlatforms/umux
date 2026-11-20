@@ -67,6 +67,11 @@ pub trait SessionDriver: Send + Sync {
     /// The foreground program's process NAME (agent-status presence — a
     /// process-table lookup, never terminal content).
     fn foreground_process_name(&self, id: u32) -> Option<String>;
+    /// The shell's OS pid (the listening-ports tooltip's root). `None` for
+    /// drivers that cannot answer (the daemon client has no pid query —
+    /// those panels silently skip the ports feature, the same way SSH
+    /// panels do on the desktop).
+    fn pty_child_pid(&self, id: u32) -> Option<u32>;
     fn kind(&self) -> DriverKind;
 }
 
@@ -122,6 +127,11 @@ impl SessionDriver for LocalDriver {
     fn foreground_process_name(&self, id: u32) -> Option<String> {
         let mut pty = self.pty.lock().ok()?;
         pty.foreground_process_name(&PtyHandle { id })
+    }
+
+    fn pty_child_pid(&self, id: u32) -> Option<u32> {
+        let mut pty = self.pty.lock().ok()?;
+        pty.child_pid(&PtyHandle { id })
     }
 
     fn kind(&self) -> DriverKind {
@@ -298,6 +308,20 @@ impl SessionDriver for DaemonDriver {
             .and_then(|p| p.as_u64())
             .and_then(|p| u32::try_from(p).ok());
         pty_service::process_name(pid?)
+    }
+
+    fn pty_child_pid(&self, id: u32) -> Option<u32> {
+        // The daemon's session.status carries the shell's childPid — the
+        // same answer the desktop's driver seam routes through.
+        let session = self.session_id_of(id)?;
+        let status = self
+            .client
+            .call("session.status", serde_json::json!({ "id": session }))
+            .ok()?;
+        status
+            .get("childPid")
+            .and_then(|p| p.as_u64())
+            .and_then(|p| u32::try_from(p).ok())
     }
 
     fn kind(&self) -> DriverKind {

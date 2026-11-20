@@ -274,8 +274,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             width: rows.width,
             height: 1,
         };
-        let mut style = Style::default();
-        let text = match row {
+        match row {
             SidebarRow::Header => continue,
             SidebarRow::Group {
                 name,
@@ -284,9 +283,9 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 active_agents,
                 ..
             } => {
-                style = style.fg(ratatui::style::Color::Cyan);
+                let mut style = Style::default().fg(ratatui::style::Color::Cyan);
                 if let Some(hex) = &color {
-                    // The group's own color tints the header (#70).
+                    // The group\u{2019}s own color tints the header (#70).
                     if let Some(c) = palette_color(hex) {
                         style = style.fg(c);
                     }
@@ -296,7 +295,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     style = style.add_modifier(Modifier::BOLD);
                 }
-                let arrow = if collapsed { "▶" } else { "▼" };
+                let arrow = if collapsed { "\u{25b6}" } else { "\u{25bc}" };
                 // The collapsed-group badge (#50): how many member
                 // workspaces hold an ACTIVE agent.
                 let badge = if collapsed && active_agents > 0 {
@@ -304,45 +303,79 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     String::new()
                 };
-                format!(
-                    "{arrow} {}{}",
-                    truncate(name, rows.width.saturating_sub(8) as usize),
-                    badge
-                )
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{arrow} {}{}",
+                        truncate(name, rows.width.saturating_sub(8) as usize),
+                        badge
+                    ),
+                    style,
+                )));
             }
             SidebarRow::Workspace {
                 id,
                 name,
-                aggregate,
                 indent,
                 pinned,
                 color,
+                chips,
+                folder_lines,
             } => {
                 let active = id == app.active_ws;
                 let marker = if active { ">" } else { " " };
-                let glyph = glyph_for(app, aggregate);
                 let pad = if indent { "  " } else { "" };
                 // A pinned workspace leads (#52) — the pin glyph precedes the
-                // name, the desktop's left-to-right reading order.
+                // name, the desktop\u{2019}s left-to-right reading order.
                 let pin = if pinned { "* " } else { "" };
+                let mut style = Style::default();
                 if active {
                     style = style.add_modifier(Modifier::BOLD);
                 } else if hovered(app, row_rect) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
-                // The workspace's own color tints the name (#69).
+                // The workspace\u{2019}s own color tints the name (#69).
                 if let Some(hex) = &color {
                     if let Some(c) = palette_color(hex) {
                         style = style.fg(c);
                     }
                 }
-                format!(
-                    "{pad}{marker}{glyph} {pin}{}",
-                    truncate(name, rows.width.saturating_sub(9) as usize)
-                )
+                // The per-panel chips ride the row (the desktop\u{2019}s chip
+                // block, ASCII dots in panel tree order).
+                let chip_text = chips.clone().unwrap_or_default();
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{pad}{marker} {pin}{} {chip_text}",
+                        truncate(name, rows.width.saturating_sub(10) as usize)
+                    ),
+                    style,
+                )));
+                // The per-panel folder lines (#81): chip + folder tail, dim,
+                // each a click target that selects the workspace.
+                for (chip, tail, _active) in folder_lines {
+                    let line_rect = Rect {
+                        x: rows.x,
+                        y: rows.y.saturating_add(lines.len() as u16),
+                        width: rows.width,
+                        height: 1,
+                    };
+                    let mut st = Style::default().fg(ratatui::style::Color::DarkGray);
+                    if hovered(app, line_rect) {
+                        st = st.add_modifier(Modifier::REVERSED);
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("{pad}  {chip} {tail}"),
+                        st,
+                    )));
+                }
             }
-        };
-        lines.push(Line::from(Span::styled(text, style)));
+            SidebarRow::FolderLine { text, .. } => {
+                let mut st = Style::default().fg(ratatui::style::Color::DarkGray);
+                if hovered(app, row_rect) {
+                    st = st.add_modifier(Modifier::REVERSED);
+                }
+                lines.push(Line::from(Span::styled(text, st)));
+            }
+        }
     }
     frame.render_widget(Paragraph::new(lines), rows);
 }
@@ -378,19 +411,41 @@ fn tab_chrome(app: &App, row: Rect) -> (Vec<TabChrome>, Option<Rect>, Option<Rec
         ws.tabs.iter().enumerate().collect();
     display.sort_by_key(|(i, t)| (!t.pinned.unwrap_or(false), *i));
     for (i, tab) in display {
-        // Per-tab agent status (story #77 parity with the desktop's chips):
-        // the tab title carries the glyph, not just the sidebar aggregate.
-        let glyph = glyph_for(app, app.tab_status(&tab.id));
+        // Desktop tab-row parity: the tab NAME, then the git-branch labels
+        // (#41/#80, gated by showTabBranch) — ONE per pane of the tab, in
+        // tree order. The agent status does NOT sit on the tab bar (Adam's
+        // call: chips live on the workspace row).
+        let glyph = String::new();
         let pin_mark = if tab.pinned.unwrap_or(false) {
-            "▲ "
+            "* "
         } else {
             ""
         };
+        let branches = if app.model.settings.show_tab_branch {
+            let mut bs: Vec<String> = Vec::new();
+            if let Some(tree) = app.model.tab_layout(&tab.id) {
+                for leaf in crate::layout::leaf_ids(&tree) {
+                    if let Some(p) = app.panes.get(&leaf) {
+                        if let Some(b) = &p.branch {
+                            bs.push(b.clone());
+                        }
+                    }
+                }
+            }
+            if bs.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", bs.join(" "))
+            }
+        } else {
+            String::new()
+        };
         let label = format!(
-            " {}{}{} ",
+            " {}{}{}{} ",
             pin_mark,
             truncate(tab_display_name(i, tab), 16),
-            glyph
+            glyph,
+            branches
         );
         let w = label.chars().count() as u16;
         // Title + its " x" (2 cols) must both fit.
@@ -690,6 +745,15 @@ pub enum MenuAction {
     TogglePinWorkspace(String),
     /// Pin / unpin a group (leads at its level).
     TogglePinGroup(String),
+    /// Toggle the git-branch labels (showTabBranch, term store).
+    ToggleBranches,
+    /// Toggle the per-panel folder lines (showTabFolders, term store).
+    ToggleFolders,
+    /// Toggle the listening-ports section (portsTooltipEnabled, term store).
+    TogglePorts,
+    /// The tab's listening-ports info row (the terminal stand-in for the
+    /// desktop's hover tooltip — data identical, no hover in a TUI).
+    PortsInfo(String),
     /// Create a new workspace group.
     NewGroup,
     /// Dissolve a group; its workspaces return to the top level.
@@ -822,6 +886,11 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
                 items.push(Some(MenuAction::Separate(tab_id.clone())));
             }
             items.push(Some(MenuAction::ZoomToggle));
+            // The listening ports — the terminal stand-in for the desktop's
+            // hover tooltip: the same backend data, listed in the menu.
+            if app.model.settings.ports_tooltip_enabled {
+                items.push(Some(MenuAction::PortsInfo(tab_id.clone())));
+            }
             items.push(None);
             items.push(Some(MenuAction::CloseTab(tab_id.clone())));
             items
@@ -928,6 +997,9 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
             Some(MenuAction::NewGroup),
             None,
             Some(MenuAction::ToggleAgentStatuses),
+            Some(MenuAction::ToggleBranches),
+            Some(MenuAction::ToggleFolders),
+            Some(MenuAction::TogglePorts),
             None,
             Some(MenuAction::Quit),
         ],
@@ -1040,10 +1112,15 @@ enum SidebarRow {
     Workspace {
         id: String,
         name: String,
-        aggregate: AgentStatus,
         indent: bool,
         pinned: bool,
         color: Option<String>,
+        chips: Option<String>,
+        folder_lines: Vec<(String, String, bool)>,
+    },
+    FolderLine {
+        ws_id: String,
+        text: String,
     },
 }
 
@@ -1110,14 +1187,57 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                 {
                     continue; // members of a collapsed group hide
                 }
-                let aggregate = app.workspace_status(id);
+                // Per-panel chips (tree order across the ws's tabs) and the
+                // per-panel folder lines (#81/#121) — gated by the same
+                // switches the desktop reads.
+                let statuses_on = app.agent_statuses_enabled();
+                let folders_on = app.model.settings.show_tab_folders;
+                let mut chips = String::new();
+                let mut folder_lines: Vec<(String, String, bool)> = Vec::new();
+                let tabs: Vec<String> = app
+                    .model
+                    .workspace(id)
+                    .map(|ws| ws.tabs.iter().map(|t| t.id.clone()).collect())
+                    .unwrap_or_default();
+                for tab_id in &tabs {
+                    let Some(tree) = app.model.tab_layout(tab_id) else {
+                        continue;
+                    };
+                    for leaf in crate::layout::leaf_ids(&tree) {
+                        let Some(pane) = app.panes.get(&leaf) else {
+                            continue;
+                        };
+                        let status = pane.status.status();
+                        let chip = match status {
+                            AgentStatus::Working => "#",
+                            AgentStatus::NeedsAttention => "!",
+                            AgentStatus::Idle => ".",
+                        };
+                        if statuses_on {
+                            chips.push_str(chip);
+                        }
+                        if folders_on {
+                            let tail = pane
+                                .cwd
+                                .as_deref()
+                                .map(folder_tail)
+                                .unwrap_or_default();
+                            if !tail.is_empty() {
+                                folder_lines.push((chip.to_string(), tail, leaf == *id));
+                            } else if statuses_on {
+                                folder_lines.push((chip.to_string(), String::new(), false));
+                            }
+                        }
+                    }
+                }
                 rows.push(SidebarRow::Workspace {
                     id: id.clone(),
                     name: name.clone(),
-                    aggregate,
                     indent: group.is_some(),
                     pinned: *pinned,
                     color: color.clone(),
+                    chips: if statuses_on { Some(chips) } else { None },
+                    folder_lines: if folders_on { folder_lines } else { Vec::new() },
                 });
             }
         }
@@ -1165,6 +1285,11 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             return match sidebar_rows(app).get(idx) {
                 Some(SidebarRow::Group { id, .. }) => Some(UiHit::Group(id.clone())),
                 Some(SidebarRow::Workspace { id, .. }) => Some(UiHit::Workspace(id.clone())),
+                // A folder line click selects its workspace (the desktop's
+                // single-click gesture on the line).
+                Some(SidebarRow::FolderLine { ws_id, .. }) => {
+                    Some(UiHit::Workspace(ws_id.clone()))
+                }
                 _ => None,
             };
         }
@@ -1253,6 +1378,11 @@ pub fn context_kind(app: &App, area: Rect, col: u16, row: u16) -> Option<MenuKin
                 Some(SidebarRow::Workspace { id, .. }) => {
                     Some(MenuKind::Workspace(id.clone()))
                 }
+                // A folder line belongs to its workspace (the desktop's
+                // row-and-line pattern: the line selects the ws).
+                Some(SidebarRow::FolderLine { ws_id, .. }) => {
+                    Some(MenuKind::Workspace(ws_id.clone()))
+                }
                 _ => Some(MenuKind::Header),
             };
         }
@@ -1324,6 +1454,24 @@ fn palette_label(hex: &str) -> String {
         .unwrap_or_else(|| hex.to_string())
 }
 
+/// The folder TAIL (the desktop's formatFolderTail): the last two segments
+/// of the path, joined with the path's own separator.
+fn folder_tail(folder: &str) -> String {
+    let segments: Vec<&str> = folder.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return folder.to_string();
+    }
+    let sep = if folder.contains('\\') { "\\" } else { "/" };
+    segments
+        .iter()
+        .rev()
+        .take(2)
+        .rev()
+        .map(|s| *s)
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
 fn menu_label(app: &App, action: &MenuAction) -> String {
     match action {
         MenuAction::NewTab => "New tab".into(),
@@ -1385,6 +1533,54 @@ fn menu_label(app: &App, action: &MenuAction) -> String {
         MenuAction::SetWorkspaceColor(_, None) => "Clear color".into(),
         MenuAction::SetGroupColor(_, Some(hex)) => palette_label(hex),
         MenuAction::SetGroupColor(_, None) => "Clear color".into(),
+        MenuAction::ToggleBranches => {
+            if app.model.settings.show_tab_branch {
+                "Git branches: on".into()
+            } else {
+                "Git branches: off".into()
+            }
+        }
+        MenuAction::ToggleFolders => {
+            if app.model.settings.show_tab_folders {
+                "Folder lines: on".into()
+            } else {
+                "Folder lines: off".into()
+            }
+        }
+        MenuAction::TogglePorts => {
+            if app.model.settings.ports_tooltip_enabled {
+                "Listening ports: on".into()
+            } else {
+                "Listening ports: off".into()
+            }
+        }
+        MenuAction::PortsInfo(tab_id) => {
+            // The union of the tab's panes' listening ports, ascending —
+            // the desktop's tooltip body (formatPorts).
+            let mut ports: Vec<u16> = Vec::new();
+            if let Some(tree) = app.model.tab_layout(tab_id) {
+                for leaf in crate::layout::leaf_ids(&tree) {
+                    if let Some(p) = app.panes.get(&leaf) {
+                        for port in &p.ports {
+                            if !ports.contains(port) {
+                                ports.push(*port);
+                            }
+                        }
+                    }
+                }
+                ports.sort_unstable();
+            }
+            if ports.is_empty() {
+                "Listening: none".into()
+            } else {
+                let list = ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" \u{00b7} ");
+                format!("Listening: {list}")
+            }
+        }
         MenuAction::ToggleAgentStatuses => {
             if app.agent_statuses_enabled() {
                 "Agent statuses: on".into()
