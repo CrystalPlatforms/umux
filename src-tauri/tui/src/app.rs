@@ -932,6 +932,15 @@ impl App {
         // Hover follows EVERY pointer event — moves, drags and clicks alike
         // (a menu opening under a still cursor must highlight at once).
         self.hover = Some((mouse.column, mouse.row));
+        // Hovering a context-menu row MOVES the selection — mouse and arrows
+        // drive one and the same highlight (round-6 unification).
+        if self.menu.is_some() {
+            if let Some(idx) = ui::menu_item_index_at(self, area, mouse.column, mouse.row) {
+                if let Some(state) = self.menu.as_mut() {
+                    state.selected = idx;
+                }
+            }
+        }
         // The hit tests use the SAME rects the renderer drew — ui::pane_area
         // is the one geometry both sides share.
         let pane_area = ui::pane_area(area);

@@ -28,10 +28,11 @@ pub fn pane_area(area: Rect) -> Rect {
         width: area.width.saturating_sub(sidebar_w),
         ..area
     };
-    // Tab bar (1 row) on top. No footer — the desktop has none.
+    // Tab bar (1 row) + its separator line (1 row) on top. No footer — the
+    // desktop has none.
     Rect {
-        y: main.y.saturating_add(1),
-        height: main.height.saturating_sub(1),
+        y: main.y.saturating_add(2),
+        height: main.height.saturating_sub(2),
         ..main
     }
 }
@@ -60,13 +61,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_sidebar(frame, app, sidebar);
     }
 
-    // Main: tab bar on top, panes below — the same slices [`pane_area`]
-    // names. There is no footer (desktop parity).
-    let (_tab_bar, pane_area) = if main.height >= 4 {
-        let chunks =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(main);
+    // Main: tab bar + its separator line on top, panes below — the same
+    // slices [`pane_area`] names. There is no footer (desktop parity).
+    let (_tab_bar, pane_area) = if main.height >= 5 {
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(main);
         draw_tab_bar(frame, app, chunks[0]);
-        (chunks[0], chunks[1])
+        // The ONE horizontal line the chrome keeps: under the tab bar.
+        let sep = Rect {
+            x: main.x,
+            y: chunks[1].y,
+            width: main.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(sep.width as usize),
+                Style::default().fg(ratatui::style::Color::DarkGray),
+            ))),
+            sep,
+        );
+        (chunks[0], chunks[2])
     } else {
         (Rect::default(), main)
     };
@@ -144,14 +163,14 @@ fn draw_rename(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
-    // NO Block title here: ratatui 0.29's `Block::inner()` reserves the
-    // title's row, which silently shifted the header/rows down one line and
-    // desynced the hit-tests (the round-2 "sidebar clicks do nothing" bug).
-    // The whole sidebar is hand-geometry now — [`sidebar_inner`] is the ONE
-    // truth the renderer and the hit-tests share.
-    let block = Block::default().borders(Borders::RIGHT);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    // NO Block and NO border here: ratatui 0.29's `Block::inner()` reserves
+    // the title's row, which silently shifted the header/rows down one line
+    // and desynced the hit-tests (the round-2 "sidebar clicks do nothing"
+    // bug). The whole sidebar is hand-geometry now — [`sidebar_inner`] is
+    // the ONE truth the renderer and the hit-tests share. Round 6: the
+    // border came off too (the chrome keeps only the tab-bar separator and
+    // the split dividers).
+    let inner = area;
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -203,10 +222,14 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let mut lines: Vec<Line> = Vec::new();
-    for (i, row) in sidebar_rows(app).into_iter().enumerate() {
+    for row in sidebar_rows(app).into_iter() {
+        // The hover rect must use the RENDERED line index (lines.len()), not
+        // the rows-vec index: the Header row is skipped without producing a
+        // line, and an index-based rect highlighted the row BELOW the
+        // pointer (the round-6 hover off-by-one).
         let row_rect = Rect {
             x: rows.x,
-            y: rows.y.saturating_add(i as u16),
+            y: rows.y.saturating_add(lines.len() as u16),
             width: rows.width,
             height: 1,
         };
@@ -398,11 +421,11 @@ fn pane_title_base(app: &App, leaf_id: &str, rect: Rect) -> String {
     )
 }
 
-/// The clickable "x" cell pair at the end of a pane's title row.
+/// The clickable "x" cell pair at the end of a pane's title row (the title
+/// starts AT the pane's left edge — there are no pane frames).
 fn pane_title_x_rect(rect: Rect, base: &str) -> Option<Rect> {
-    let x = rect.x.saturating_add(1).saturating_add(base.chars().count() as u16);
-    let end = x.saturating_add(2);
-    if x < rect.x.saturating_add(rect.width.saturating_sub(1)) {
+    let x = rect.x.saturating_add(base.chars().count() as u16);
+    if x.saturating_add(2) <= rect.x.saturating_add(rect.width) {
         Some(Rect {
             x,
             y: rect.y,
@@ -410,7 +433,6 @@ fn pane_title_x_rect(rect: Rect, base: &str) -> Option<Rect> {
             height: 1,
         })
     } else {
-        let _ = end;
         None
     }
 }
@@ -453,16 +475,24 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             title_spans.push(Span::styled(" x", xs));
         }
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(Line::from(title_spans))
-            .border_style(if focused {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            });
-        let inner = block.inner(*rect);
-        frame.render_widget(block, *rect);
+        // NO pane frames (round 6): the title is a plain row, the emulator
+        // grid fills the rest of the rect edge to edge; splits read from the
+        // thin divider lines only.
+        frame.render_widget(
+            Paragraph::new(Line::from(title_spans)),
+            Rect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: 1,
+            },
+        );
+        let inner = Rect {
+            x: rect.x,
+            y: rect.y.saturating_add(1),
+            width: rect.width,
+            height: rect.height.saturating_sub(1),
+        };
         if let Some(pane) = app.panes.get(leaf_id) {
             render_grid(frame, pane, inner, focused);
         }
@@ -770,14 +800,9 @@ fn menu_title(app: &App, kind: &MenuKind) -> String {
 }
 
 /// The footer's buttons, label → chord command (draw order = hit order).
-/// The sidebar's inner rect (the block draws only the RIGHT border).
+/// The sidebar's inner rect — the full slice (no borders since round 6).
 fn sidebar_inner(area: Rect) -> Rect {
-    Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width.saturating_sub(1),
-        height: area.height,
-    }
+    area
 }
 
 /// The sidebar header row's two buttons: "+" (New workspace) and "Q" (quit
@@ -918,7 +943,7 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
     // Tab bar row (the shape draw() uses: only when the main column is tall
     // enough to slice a dedicated row). A tab's "x" owns its columns before
     // the title itself.
-    if main.height >= 4 && row == main.y {
+    if main.height >= 5 && row == main.y {
         let row_rect = Rect {
             x: main.x,
             y: main.y,
@@ -1003,7 +1028,7 @@ pub fn context_kind(app: &App, area: Rect, col: u16, row: u16) -> Option<MenuKin
         width: area.width.saturating_sub(sidebar_w),
         ..area
     };
-    if main.height >= 4 && row == main.y {
+    if main.height >= 5 && row == main.y {
         let row_rect = Rect {
             x: main.x,
             y: main.y,
@@ -1138,6 +1163,35 @@ pub fn menu_hit(
         .cloned()
 }
 
+/// The index of the menu row under the pointer (counting ACTION rows only,
+/// exactly like the keyboard selection) — hovering updates `selected`, so
+/// mouse and arrows drive ONE highlight.
+pub fn menu_item_index_at(app: &App, area: Rect, col: u16, row: u16) -> Option<usize> {
+    let state = app.menu.as_ref()?;
+    let rect = menu_rect(app, &state.kind, state.anchor, area);
+    if col < rect.x || col >= rect.x.saturating_add(rect.width) {
+        return None;
+    }
+    let inner_y = rect.y + 1;
+    if row < inner_y || row >= rect.y.saturating_add(rect.height - 1) {
+        return None;
+    }
+    let raw = (row - inner_y) as usize;
+    let mut non_sep = 0usize;
+    for (i, item) in menu_items(app, &state.kind).into_iter().enumerate() {
+        if i == raw {
+            if item.is_some() {
+                return Some(non_sep);
+            }
+            return None; // separator under the pointer: keep the selection
+        }
+        if item.is_some() {
+            non_sep += 1;
+        }
+    }
+    None
+}
+
 fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
     let Some(state) = app.menu.as_ref() else {
         return;
@@ -1162,15 +1216,9 @@ fn draw_menu(frame: &mut Frame, app: &App, area: Rect) {
             ))),
             Some(action) => {
                 let mut style = Style::default();
-                // The keyboard selection AND the pointer both highlight —
-                // whichever is on the row.
-                let row_rect = Rect {
-                    x: inner.x,
-                    y: inner.y.saturating_add(lines.len() as u16),
-                    width: inner.width,
-                    height: 1,
-                };
-                if non_sep == state.selected || hovered(app, row_rect) {
+                // ONE highlight: `selected` is driven by the arrows AND by
+                // the pointer (handle_mouse updates it on hover).
+                if non_sep == state.selected {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 lines.push(Line::from(Span::styled(
@@ -1302,7 +1350,7 @@ fn shell_menu_rect(app: &App, area: Rect) -> Option<Rect> {
         width: area.width.saturating_sub(sidebar_w),
         ..area
     };
-    if main.height < 4 {
+    if main.height < 5 {
         return None;
     }
     let row = Rect {
