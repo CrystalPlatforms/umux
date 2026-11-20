@@ -377,6 +377,10 @@ impl App {
                         pids.insert(leaf_id.to_string(), pid);
                     }
                 }
+                // The spawn directory is the pane's STARTING cwd (the
+                // desktop's saved-workingDirectory label source); an OSC 9;9
+                // report refines it to the LIVE folder later.
+                let start_cwd = cwd.to_string_lossy().to_string();
                 self.panes.insert(
                     leaf_id.to_string(),
                     Pane {
@@ -386,7 +390,7 @@ impl App {
                         parser: session_core::osc_parser::OscParser::new(),
                         pty_cols: cols,
                         pty_rows: rows,
-                        cwd: None,
+                        cwd: Some(start_cwd),
                         branch: None,
                         ports: Vec::new(),
                     },
