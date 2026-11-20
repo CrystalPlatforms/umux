@@ -416,7 +416,7 @@ impl App {
                 })
                 .collect();
         }
-        crate::layout::geometry(&tree, area, 0).0
+        crate::layout::geometry(&tree, area, 1).0
     }
 
     /// Resize every PTY + grid of the active tab to the new pane rects.
@@ -1101,7 +1101,7 @@ impl App {
                 }
                 // A divider press starts a drag; a pane press focuses.
                 if let Some(tree) = self.active_tree() {
-                    let (_, dividers) = crate::layout::geometry(&tree, pane_area, 0);
+                    let (_, dividers) = crate::layout::geometry(&tree, pane_area, 1);
                     if let Some(divider) =
                         crate::layout::divider_at(&dividers, mouse.column, mouse.row)
                     {
@@ -1122,7 +1122,7 @@ impl App {
                 let Some(tree) = self.model.tab_layout(&drag.tab_id) else {
                     return;
                 };
-                let (_, dividers) = crate::layout::geometry(&tree, pane_area, 0);
+                let (_, dividers) = crate::layout::geometry(&tree, pane_area, 1);
                 let Some(divider) = dividers.iter().find(|d| d.id == drag.divider_id) else {
                     return;
                 };

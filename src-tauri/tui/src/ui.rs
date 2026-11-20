@@ -462,7 +462,7 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
     let dividers = if app.zoomed {
         Vec::new()
     } else {
-        crate::layout::geometry(&tree, area, 0).1
+        crate::layout::geometry(&tree, area, 1).1
     };
     for (leaf_id, rect) in &panes {
         if rect.width == 0 || rect.height == 0 {
