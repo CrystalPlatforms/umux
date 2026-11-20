@@ -346,7 +346,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 let mut spans: Vec<Span> = vec![Span::styled(
                     format!(
                         "{pad}{marker} {pin}{} ",
-                        truncate(name, rows.width.saturating_sub(reserve) as usize)
+                        truncate(name, rows.width.saturating_sub(reserve as u16) as usize)
                     ),
                     style,
                 )];
