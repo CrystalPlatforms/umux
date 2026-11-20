@@ -483,6 +483,8 @@ impl App {
             MenuAction::Quit => self.request_exit(),
             MenuAction::Separate(tab_id) => self.separate_tab(&tab_id),
             MenuAction::BeginCreate => {
+                // Not reachable from the chrome (the "+" opens the dropdown
+                // directly at the click); kept as a safe fallback.
                 self.menu = Some(ui::MenuState {
                     kind: ui::MenuKind::Create,
                     anchor: (12, 2),
@@ -1552,22 +1554,19 @@ mod tests {
             let area = Rect::new(0, 0, 80, 24);
             // The header buttons at the row's right edge: " + " (the create
             // dropdown) then " Q ".
-            assert_eq!(
-                hit_test(app, area, 10, 0),
-                Some(UiHit::Menu(MenuAction::BeginCreate))
-            );
+            assert_eq!(hit_test(app, area, 10, 0), Some(UiHit::BeginCreate));
             assert_eq!(
                 hit_test(app, area, 13, 0),
                 Some(UiHit::Menu(MenuAction::Quit))
             );
             // "+" opens the create dropdown; picking "New workspace" creates
-            // one (menu anchored at (10,0): items at rows 3+/1-based 3+).
+            // one (menu anchored at (10,0): its items sit on rows 2 and 3).
             click(app, area, 10, 0, MouseButton::Left);
             assert!(
                 matches!(app.menu, Some(ref m) if matches!(m.kind, MenuKind::Create)),
                 "the header + opens the create dropdown"
             );
-            click(app, area, 11, 3, MouseButton::Left);
+            click(app, area, 10, 2, MouseButton::Left);
             assert_eq!(
                 app.model.workspace_order().len(),
                 3,

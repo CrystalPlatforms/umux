@@ -919,16 +919,16 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
         // quits.
         if row == inner.y {
             let (plus, quit) = sidebar_header_buttons(inner);
-            for (rect, action) in [(plus, MenuAction::BeginCreate), (quit, MenuAction::Quit)] {
-                if let Some(rect) = rect {
-                    let width = if action == MenuAction::Quit {
-                        rect.width + 1
-                    } else {
-                        rect.width
-                    };
-                    if col >= rect.x && col < rect.x.saturating_add(width) {
-                        return Some(UiHit::Menu(action));
-                    }
+            // The "+" carries its OWN hit kind (the dropdown must anchor at
+            // the click, not at a fixed fallback position).
+            if let Some(rect) = plus {
+                if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                    return Some(UiHit::BeginCreate);
+                }
+            }
+            if let Some(rect) = quit {
+                if col >= rect.x && col < rect.x.saturating_add(rect.width + 1) {
+                    return Some(UiHit::Menu(MenuAction::Quit));
                 }
             }
             return None;
