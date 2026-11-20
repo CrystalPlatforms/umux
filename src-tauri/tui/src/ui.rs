@@ -95,7 +95,34 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         (Rect::default(), main)
     };
 
-    draw_panes(frame, app, pane_area);
+    // The empty state (the desktop's EmptyState, #18): when the last
+    // workspace is gone, the main area greets and points at the "+".
+    if app.model.workspace_order().is_empty() {
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "Welcome to umux",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(
+            "Create a workspace to group terminals for a project.",
+        ));
+        lines.push(Line::from(Span::styled(
+            "Use the + in the sidebar header.",
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        )));
+        let block_y = pane_area.y.saturating_add(pane_area.height.saturating_sub(5)) / 2;
+        frame.render_widget(
+            Paragraph::new(lines),
+            Rect {
+                x: pane_area.x,
+                y: block_y,
+                width: pane_area.width,
+                height: 4,
+            },
+        );
+    } else {
+        draw_panes(frame, app, pane_area);
+    }
     // The zoomed pane's restore hint rides the bottom row OVER the pane —
     // the only remnant of the old footer row.
     if app.is_zoomed() && area.height >= 3 {
@@ -145,6 +172,7 @@ fn draw_rename(frame: &mut Frame, app: &App, area: Rect) {
     let title = match &r.target {
         crate::app::RenameTarget::Workspace(_) => " rename workspace ",
         crate::app::RenameTarget::Tab(_) => " rename tab ",
+        crate::app::RenameTarget::Group(_) => " rename group ",
     };
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(rect);
@@ -249,29 +277,68 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         let mut style = Style::default();
         let text = match row {
             SidebarRow::Header => continue,
-            SidebarRow::Group { name, collapsed, .. } => {
+            SidebarRow::Group {
+                name,
+                collapsed,
+                color,
+                active_agents,
+                ..
+            } => {
                 style = style.fg(ratatui::style::Color::Cyan);
+                if let Some(hex) = &color {
+                    // The group's own color tints the header (#70).
+                    if let Some(c) = palette_color(hex) {
+                        style = style.fg(c);
+                    }
+                }
                 if hovered(app, row_rect) {
                     style = style.add_modifier(Modifier::REVERSED);
                 } else {
                     style = style.add_modifier(Modifier::BOLD);
                 }
                 let arrow = if collapsed { "▶" } else { "▼" };
-                format!("{arrow} {}", truncate(name, rows.width.saturating_sub(3) as usize))
+                // The collapsed-group badge (#50): how many member
+                // workspaces hold an ACTIVE agent.
+                let badge = if collapsed && active_agents > 0 {
+                    format!(" * {}", active_agents)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{arrow} {}{}",
+                    truncate(name, rows.width.saturating_sub(8) as usize),
+                    badge
+                )
             }
-            SidebarRow::Workspace { id, name, aggregate, indent } => {
+            SidebarRow::Workspace {
+                id,
+                name,
+                aggregate,
+                indent,
+                pinned,
+                color,
+            } => {
                 let active = id == app.active_ws;
                 let marker = if active { ">" } else { " " };
                 let glyph = glyph_for(app, aggregate);
                 let pad = if indent { "  " } else { "" };
+                // A pinned workspace leads (#52) — the pin glyph precedes the
+                // name, the desktop's left-to-right reading order.
+                let pin = if pinned { "* " } else { "" };
                 if active {
                     style = style.add_modifier(Modifier::BOLD);
                 } else if hovered(app, row_rect) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
+                // The workspace's own color tints the name (#69).
+                if let Some(hex) = &color {
+                    if let Some(c) = palette_color(hex) {
+                        style = style.fg(c);
+                    }
+                }
                 format!(
-                    "{pad}{marker}{glyph} {}",
-                    truncate(name, rows.width.saturating_sub(6) as usize)
+                    "{pad}{marker}{glyph} {pin}{}",
+                    truncate(name, rows.width.saturating_sub(9) as usize)
                 )
             }
         };
@@ -603,18 +670,31 @@ pub enum MenuAction {
     BeginTabColor(String),
     /// Set (Some hex) or clear (None) a tab's color.
     SetTabColor(String, Option<String>),
-    /// Open the rename modal for a workspace / tab.
+    /// Open a workspace's color submenu.
+    BeginWorkspaceColor(String),
+    /// Set (Some hex) or clear (None) a workspace's color.
+    SetWorkspaceColor(String, Option<String>),
+    /// Open a group's color submenu.
+    BeginGroupColor(String),
+    /// Set (Some hex) or clear (None) a group's color.
+    SetGroupColor(String, Option<String>),
+    /// Open the rename modal for a workspace / tab / group.
     BeginRenameWorkspace(String),
     BeginRenameTab(String),
+    BeginRenameGroup(String),
     /// Pull a split tab's panes apart into their own tabs (#121).
     Separate(String),
     /// Pin / unpin a tab.
     TogglePinTab(String),
+    /// Pin / unpin a workspace (leads within its container).
+    TogglePinWorkspace(String),
+    /// Pin / unpin a group (leads at its level).
+    TogglePinGroup(String),
     /// Create a new workspace group.
     NewGroup,
-    /// Collapse / expand a group header.
-    ToggleGroup(String),
-    /// Delete a group; its workspaces return to the top level.
+    /// Dissolve a group; its workspaces return to the top level.
+    UnpackGroup(String),
+    /// Delete a group AND its workspaces (the destructive subtree delete).
     DeleteGroup(String),
     /// Open a workspace row's "move to group" submenu.
     BeginMoveGroup(String),
@@ -641,6 +721,10 @@ pub enum MenuKind {
     Group(String),
     /// The "move to group" submenu of a workspace row.
     MoveGroup(String),
+    /// A workspace's color submenu.
+    WorkspaceColor(String),
+    /// A group's color submenu.
+    GroupColor(String),
     /// The sidebar header's create dropdown (workspace / group).
     Create,
     /// The chrome generally (sidebar header, tab-bar gaps, footer).
@@ -705,16 +789,27 @@ pub fn palette_color(hex: &str) -> Option<ratatui::style::Color> {
 /// The context menu's rows: `None` is a separator (the desktop's
 /// menu-separator).
 pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
+    // Every NON-tab menu opens with the desktop's create pair (New
+    // workspace / New group) — WorkspaceShell's menu.tabId == null block.
+    let create_pair = || -> Vec<Option<MenuAction>> {
+        vec![
+            Some(MenuAction::NewWorkspace),
+            Some(MenuAction::NewGroup),
+            None,
+        ]
+    };
     match kind {
+        // The desktop's tab-scoped block: Rename tab, Pin tab, Color, then
+        // the splits + Separate + Full screen (our Zoom), Close tab last.
+        // NO "New tab" item — the bar's "+" owns it (desktop parity).
         MenuKind::Tab(tab_id) => {
             let mut items = vec![
-                Some(MenuAction::NewTab),
                 Some(MenuAction::BeginRenameTab(tab_id.clone())),
                 Some(MenuAction::TogglePinTab(tab_id.clone())),
+                Some(MenuAction::BeginTabColor(tab_id.clone())),
+                None,
                 Some(MenuAction::SplitHorizontal),
                 Some(MenuAction::SplitVertical),
-                Some(MenuAction::ZoomToggle),
-                Some(MenuAction::BeginTabColor(tab_id.clone())),
             ];
             // "Separate" only means something when the tab HOLDS a split
             // (the desktop's disabled-state rule, #121).
@@ -726,6 +821,7 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
             {
                 items.push(Some(MenuAction::Separate(tab_id.clone())));
             }
+            items.push(Some(MenuAction::ZoomToggle));
             items.push(None);
             items.push(Some(MenuAction::CloseTab(tab_id.clone())));
             items
@@ -737,29 +833,76 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
                     Some(MenuAction::SetTabColor(tab_id.clone(), Some((*hex).to_string())))
                 })
                 .collect();
+            items.push(None);
             items.push(Some(MenuAction::SetTabColor(tab_id.clone(), None)));
             items
         }
-        MenuKind::Pane(pane_id) => vec![
-            Some(MenuAction::FocusPane(pane_id.clone())),
-            Some(MenuAction::SplitHorizontal),
-            Some(MenuAction::SplitVertical),
-            Some(MenuAction::ZoomToggle),
-            None,
-            Some(MenuAction::ClosePane(pane_id.clone())),
-        ],
-        MenuKind::Workspace(ws_id) => {
-            vec![
-                Some(MenuAction::BeginRenameWorkspace(ws_id.clone())),
-                Some(MenuAction::BeginMoveGroup(ws_id.clone())),
-                Some(MenuAction::CloseWorkspace(ws_id.clone())),
-            ]
+        // A pane's menu mirrors the desktop's TAB menu (the splits target
+        // the pane's tab), plus the pane's own focus/close.
+        MenuKind::Pane(pane_id) => {
+            let mut items = vec![
+                Some(MenuAction::NewWorkspace),
+                Some(MenuAction::NewGroup),
+                None,
+                Some(MenuAction::FocusPane(pane_id.clone())),
+                Some(MenuAction::SplitHorizontal),
+                Some(MenuAction::SplitVertical),
+                Some(MenuAction::ZoomToggle),
+                None,
+                Some(MenuAction::ClosePane(pane_id.clone())),
+            ];
+            items
         }
-        MenuKind::Group(group_id) => vec![
-            Some(MenuAction::ToggleGroup(group_id.clone())),
-            None,
-            Some(MenuAction::DeleteGroup(group_id.clone())),
-        ],
+        MenuKind::Workspace(ws_id) => {
+            let mut items = create_pair();
+            let pinned = app.model.workspace_pinned(ws_id);
+            items.push(Some(MenuAction::TogglePinWorkspace(ws_id.clone())));
+            items.push(Some(MenuAction::BeginRenameWorkspace(ws_id.clone())));
+            items.push(Some(MenuAction::BeginWorkspaceColor(ws_id.clone())));
+            items.push(Some(MenuAction::BeginMoveGroup(ws_id.clone())));
+            items.push(None);
+            items.push(Some(MenuAction::CloseWorkspace(ws_id.clone())));
+            let _ = pinned;
+            items
+        }
+        MenuKind::WorkspaceColor(ws_id) => {
+            let mut items: Vec<Option<MenuAction>> = TAB_PALETTE
+                .iter()
+                .map(|(_, hex)| {
+                    Some(MenuAction::SetWorkspaceColor(
+                        ws_id.clone(),
+                        Some((*hex).to_string()),
+                    ))
+                })
+                .collect();
+            items.push(None);
+            items.push(Some(MenuAction::SetWorkspaceColor(ws_id.clone(), None)));
+            items
+        }
+        MenuKind::Group(group_id) => {
+            let mut items = create_pair();
+            items.push(Some(MenuAction::TogglePinGroup(group_id.clone())));
+            items.push(Some(MenuAction::BeginRenameGroup(group_id.clone())));
+            items.push(Some(MenuAction::BeginGroupColor(group_id.clone())));
+            items.push(Some(MenuAction::UnpackGroup(group_id.clone())));
+            items.push(None);
+            items.push(Some(MenuAction::DeleteGroup(group_id.clone())));
+            items
+        }
+        MenuKind::GroupColor(group_id) => {
+            let mut items: Vec<Option<MenuAction>> = TAB_PALETTE
+                .iter()
+                .map(|(_, hex)| {
+                    Some(MenuAction::SetGroupColor(
+                        group_id.clone(),
+                        Some((*hex).to_string()),
+                    ))
+                })
+                .collect();
+            items.push(None);
+            items.push(Some(MenuAction::SetGroupColor(group_id.clone(), None)));
+            items
+        }
         MenuKind::MoveGroup(ws_id) => {
             let current = app
                 .model
@@ -826,6 +969,25 @@ fn menu_title(app: &App, kind: &MenuKind) -> String {
                 .unwrap_or_else(|| "?".into())
         ),
         MenuKind::Create => " create ".into(),
+        MenuKind::WorkspaceColor(ws_id) => format!(
+            " color: {} ",
+            app.model
+                .workspace(ws_id)
+                .map(|ws| ws.name.clone())
+                .unwrap_or_else(|| "?".into())
+        ),
+        MenuKind::GroupColor(group_id) => format!(
+            " color: {} ",
+            app
+                .model
+                .sidebar_tree()
+                .into_iter()
+                .find_map(|e| match e {
+                    SidebarEntry::Group { id, name, .. } if id == *group_id => Some(name),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "?".into())
+        ),
         MenuKind::Header => " menu ".into(),
     }
 }
@@ -872,17 +1034,22 @@ enum SidebarRow {
         id: String,
         name: String,
         collapsed: bool,
+        color: Option<String>,
+        active_agents: usize,
     },
     Workspace {
         id: String,
         name: String,
         aggregate: AgentStatus,
         indent: bool,
+        pinned: bool,
+        color: Option<String>,
     },
 }
 
 fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
     let tree = app.model.sidebar_tree();
+    let tree_ref = &tree;
     let collapsed: Vec<String> = tree
         .iter()
         .filter_map(|e| match e {
@@ -895,16 +1062,47 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
         })
         .collect();
     let mut rows = vec![SidebarRow::Header];
-    for e in tree {
+    for e in &tree {
         match e {
-            SidebarEntry::Group { id, name, collapsed } => {
+            SidebarEntry::Group {
+                id,
+                name,
+                collapsed,
+                color,
+            } => {
+                // The collapsed-group badge (#50): how many member
+                // workspaces hold an ACTIVE agent (working or waiting).
+                let mut active_agents = 0usize;
+                if *collapsed {
+                    for m in tree_ref {
+                        if let SidebarEntry::Workspace {
+                            id: ws_id,
+                            group: Some(g),
+                            ..
+                        } = m
+                        {
+                            if g == id && app.workspace_status(ws_id) != AgentStatus::Idle
+                            {
+                                active_agents += 1;
+                            }
+                        }
+                    }
+                }
                 rows.push(SidebarRow::Group {
-                    id,
-                    name,
-                    collapsed,
+                    id: id.clone(),
+                    name: name.clone(),
+                    collapsed: *collapsed,
+                    color: color.clone(),
+                    active_agents,
                 });
             }
-            SidebarEntry::Workspace { id, name, group } => {
+            SidebarEntry::Workspace {
+                id,
+                name,
+                group,
+                pinned,
+                color,
+            } => {
                 if group
                     .as_deref()
                     .map(|g| collapsed.iter().any(|c| c == g))
@@ -912,12 +1110,14 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                 {
                     continue; // members of a collapsed group hide
                 }
-                let aggregate = app.workspace_status(&id);
+                let aggregate = app.workspace_status(id);
                 rows.push(SidebarRow::Workspace {
-                    id,
-                    name,
+                    id: id.clone(),
+                    name: name.clone(),
                     aggregate,
                     indent: group.is_some(),
+                    pinned: *pinned,
+                    color: color.clone(),
                 });
             }
         }
@@ -1116,6 +1316,14 @@ pub fn menu_rect(app: &App, kind: &MenuKind, anchor: (u16, u16), area: Rect) -> 
     Rect { x, y, width, height }
 }
 
+fn palette_label(hex: &str) -> String {
+    TAB_PALETTE
+        .iter()
+        .find(|(_, h)| *h == hex)
+        .map(|(n, _)| (*n).to_string())
+        .unwrap_or_else(|| hex.to_string())
+}
+
 fn menu_label(app: &App, action: &MenuAction) -> String {
     match action {
         MenuAction::NewTab => "New tab".into(),
@@ -1130,15 +1338,17 @@ fn menu_label(app: &App, action: &MenuAction) -> String {
         MenuAction::CloseWorkspace(_) => "Close workspace".into(),
         MenuAction::Quit => "Quit".into(),
         MenuAction::BeginTabColor(_) => "Color".into(),
-        MenuAction::SetTabColor(_, Some(hex)) => {
-            let name = TAB_PALETTE
-                .iter()
-                .find(|(_, h)| *h == hex.as_str())
-                .map(|(n, _)| *n)
-                .unwrap_or(hex.as_str());
-            format!("{name}")
+        MenuAction::SetTabColor(tab_id, Some(hex)) => {
+            let name = palette_label(hex);
+            // The desktop's picker marks the picked color — and picking it
+            // AGAIN clears.
+            if app.model.tab_color(tab_id).as_deref() == Some(hex.as_str()) {
+                format!("{name} (picked — again to clear)")
+            } else {
+                name
+            }
         }
-        MenuAction::SetTabColor(_, None) => "Default".into(),
+        MenuAction::SetTabColor(_, None) => "Clear color".into(),
         MenuAction::BeginRenameWorkspace(_) => "Rename workspace".into(),
         MenuAction::BeginRenameTab(_) => "Rename tab".into(),
         MenuAction::Separate(_) => "Separate".into(),
@@ -1151,9 +1361,30 @@ fn menu_label(app: &App, action: &MenuAction) -> String {
             }
         }
         MenuAction::NewGroup => "New group".into(),
-        MenuAction::ToggleGroup(_) => "Collapse / expand".into(),
         MenuAction::DeleteGroup(_) => "Delete group".into(),
+        MenuAction::UnpackGroup(_) => "Unpack group".into(),
         MenuAction::BeginMoveGroup(_) => "Move to group".into(),
+        MenuAction::BeginRenameGroup(_) => "Rename group".into(),
+        MenuAction::BeginWorkspaceColor(_) => "Color".into(),
+        MenuAction::BeginGroupColor(_) => "Color".into(),
+        MenuAction::TogglePinWorkspace(ws_id) => {
+            if app.model.workspace_pinned(ws_id) {
+                "Unpin workspace".into()
+            } else {
+                "Pin workspace".into()
+            }
+        }
+        MenuAction::TogglePinGroup(gid) => {
+            if app.model.group_pinned(gid) {
+                "Unpin group".into()
+            } else {
+                "Pin group".into()
+            }
+        }
+        MenuAction::SetWorkspaceColor(_, Some(hex)) => palette_label(hex),
+        MenuAction::SetWorkspaceColor(_, None) => "Clear color".into(),
+        MenuAction::SetGroupColor(_, Some(hex)) => palette_label(hex),
+        MenuAction::SetGroupColor(_, None) => "Clear color".into(),
         MenuAction::ToggleAgentStatuses => {
             if app.agent_statuses_enabled() {
                 "Agent statuses: on".into()
@@ -1323,21 +1554,36 @@ fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     frame.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(" close workspace ");
+    let (kind_word, name) = match &c.target {
+        crate::app::DeleteTarget::Workspace(ws_id) => (
+            " delete workspace ",
+            app.model
+                .workspace(ws_id)
+                .map(|ws| ws.name.clone())
+                .unwrap_or_default(),
+        ),
+        crate::app::DeleteTarget::Group(gid) => (
+            " delete group ",
+            app.model
+                .sidebar_tree()
+                .into_iter()
+                .find_map(|e| match e {
+                    SidebarEntry::Group { id, name, .. } if id == *gid => Some(name),
+                    _ => None,
+                })
+                .unwrap_or_else(|| gid.clone()),
+        ),
+    };
+    let block = Block::default().borders(Borders::ALL).title(kind_word);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let name = app
-        .model
-        .workspace(&c.ws_id)
-        .map(|ws| ws.name.clone())
-        .unwrap_or_default();
     let (close, cancel) = confirm_buttons(rect);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(format!(
-        " Close '{}'?",
+        " Delete '{}'?",
         truncate(name, inner.width.saturating_sub(12) as usize)
     )));
     lines.push(Line::from(format!(

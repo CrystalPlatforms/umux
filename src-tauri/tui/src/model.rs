@@ -26,11 +26,14 @@ pub enum SidebarEntry {
         id: String,
         name: String,
         collapsed: bool,
+        color: Option<String>,
     },
     Workspace {
         id: String,
         name: String,
         group: Option<String>,
+        pinned: bool,
+        color: Option<String>,
     },
 }
 
@@ -229,6 +232,23 @@ impl TermModel {
         false
     }
 
+    pub fn tab_color(&self, tab_id: &str) -> Option<String> {
+        self.data
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.color.clone())
+    }
+
+    pub fn group_color(&self, group_id: &str) -> Option<String> {
+        self.data
+            .groups
+            .iter()
+            .find(|g| g.id == group_id)
+            .and_then(|g| g.color.clone())
+    }
+
     pub fn tab_pinned(&self, tab_id: &str) -> bool {
         self.data
             .workspaces
@@ -387,35 +407,51 @@ impl TermModel {
                 .position(|id| id == &g.id)
                 .unwrap_or(usize::MAX)
         });
+        // A pinned group leads at its own level (#52) — a stable sort keeps
+        // the relative order inside the two buckets.
+        groups_by_order.sort_by_key(|g| !g.pinned.unwrap_or(false));
         let mut rows = Vec::new();
         for g in groups_by_order {
             rows.push(SidebarEntry::Group {
                 id: g.id.clone(),
                 name: g.name.clone(),
                 collapsed: g.collapsed.unwrap_or(false),
+                color: g.color.clone(),
             });
-            for id in &self.data.order {
-                if let Some(w) = self.data.workspaces.iter().find(|w| w.id == *id) {
-                    if w.group_id.as_deref() == Some(g.id.as_str()) {
-                        rows.push(SidebarEntry::Workspace {
-                            id: w.id.clone(),
-                            name: w.name.clone(),
-                            group: w.group_id.clone(),
-                        });
-                    }
-                }
+            let mut members: Vec<&Workspace> = self
+                .data
+                .order
+                .iter()
+                .filter_map(|id| self.data.workspaces.iter().find(|w| w.id == *id))
+                .filter(|w| w.group_id.as_deref() == Some(g.id.as_str()))
+                .collect();
+            members.sort_by_key(|w| !w.pinned.unwrap_or(false));
+            for w in members {
+                rows.push(SidebarEntry::Workspace {
+                    id: w.id.clone(),
+                    name: w.name.clone(),
+                    group: w.group_id.clone(),
+                    pinned: w.pinned.unwrap_or(false),
+                    color: w.color.clone(),
+                });
             }
         }
-        for id in &self.data.order {
-            if let Some(w) = self.data.workspaces.iter().find(|w| w.id == *id) {
-                if w.group_id.is_none() {
-                    rows.push(SidebarEntry::Workspace {
-                        id: w.id.clone(),
-                        name: w.name.clone(),
-                        group: None,
-                    });
-                }
-            }
+        let mut ungrouped: Vec<&Workspace> = self
+            .data
+            .order
+            .iter()
+            .filter_map(|id| self.data.workspaces.iter().find(|w| w.id == *id))
+            .filter(|w| w.group_id.is_none())
+            .collect();
+        ungrouped.sort_by_key(|w| !w.pinned.unwrap_or(false));
+        for w in ungrouped {
+            rows.push(SidebarEntry::Workspace {
+                id: w.id.clone(),
+                name: w.name.clone(),
+                group: None,
+                pinned: w.pinned.unwrap_or(false),
+                color: w.color.clone(),
+            });
         }
         // A workspace missing from `order` entirely (pre-order configs).
         for w in &self.data.workspaces {
@@ -424,12 +460,110 @@ impl TermModel {
                     id: w.id.clone(),
                     name: w.name.clone(),
                     group: None,
+                    pinned: w.pinned.unwrap_or(false),
+                    color: w.color.clone(),
                 });
             }
         }
         rows
     }
 
+    /// Pin / unpin a workspace (leads within its own container).
+    pub fn set_workspace_pinned(&mut self, ws_id: &str, pinned: bool) -> bool {
+        if let Some(w) = self.data.workspaces.iter_mut().find(|w| w.id == ws_id) {
+            w.pinned = Some(pinned);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn workspace_pinned(&self, ws_id: &str) -> bool {
+        self.data
+            .workspaces
+            .iter()
+            .find(|w| w.id == ws_id)
+            .and_then(|w| w.pinned)
+            .unwrap_or(false)
+    }
+
+    /// Set (Some palette hex) or clear (None) a workspace color (#69).
+    pub fn set_workspace_color(&mut self, ws_id: &str, color: Option<String>) -> bool {
+        if let Some(w) = self.data.workspaces.iter_mut().find(|w| w.id == ws_id) {
+            w.color = color;
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn rename_group(&mut self, group_id: &str, new_name: String) -> bool {
+        if let Some(g) = self.data.groups.iter_mut().find(|g| g.id == group_id) {
+            g.name = new_name;
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_group_pinned(&mut self, group_id: &str, pinned: bool) -> bool {
+        if let Some(g) = self.data.groups.iter_mut().find(|g| g.id == group_id) {
+            g.pinned = Some(pinned);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn group_pinned(&self, group_id: &str) -> bool {
+        self.data
+            .groups
+            .iter()
+            .find(|g| g.id == group_id)
+            .and_then(|g| g.pinned)
+            .unwrap_or(false)
+    }
+
+    pub fn set_group_color(&mut self, group_id: &str, color: Option<String>) -> bool {
+        if let Some(g) = self.data.groups.iter_mut().find(|g| g.id == group_id) {
+            g.color = color;
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Dissolve a group (#51): its workspaces return to the top level.
+    pub fn unpack_group(&mut self, group_id: &str) -> bool {
+        let exists = self.data.groups.iter().any(|g| g.id == group_id);
+        if !exists {
+            return false;
+        }
+        self.remove_group(group_id)
+    }
+
+    /// Delete a group AND every workspace inside it (the desktop\u{2019}s
+    /// destructive subtree delete; the runtime kills the sessions first).
+    pub fn delete_group_with_contents(&mut self, group_id: &str) -> Vec<String> {
+        let members: Vec<String> = self
+            .data
+            .workspaces
+            .iter()
+            .filter(|w| w.group_id.as_deref() == Some(group_id))
+            .map(|w| w.id.clone())
+            .collect();
+        for ws_id in &members {
+            self.data.workspaces.retain(|w| w.id != *ws_id);
+            self.data.order.retain(|id| id != ws_id);
+        }
+        self.remove_group(group_id);
+        members
+    }
     pub fn add_group(&mut self, id: String, name: String) {
         self.data.groups.push(Group {
             id: id.clone(),

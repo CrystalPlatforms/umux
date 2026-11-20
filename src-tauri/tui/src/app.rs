@@ -36,7 +36,7 @@ use store_core::workspace_store::{LayoutNode, Orientation};
 use crate::driver::{default_cwd, resolve_shell, DriverKind, OpenParams, SessionDriver};
 use crate::grid::Grid;
 use crate::keymap::key_to_bytes;
-use crate::model::{tab_display_name, Ids, TermModel};
+use crate::model::{tab_display_name, Ids, SidebarEntry, TermModel};
 use crate::status::{is_known_cli, AgentStatusMachine};
 use crate::ui::{self, MenuAction};
 
@@ -68,10 +68,21 @@ struct Drag {
     divider_id: String,
 }
 
-/// The pending close-workspace confirmation.
-pub struct ConfirmClose {
-    pub ws_id: String,
+/// The pending destructive-delete confirmation (the desktop's shared
+/// CloseConfirmDialog pattern).
+pub struct ConfirmDelete {
+    pub target: DeleteTarget,
+    pub name: String,
     pub live: usize,
+}
+
+/// What the confirmation deletes.
+#[derive(Clone, Debug)]
+pub enum DeleteTarget {
+    /// The workspace alone.
+    Workspace(String),
+    /// The group AND every workspace inside it.
+    Group(String),
 }
 
 /// What an open rename modal edits.
@@ -79,6 +90,7 @@ pub struct ConfirmClose {
 pub enum RenameTarget {
     Workspace(String),
     Tab(String),
+    Group(String),
 }
 
 /// The rename modal's state: the target plus the typed name.
@@ -121,7 +133,7 @@ pub struct App {
     pub menu: Option<ui::MenuState>,
     /// The pending "close workspace" confirmation (desktop CloseConfirmDialog
     /// parity: only when the workspace holds live panes).
-    pub confirm: Option<ConfirmClose>,
+    pub confirm: Option<ConfirmDelete>,
     /// The open rename modal, if any.
     pub rename: Option<RenameState>,
     should_exit: bool,
@@ -476,10 +488,19 @@ impl App {
             MenuAction::ActivateWorkspace(ws_id) => self.activate_workspace(&ws_id),
             MenuAction::CloseWorkspace(ws_id) => {
                 let live = self.live_panes_of_workspace(&ws_id);
+                let name = self
+                    .model
+                    .workspace(&ws_id)
+                    .map(|ws| ws.name.clone())
+                    .unwrap_or_default();
                 if live > 0 {
                     // Desktop CloseConfirmDialog parity: something is running,
                     // so the delete asks first.
-                    self.confirm = Some(ConfirmClose { ws_id, live });
+                    self.confirm = Some(ConfirmDelete {
+                        target: DeleteTarget::Workspace(ws_id),
+                        name,
+                        live,
+                    });
                 } else {
                     self.delete_workspace(&ws_id);
                 }
@@ -501,7 +522,7 @@ impl App {
                 self.model.persist();
             }
             MenuAction::BeginTabColor(tab_id) => {
-                let anchor = self.menu.as_ref().map(|m| m.anchor).unwrap_or((12, 2));
+                let anchor = self.current_menu_anchor();
                 self.menu = Some(ui::MenuState {
                     kind: ui::MenuKind::TabColor(tab_id),
                     anchor,
@@ -509,7 +530,93 @@ impl App {
                 });
             }
             MenuAction::SetTabColor(tab_id, color) => {
-                self.model.set_tab_color(&tab_id, color);
+                // The desktop rule: picking the SAME color again clears it.
+                let picked = color.clone();
+                let current = self
+                    .model
+                    .tab_color(&tab_id)
+                    .unwrap_or_default();
+                let effective = if picked.as_deref() == Some(current.as_str()) {
+                    None
+                } else {
+                    color
+                };
+                self.model.set_tab_color(&tab_id, effective);
+                self.model.persist();
+            }
+            MenuAction::BeginWorkspaceColor(ws_id) => {
+                let anchor = self.current_menu_anchor();
+                self.menu = Some(ui::MenuState {
+                    kind: ui::MenuKind::WorkspaceColor(ws_id),
+                    anchor,
+                    selected: 0,
+                });
+            }
+            MenuAction::SetWorkspaceColor(ws_id, color) => {
+                let picked = color.clone();
+                let current = self
+                    .model
+                    .workspace(&ws_id)
+                    .and_then(|ws| ws.color.clone())
+                    .unwrap_or_default();
+                let effective = if picked.as_deref() == Some(current.as_str()) {
+                    None
+                } else {
+                    color
+                };
+                self.model.set_workspace_color(&ws_id, effective);
+                self.model.persist();
+            }
+            MenuAction::BeginGroupColor(gid) => {
+                let anchor = self.current_menu_anchor();
+                self.menu = Some(ui::MenuState {
+                    kind: ui::MenuKind::GroupColor(gid),
+                    anchor,
+                    selected: 0,
+                });
+            }
+            MenuAction::SetGroupColor(gid, color) => {
+                let picked = color.clone();
+                let current = self
+                    .model
+                    .group_color(&gid)
+                    .unwrap_or_default();
+                let effective = if picked.as_deref() == Some(current.as_str()) {
+                    None
+                } else {
+                    color
+                };
+                self.model.set_group_color(&gid, effective);
+                self.model.persist();
+            }
+            MenuAction::BeginRenameGroup(gid) => {
+                let value = self
+                    .model
+                    .sidebar_tree()
+                    .into_iter()
+                    .find_map(|e| match e {
+                        SidebarEntry::Group { id, name, .. } if id == *gid => Some(name),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                self.rename = Some(RenameState {
+                    target: RenameTarget::Group(gid),
+                    value,
+                });
+                self.menu = None;
+            }
+            MenuAction::TogglePinWorkspace(ws_id) => {
+                let pinned = self.model.workspace_pinned(&ws_id);
+                self.model.set_workspace_pinned(&ws_id, !pinned);
+                self.model.persist();
+            }
+            MenuAction::TogglePinGroup(gid) => {
+                let pinned = self.model.group_pinned(&gid);
+                self.model.set_group_pinned(&gid, !pinned);
+                self.model.persist();
+            }
+            MenuAction::UnpackGroup(gid) => {
+                self.model.unpack_group(&gid);
                 self.model.persist();
             }
             MenuAction::BeginRenameWorkspace(ws_id) => {
@@ -548,13 +655,25 @@ impl App {
                 self.model.add_group(gid.clone(), name);
                 self.model.persist();
             }
-            MenuAction::ToggleGroup(gid) => {
-                self.model.toggle_group_collapsed(&gid);
-                self.model.persist();
-            }
             MenuAction::DeleteGroup(gid) => {
-                self.model.remove_group(&gid);
-                self.model.persist();
+                // The desktop's destructive subtree delete: the group AND
+                // every workspace inside it. The shared confirmation ALWAYS
+                // asks (anything inside means something to lose).
+                let live = self.group_live_panes(&gid);
+                let name = self
+                    .model
+                    .sidebar_tree()
+                    .into_iter()
+                    .find_map(|e| match e {
+                        SidebarEntry::Group { id, name, .. } if id == *gid => Some(name),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| gid.to_string());
+                self.confirm = Some(ConfirmDelete {
+                    target: DeleteTarget::Group(gid),
+                    name,
+                    live,
+                });
             }
             MenuAction::BeginMoveGroup(ws_id) => {
                 let anchor = self.menu.as_ref().map(|m| m.anchor).unwrap_or((12, 4));
@@ -769,6 +888,30 @@ impl App {
         self.panes.get(&self.active_pane).and_then(|p| p.cwd.clone())
     }
 
+    /// The anchor for a submenu swapped in place of the open menu (the
+    /// desktop's picker-swap rule) — falls back beside the sidebar header.
+    fn current_menu_anchor(&self) -> (u16, u16) {
+        self.menu.as_ref().map(|m| m.anchor).unwrap_or((12, 2))
+    }
+
+    /// Live sessions under one GROUP (the group delete confirmation).
+    fn group_live_panes(&self, group_id: &str) -> usize {
+        self.model
+            .sidebar_tree()
+            .into_iter()
+            .filter(|e| {
+                matches!(e, SidebarEntry::Workspace { group, .. }
+                    if group.as_deref() == Some(group_id))
+            })
+            .map(|e| match e {
+                SidebarEntry::Workspace { id, .. } => {
+                    self.panes.contains_key(&id) as usize
+                }
+                _ => 0,
+            })
+            .sum()
+    }
+
     /// A sidebar click (or a menu action) landing on this workspace.
     fn activate_workspace(&mut self, ws_id: &str) {
         if self.model.workspace(ws_id).is_none() {
@@ -931,7 +1074,23 @@ impl App {
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => self.confirm = None,
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 if let Some(c) = self.confirm.take() {
-                    self.delete_workspace(&c.ws_id);
+                    match c.target {
+                        DeleteTarget::Workspace(ws_id) => self.delete_workspace(&ws_id),
+                        DeleteTarget::Group(gid) => {
+                            for ws_id in self.model.delete_group_with_contents(&gid) {
+                                let leaves = self
+                                    .model
+                                    .tab_layout(&ws_id)
+                                    .map(|t| crate::layout::leaf_ids(&t))
+                                    .unwrap_or_default();
+                                for leaf in leaves {
+                                    self.kill_pane(&leaf);
+                                }
+                            }
+                            self.normalize_selection();
+                            self.redraw_all();
+                        }
+                    }
                 }
             }
             _ => {}
@@ -960,6 +1119,9 @@ impl App {
                         }
                         RenameTarget::Tab(tab_id) => {
                             self.model.rename_tab(&tab_id, name);
+                        }
+                        RenameTarget::Group(gid) => {
+                            self.model.rename_group(&gid, name);
                         }
                     }
                     self.model.persist();
@@ -1032,7 +1194,27 @@ impl App {
                     match ui::confirm_hit(self, area, mouse.column, mouse.row) {
                         Some(true) => {
                             if let Some(c) = self.confirm.take() {
-                                self.delete_workspace(&c.ws_id);
+                                match c.target {
+                                    DeleteTarget::Workspace(ws_id) => {
+                                        self.delete_workspace(&ws_id)
+                                    }
+                                    DeleteTarget::Group(gid) => {
+                                        for ws_id in
+                                            self.model.delete_group_with_contents(&gid)
+                                        {
+                                            let leaves = self
+                                                .model
+                                                .tab_layout(&ws_id)
+                                                .map(|t| crate::layout::leaf_ids(&t))
+                                                .unwrap_or_default();
+                                            for leaf in leaves {
+                                                self.kill_pane(&leaf);
+                                            }
+                                        }
+                                        self.normalize_selection();
+                                        self.redraw_all();
+                                    }
+                                }
                             }
                         }
                         _ => self.confirm = None,
