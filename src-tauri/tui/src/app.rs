@@ -751,13 +751,6 @@ impl App {
     // --- event handling -------------------------------------------------------
 
     fn handle_input(&mut self, event: Event, area: Rect) {
-        if std::env::var("UMUX_TUI_TRACE").is_ok() {
-            eprintln!("[tui-trace] event {:?}", match &event {
-                Event::Key(k) => format!("Key {:?}", k.code) as String,
-                Event::Mouse(m) => format!("Mouse {:?} {},{}", m.kind, m.column, m.row),
-                _ => "Other".into(),
-            });
-        }
         match event {
             Event::Key(key) => {
                 // Windows consoles deliver BOTH the press and the release of
