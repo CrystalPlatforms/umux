@@ -15,6 +15,7 @@ use ratatui::Frame;
 use crate::app::{App, Pane};
 use crate::model::{tab_display_name, SidebarEntry};
 use crate::status::AgentStatus;
+use store_core::workspace_store::Orientation;
 
 /// The pane area of a given terminal size — the ONE geometry both the
 /// renderer and the mouse hit-tests use, so a click always maps onto the
@@ -44,6 +45,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // A degenerate window: nothing renders, no panic.
         return;
     }
+    // A clean slate EVERY frame: widgets patch cell styles (a hover's
+    // REVERSED, an underline), and patched-on-top-of-stale modifiers were
+    // bleeding between frames and panes (the round-7 underlines).
+    frame.buffer_mut().reset();
 
     let sidebar_w = (area.width / 5).clamp(if area.width > 30 { 14 } else { 0 }, 30);
     let (sidebar, main) = if sidebar_w > 0 {
@@ -170,9 +175,17 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     // the ONE truth the renderer and the hit-tests share. Round 6: the
     // border came off too (the chrome keeps only the tab-bar separator and
     // the split dividers).
-    let inner = area;
+    let inner = sidebar_inner(area);
     if inner.width == 0 || inner.height == 0 {
         return;
+    }
+    // The vertical divider between the sidebar and the panes — the round-7
+    // restoration (drawn on the slice's last column).
+    let line_x = area.x.saturating_add(area.width.saturating_sub(1));
+    for y in area.y..area.y.saturating_add(area.height) {
+        if let Some(c) = frame.buffer_mut().cell_mut((line_x, y)) {
+            c.set_char('│').set_style(Style::default().fg(ratatui::style::Color::Cyan));
+        }
     }
     // Header row: the " umux" label at the left, then "+" (New workspace)
     // and "Q" (quit) at the right edge — the desktop's header pattern.
@@ -497,16 +510,23 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
             render_grid(frame, pane, inner, focused);
         }
     }
-    // Divider bars (drag targets) — a thin highlighted strip.
+    // Divider bars (drag targets) — a thin strip, drawn in the split's own
+    // orientation: a side-by-side (Horizontal) split shows a vertical line,
+    // a stacked (Vertical) split shows a horizontal one. Both must be
+    // VISIBLE (the round-7 complaint).
     for d in &dividers {
-        let style = Style::default().fg(ratatui::style::Color::DarkGray);
+        let style = Style::default().fg(ratatui::style::Color::Cyan);
+        let line_char = match d.orientation {
+            Orientation::Horizontal => '│',
+            Orientation::Vertical => '─',
+        };
         for y in d.rect.y..d.rect.y + d.rect.height {
             for x in d.rect.x..d.rect.x + d.rect.width {
                 if x < frame.area().width && y < frame.area().height {
                     frame
                         .buffer_mut()
                         .cell_mut((x, y))
-                        .map(|c| c.set_char('│').set_style(style));
+                        .map(|c| c.set_char(line_char).set_style(style));
                 }
             }
         }
@@ -811,9 +831,15 @@ fn menu_title(app: &App, kind: &MenuKind) -> String {
 }
 
 /// The footer's buttons, label → chord command (draw order = hit order).
-/// The sidebar's inner rect — the full slice (no borders since round 6).
+/// The sidebar's inner rect — the content width (the vertical divider line
+/// occupies the slice's last column).
 fn sidebar_inner(area: Rect) -> Rect {
-    area
+    Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(1),
+        height: area.height,
+    }
 }
 
 /// The sidebar header row's two buttons: "+" (New workspace) and "Q" (quit

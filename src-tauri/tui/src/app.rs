@@ -424,11 +424,15 @@ impl App {
     fn apply_resize(&mut self, area: Rect) -> Vec<(String, Rect)> {
         let rects = self.pane_geometry(area);
         for (leaf_id, rect) in &rects {
-            if rect.width < 2 || rect.height < 2 {
+            // NO borders since round 6: the grid fills the rect edge to
+            // edge, minus the title row. The old -2 "borders" subtraction
+            // left the grid narrower than the render rect, and the leftover
+            // columns wrapped around as a duplicated strip on the right.
+            if rect.width < 1 || rect.height < 2 {
                 continue;
             }
-            let cols = rect.width - 2; // borders
-            let rows = rect.height - 2;
+            let cols = rect.width;
+            let rows = rect.height - 1; // the title row
             let now = self.now_ms();
             if let Some(pane) = self.panes.get_mut(leaf_id) {
                 if pane.pty_cols != cols || pane.pty_rows != rows {
@@ -1418,8 +1422,8 @@ fn event_loop(
     app.normalize_selection();
     let first_area = ui::pane_area(Rect::new(0, 0, size.width, size.height));
     app.ensure_sessions(
-        first_area.width.saturating_sub(2).max(10),
-        first_area.height.saturating_sub(2).max(3),
+        first_area.width.max(10),
+        first_area.height.saturating_sub(1).max(3),
     );
 
     let result = loop {
@@ -1446,8 +1450,8 @@ fn event_loop(
         // The active tab's panes always have live sessions (a tab switch or
         // a first open spawns what is missing; existing sessions are kept).
         app.ensure_sessions(
-            pane_area.width.saturating_sub(2).max(10),
-            pane_area.height.saturating_sub(2).max(3),
+            pane_area.width.max(10),
+            pane_area.height.saturating_sub(1).max(3),
         );
         if app.draw(terminal).is_err() {
             break Err("draw failed".into());
