@@ -356,7 +356,13 @@ impl App {
             Some(&std::env::var("SHELL").unwrap_or_default()),
         );
         // The folder: an explicit donor (the focused pane's last reported
-        // cwd — the desktop's inherit rule), else the launch default.
+        // cwd — the desktop's inherit rule), else the launch default. The
+        // spawn directory is also the pane's STARTING cwd (the desktop's
+        // saved-workingDirectory label source); an OSC 9;9 report refines
+        // it to the LIVE folder later.
+        let start_cwd = cwd_override
+            .clone()
+            .unwrap_or_else(|| default_cwd().to_string_lossy().to_string());
         let cwd = cwd_override
             .map(std::path::PathBuf::from)
             .unwrap_or_else(default_cwd);
@@ -377,10 +383,6 @@ impl App {
                         pids.insert(leaf_id.to_string(), pid);
                     }
                 }
-                // The spawn directory is the pane's STARTING cwd (the
-                // desktop's saved-workingDirectory label source); an OSC 9;9
-                // report refines it to the LIVE folder later.
-                let start_cwd = cwd.to_string_lossy().to_string();
                 self.panes.insert(
                     leaf_id.to_string(),
                     Pane {
