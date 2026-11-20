@@ -987,7 +987,11 @@ impl App {
                 }
                 // The clickable chrome first: tab titles, their x buttons,
                 // the sidebar — panes come last.
-                if let Some(hit) = ui::hit_test(self, area, mouse.column, mouse.row) {
+                let hit = ui::hit_test(self, area, mouse.column, mouse.row);
+                if std::env::var("UMUX_TUI_TRACE").is_ok() {
+                    eprintln!("[tui-trace] hit {:?}", hit);
+                }
+                if let Some(hit) = hit {
                     let dims = self.pane_area_dims();
                     match hit {
                         ui::UiHit::Menu(action) => self.run_menu_action(action, dims.0, dims.1),
@@ -1492,6 +1496,26 @@ mod tests {
             click(app, area, 40, 10, MouseButton::Right);
             assert_eq!(app.active_pane, leaf, "single-pane tab keeps its pane");
             assert!(matches!(app.menu, Some(ref m) if matches!(m.kind, MenuKind::Pane(_))));
+        });
+    }
+
+    #[test]
+    fn the_header_quit_button_exits_the_terminal() {
+        with_two_ws_app(|app| {
+            let area = Rect::new(0, 0, 80, 24);
+            // 80 cols → sidebar 16, inner 15: " + " at 9..12, " Q " at
+            // 12..15. The drawn " Q " cell AND the border column right of
+            // it both quit (the click-a-cell-off complaint).
+            assert_eq!(
+                hit_test(app, area, 13, 0),
+                Some(UiHit::Menu(MenuAction::Quit))
+            );
+            assert_eq!(
+                hit_test(app, area, 15, 0),
+                Some(UiHit::Menu(MenuAction::Quit))
+            );
+            click(app, area, 13, 0, MouseButton::Left);
+            assert!(app.should_exit, "the Q click exits the Terminal");
         });
     }
 }

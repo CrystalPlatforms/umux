@@ -871,6 +871,8 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             height: area.height,
         });
         // Header row: its two buttons only ("+" new workspace, "Q" quit).
+        // The quit hit-area runs one cell further right, over the sidebar's
+        // border column — a click a cell too far right still quits.
         if row == inner.y {
             let (plus, quit) = sidebar_header_buttons(inner);
             for (rect, action) in [
@@ -878,7 +880,12 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
                 (quit, MenuAction::Quit),
             ] {
                 if let Some(rect) = rect {
-                    if col >= rect.x && col < rect.x.saturating_add(rect.width) {
+                    let width = if action == MenuAction::Quit {
+                        rect.width + 1
+                    } else {
+                        rect.width
+                    };
+                    if col >= rect.x && col < rect.x.saturating_add(width) {
                         return Some(UiHit::Menu(action));
                     }
                 }
