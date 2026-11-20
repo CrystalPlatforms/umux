@@ -1226,9 +1226,16 @@ impl App {
                     if let ui::MenuKind::Pane(leaf) = &kind {
                         self.focus_pane(leaf);
                     }
+                    // The chrome menus anchor at the SIDEBAR'S LEFT edge (the
+                    // round-9 "move it left a bit") — only the pane's menu
+                    // follows the pointer.
+                    let mut anchor = (mouse.column, mouse.row);
+                    if !matches!(kind, ui::MenuKind::Pane(_)) {
+                        anchor = (area.x, mouse.row);
+                    }
                     self.menu = Some(ui::MenuState {
                         kind,
-                        anchor: (mouse.column, mouse.row),
+                        anchor,
                         selected: 0,
                     });
                 }
@@ -1314,9 +1321,12 @@ impl App {
                             self.model.persist();
                         }
                         ui::UiHit::BeginCreate => {
+                            // Anchored at the SIDEBAR'S LEFT edge, one row
+                            // under the header — never spilling right (the
+                            // round-9 "move it left a bit").
                             self.menu = Some(ui::MenuState {
                                 kind: ui::MenuKind::Create,
-                                anchor: (mouse.column, mouse.row),
+                                anchor: (area.x, area.y + 1),
                                 selected: 0,
                             });
                         }
@@ -1858,7 +1868,9 @@ mod tests {
                 matches!(app.menu, Some(ref m) if matches!(m.kind, MenuKind::Create)),
                 "the header + opens the create dropdown"
             );
-            click(app, area, 10, 2, MouseButton::Left);
+            // The dropdown anchors under the header at the sidebar's left
+            // edge: its items sit on rows 3 and 4 (0-based).
+            click(app, area, 10, 3, MouseButton::Left);
             assert_eq!(
                 app.model.workspace_order().len(),
                 3,

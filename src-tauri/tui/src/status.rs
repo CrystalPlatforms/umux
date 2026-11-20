@@ -38,10 +38,12 @@ pub enum AgentStatus {
 impl AgentStatus {
     /// The dot color the sidebar row and pane title render.
     pub fn color(self) -> Color {
+        // The desktop chip palette (app.css): working = --status-working
+        // amber, needs-attention = --accent blue, idle = the faint text.
         match self {
             AgentStatus::Idle => Color::DarkGray,
-            AgentStatus::Working => Color::Green,
-            AgentStatus::NeedsAttention => Color::Yellow,
+            AgentStatus::Working => Color::Rgb(224, 168, 50), // #e0a832
+            AgentStatus::NeedsAttention => Color::Rgb(106, 160, 255), // #6aa0ff
         }
     }
 

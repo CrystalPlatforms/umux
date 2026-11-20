@@ -325,7 +325,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 let marker = if active { ">" } else { " " };
                 let pad = if indent { "  " } else { "" };
                 // A pinned workspace leads (#52) — the pin glyph precedes the
-                // name, the desktop\u{2019}s left-to-right reading order.
+                // name, the desktop's left-to-right reading order.
                 let pin = if pinned { "* " } else { "" };
                 let mut style = Style::default();
                 if active {
@@ -333,25 +333,35 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 } else if hovered(app, row_rect) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
-                // The workspace\u{2019}s own color tints the name (#69).
+                // The workspace's own color tints the name (#69).
                 if let Some(hex) = &color {
                     if let Some(c) = palette_color(hex) {
                         style = style.fg(c);
                     }
                 }
-                // The per-panel chips ride the row (the desktop\u{2019}s chip
-                // block, ASCII dots in panel tree order).
-                let chip_text = chips.clone().unwrap_or_default();
-                lines.push(Line::from(Span::styled(
+                let mut spans: Vec<Span> = vec![Span::styled(
                     format!(
-                        "{pad}{marker} {pin}{} {chip_text}",
+                        "{pad}{marker} {pin}{} ",
                         truncate(name, rows.width.saturating_sub(10) as usize)
                     ),
                     style,
-                )));
-                // The per-panel folder lines (#81): chip + folder tail, dim,
-                // each a click target that selects the workspace.
-                for (chip, tail, _active) in folder_lines {
+                )];
+                // The per-panel chips (the desktop's chip block): one glyph
+                // per panel IN TREE ORDER, colored with the desktop's status
+                // palette — working = the running arrow (amber), waiting =
+                // the accent blue, idle = the faint dot.
+                if let Some(statuses) = &chips {
+                    for s in statuses {
+                        spans.push(Span::styled(
+                            status_glyph(*s),
+                            Style::default().fg(status_color(*s)),
+                        ));
+                    }
+                }
+                lines.push(Line::from(spans));
+                // The per-panel folder lines (#81): colored chip + folder
+                // tail, dim text, each a click target that selects the ws.
+                for (status, tail, _active) in folder_lines {
                     let line_rect = Rect {
                         x: rows.x,
                         y: rows.y.saturating_add(lines.len() as u16),
@@ -362,10 +372,13 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     if hovered(app, line_rect) {
                         st = st.add_modifier(Modifier::REVERSED);
                     }
-                    lines.push(Line::from(Span::styled(
-                        format!("{pad}  {chip} {tail}"),
-                        st,
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{pad}  {}", status_glyph(status)),
+                            Style::default().fg(status_color(status)),
+                        ),
+                        Span::styled(format!(" {tail}"), st),
+                    ]));
                 }
             }
             SidebarRow::FolderLine { text, .. } => {
@@ -1115,11 +1128,12 @@ enum SidebarRow {
         indent: bool,
         pinned: bool,
         color: Option<String>,
-        chips: Option<String>,
-        folder_lines: Vec<(String, String, bool)>,
+        chips: Option<Vec<AgentStatus>>,
+        folder_lines: Vec<(AgentStatus, String, bool)>,
     },
     FolderLine {
         ws_id: String,
+        status: AgentStatus,
         text: String,
     },
 }
@@ -1189,11 +1203,12 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                 }
                 // Per-panel chips (tree order across the ws's tabs) and the
                 // per-panel folder lines (#81/#121) — gated by the same
-                // switches the desktop reads.
+                // switches the desktop reads. Chips carry the STATUS (color
+                // + the desktop running arrow), not just a character.
                 let statuses_on = app.agent_statuses_enabled();
                 let folders_on = app.model.settings.show_tab_folders;
-                let mut chips = String::new();
-                let mut folder_lines: Vec<(String, String, bool)> = Vec::new();
+                let mut chips: Vec<AgentStatus> = Vec::new();
+                let mut folder_lines: Vec<(AgentStatus, String, bool)> = Vec::new();
                 let tabs: Vec<String> = app
                     .model
                     .workspace(id)
@@ -1208,13 +1223,8 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                             continue;
                         };
                         let status = pane.status.status();
-                        let chip = match status {
-                            AgentStatus::Working => "#",
-                            AgentStatus::NeedsAttention => "!",
-                            AgentStatus::Idle => ".",
-                        };
                         if statuses_on {
-                            chips.push_str(chip);
+                            chips.push(status);
                         }
                         if folders_on {
                             let tail = pane
@@ -1223,9 +1233,9 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                                 .map(folder_tail)
                                 .unwrap_or_default();
                             if !tail.is_empty() {
-                                folder_lines.push((chip.to_string(), tail, leaf == *id));
+                                folder_lines.push((status, tail, leaf == *id));
                             } else if statuses_on {
-                                folder_lines.push((chip.to_string(), String::new(), false));
+                                folder_lines.push((status, String::new(), false));
                             }
                         }
                     }
