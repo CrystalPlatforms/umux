@@ -319,7 +319,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 pinned,
                 color,
                 chips,
-                folder_lines,
+                ..
             } => {
                 let active = id == app.active_ws;
                 let marker = if active { ">" } else { " " };
@@ -341,8 +341,8 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 // The name reserves only what the chips actually occupy —
                 // an empty chip block never eats the workspace's name.
-                let chip_text = chips.clone().unwrap_or_default();
-                let reserve = 2 + chip_text.len();
+                let chip_text = chips.as_ref().map(|c| c.len()).unwrap_or(0);
+                let reserve = 2 + chip_text;
                 let mut spans: Vec<Span> = vec![Span::styled(
                     format!(
                         "{pad}{marker} {pin}{} ",
@@ -363,27 +363,8 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 }
                 lines.push(Line::from(spans));
-                // The per-panel folder lines (#81): colored chip + folder
-                // tail, dim text, each a click target that selects the ws.
-                for (status, tail, _active, _path) in folder_lines {
-                    let line_rect = Rect {
-                        x: rows.x,
-                        y: rows.y.saturating_add(lines.len() as u16),
-                        width: rows.width,
-                        height: 1,
-                    };
-                    let mut st = Style::default().fg(ratatui::style::Color::DarkGray);
-                    if hovered(app, line_rect) {
-                        st = st.add_modifier(Modifier::REVERSED);
-                    }
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{pad}  {}", status_glyph(status)),
-                            Style::default().fg(status_color(status)),
-                        ),
-                        Span::styled(format!(" {tail}"), st),
-                    ]));
-                }
+                // The folder lines draw themselves as their OWN rows (the
+                // FolderLine arm below) — each is its own hit target.
             }
             SidebarRow::FolderLine { text, .. } => {
                 let mut st = Style::default().fg(ratatui::style::Color::DarkGray);
@@ -1119,6 +1100,7 @@ fn sidebar_header_buttons(inner: Rect) -> (Option<Rect>, Option<Rect>) {
 
 /// One row of the sidebar as drawn AND hit — the single geometry source
 /// (the titled-block lesson: never derive the rows twice).
+#[derive(Clone, Debug)]
 enum SidebarRow {
     Header,
     Group {
@@ -1135,7 +1117,6 @@ enum SidebarRow {
         pinned: bool,
         color: Option<String>,
         chips: Option<Vec<AgentStatus>>,
-        folder_lines: Vec<(AgentStatus, String, bool, Option<String>)>,
     },
     FolderLine {
         ws_id: String,
@@ -1147,7 +1128,7 @@ enum SidebarRow {
     },
 }
 
-fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
+pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
     let tree = app.model.sidebar_tree();
     let tree_ref = &tree;
     let collapsed: Vec<String> = tree
@@ -1211,13 +1192,14 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                     continue; // members of a collapsed group hide
                 }
                 // Per-panel chips (tree order across the ws's tabs) and the
-                // per-panel folder lines (#81/#121) — gated by the same
-                // switches the desktop reads. Chips carry the STATUS (color
-                // + the desktop running arrow), not just a character.
+                // per-panel FOLDER-LINE ROWS (#81/#121) — the ws NAME row
+                // comes FIRST, its folder lines UNDER it, each its own hit
+                // target (the round-10 hit-identity fix). Chips carry the
+                // STATUS (color + the desktop running arrow).
                 let statuses_on = app.agent_statuses_enabled();
                 let folders_on = app.model.settings.show_tab_folders;
                 let mut chips: Vec<AgentStatus> = Vec::new();
-                let mut folder_lines: Vec<(AgentStatus, String, bool, Option<String>)> = Vec::new();
+                let mut folder_lines: Vec<(AgentStatus, String, Option<String>)> = Vec::new();
                 let tabs: Vec<String> = app
                     .model
                     .workspace(id)
@@ -1242,12 +1224,13 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                                 .map(folder_tail)
                                 .unwrap_or_default();
                             // The line carries the pane's FULL cwd — a click
-                            // opens it in the system file explorer.
+                            // opens it in the system file explorer. A
+                            // chip-only line (no cwd) does nothing.
                             let path = pane.cwd.clone();
                             if !tail.is_empty() {
-                                folder_lines.push((status, tail, leaf == *id, path));
+                                folder_lines.push((status, tail, path));
                             } else if statuses_on {
-                                folder_lines.push((status, String::new(), false, None));
+                                folder_lines.push((status, String::new(), None));
                             }
                         }
                     }
@@ -1259,12 +1242,34 @@ fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                     pinned: *pinned,
                     color: color.clone(),
                     chips: if statuses_on { Some(chips) } else { None },
-                    folder_lines: if folders_on { folder_lines } else { Vec::new() },
                 });
+                for (status, tail, path) in folder_lines {
+                    rows.push(SidebarRow::FolderLine {
+                        ws_id: id.clone(),
+                        status,
+                        text: format!("  {} {}", status_glyph(status), tail),
+                        path,
+                    });
+                }
             }
         }
     }
     rows
+}
+
+/// A one-line summary of the sidebar rows (diagnostics + tests).
+pub(crate) fn sidebar_row_summary(app: &App) -> Vec<String> {
+    sidebar_rows(app)
+        .into_iter()
+        .map(|r| match r {
+            SidebarRow::Header => "Header".to_string(),
+            SidebarRow::Group { id, name, .. } => format!("Group {id} ({name})"),
+            SidebarRow::Workspace { id, name, .. } => format!("Workspace {id} ({name})"),
+            SidebarRow::FolderLine { ws_id, path, .. } => {
+                format!("FolderLine ws={ws_id} path={path:?}")
+            }
+        })
+        .collect()
 }
 
 /// Which piece of chrome owns this cell? Mirrors the renderer's geometry

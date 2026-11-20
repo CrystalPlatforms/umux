@@ -1814,10 +1814,9 @@ mod tests {
 
     /// `UMUX_CONFIG_DIR` is process-global (paths.rs's documented reason
     /// in-process tests would race) — serialize and sandbox it.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_two_ws_app(test: impl FnOnce(&mut App)) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::model::config_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("UMUX_CONFIG_DIR", dir.path());
         {
@@ -1933,6 +1932,109 @@ mod tests {
             );
             click(app, area, 13, 0, MouseButton::Left);
             assert!(app.should_exit, "the Q click exits the Terminal");
+        });
+    }
+    #[test]
+    fn every_sidebar_row_maps_only_to_itself() {
+        with_two_ws_app(|app| {
+            app.model.settings.show_tab_folders = true;
+            app.model.add_group("g1".into(), "Group 1".into());
+            let order = app.model.workspace_order();
+            let (ws_a, ws_b) = (order[0].clone(), order[1].clone());
+            assert!(app
+                .model
+                .set_workspace_group(&ws_a, Some("g1".into())));
+            // A live pane for ws_a sitting in /tmp/proj — its folder line
+            // carries THAT path.
+            let tab_id = app
+                .model
+                .workspace(&ws_a)
+                .map(|ws| ws.tabs[0].id.clone())
+                .expect("the workspace seeds a tab");
+            let leaf = app
+                .model
+                .tab_layout(&tab_id)
+                .map(|t| crate::layout::leaf_ids(&t)[0].clone())
+                .expect("one leaf");
+            app.panes.insert(
+                leaf.clone(),
+                Pane {
+                    session: 0,
+                    grid: Grid::new(80, 24),
+                    status: AgentStatusMachine::new(),
+                    parser: session_core::osc_parser::OscParser::new(),
+                    pty_cols: 80,
+                    pty_rows: 24,
+                    cwd: Some("/tmp/proj".into()),
+                    branch: None,
+                    ports: Vec::new(),
+                },
+            );
+            let area = Rect::new(0, 0, 100, 30);
+            // Expected rows: 0 header, 1 group g1, 2 ws_a (member), 3 its
+            // folder line, 4 ws_b.
+            assert_eq!(
+                hit_test(app, area, 3, 1),
+                Some(UiHit::Group("g1".into())),
+                "the group row toggles ONLY the group"
+            );
+            assert_eq!(
+                hit_test(app, area, 3, 2),
+                Some(UiHit::Workspace(ws_a.clone())),
+                "the member workspace row selects ONLY that workspace"
+            );
+            assert_eq!(
+                hit_test(app, area, 3, 3),
+                Some(UiHit::OpenFolder("/tmp/proj".into())),
+                "the folder line opens ONLY that pane folder"
+            );
+            assert_eq!(
+                hit_test(app, area, 3, 4),
+                Some(UiHit::Workspace(ws_b.clone())),
+                "the next workspace row is untouched by the lines above"
+            );
+            click(app, area, 3, 3, MouseButton::Left);
+            assert!(
+                app.menu.is_none() && !app.should_exit,
+                "the folder-line click performs no neighbour action"
+            );
+        });
+    }
+    #[test]
+    fn scratch_rows_dump() {
+        with_two_ws_app(|app| {
+            app.model.settings.show_tab_folders = true;
+            app.model.add_group("g1".into(), "Group 1".into());
+            let order = app.model.workspace_order();
+            let (ws_a, ws_b) = (order[0].clone(), order[1].clone());
+            app.model.set_workspace_group(&ws_a, Some("g1".into()));
+            let tab_id = app
+                .model
+                .workspace(&ws_a)
+                .map(|ws| ws.tabs[0].id.clone())
+                .expect("tab");
+            let leaf = app
+                .model
+                .tab_layout(&tab_id)
+                .map(|t| crate::layout::leaf_ids(&t)[0].clone())
+                .expect("leaf");
+            app.panes.insert(
+                leaf.clone(),
+                Pane {
+                    session: 0,
+                    grid: Grid::new(80, 24),
+                    status: AgentStatusMachine::new(),
+                    parser: session_core::osc_parser::OscParser::new(),
+                    pty_cols: 80,
+                    pty_rows: 24,
+                    cwd: Some("/tmp/proj".into()),
+                    branch: None,
+                    ports: Vec::new(),
+                },
+            );
+            for (i, r) in crate::ui::sidebar_row_summary(app).into_iter().enumerate() {
+                eprintln!("row {i} = {r}");
+            }
         });
     }
 }

@@ -670,6 +670,13 @@ mod tests {
     /// Serializes every test that touches `UMUX_CONFIG_DIR`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// THE one env lock for the crate's tests — both the model's and the
+    /// app's env-using tests must share it (UMUX_CONFIG_DIR is process
+    /// global; two module-local mutexes would race each other).
+    pub(crate) fn config_env_lock() -> &'static Mutex<()> {
+        &ENV_LOCK
+    }
+
     fn with_tmp_config(test: impl FnOnce(&std::path::Path)) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
