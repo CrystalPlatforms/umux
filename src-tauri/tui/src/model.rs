@@ -655,7 +655,7 @@ pub fn term_store_root() -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! The B3 ACs that touch the store: a restart restores what the TUI
     //! persisted (round-trip through `store_core`, tmpdir), and the TUI's
     //! writes land ONLY in the term store — the desktop store's files are
