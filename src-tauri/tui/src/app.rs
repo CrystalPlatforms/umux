@@ -1816,7 +1816,7 @@ mod tests {
     /// in-process tests would race) — serialize and sandbox it.
 
     fn with_two_ws_app(test: impl FnOnce(&mut App)) {
-        let _guard = crate::model::config_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::model::tests::config_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("UMUX_CONFIG_DIR", dir.path());
         {
