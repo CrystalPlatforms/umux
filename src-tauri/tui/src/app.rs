@@ -482,6 +482,13 @@ impl App {
             }
             MenuAction::Quit => self.request_exit(),
             MenuAction::Separate(tab_id) => self.separate_tab(&tab_id),
+            MenuAction::BeginCreate => {
+                self.menu = Some(ui::MenuState {
+                    kind: ui::MenuKind::Create,
+                    anchor: (12, 2),
+                    selected: 0,
+                });
+            }
             MenuAction::TogglePinTab(tab_id) => {
                 let pinned = self.model.tab_pinned(&tab_id);
                 self.model.set_tab_pinned(&tab_id, !pinned);
@@ -1072,6 +1079,13 @@ impl App {
                             self.model.toggle_group_collapsed(&gid);
                             self.model.persist();
                         }
+                        ui::UiHit::BeginCreate => {
+                            self.menu = Some(ui::MenuState {
+                                kind: ui::MenuKind::Create,
+                                anchor: (mouse.column, mouse.row),
+                                selected: 0,
+                            });
+                        }
                         ui::UiHit::ShellMenu => self.shell_menu = !self.shell_menu,
                     }
                     return;
@@ -1536,20 +1550,28 @@ mod tests {
     fn the_sidebar_header_buttons_hit_their_own_cells() {
         with_two_ws_app(|app| {
             let area = Rect::new(0, 0, 80, 24);
-            // The header buttons at the row's right edge: " + " then " Q ".
+            // The header buttons at the row's right edge: " + " (the create
+            // dropdown) then " Q ".
             assert_eq!(
                 hit_test(app, area, 10, 0),
-                Some(UiHit::Menu(MenuAction::NewWorkspace))
+                Some(UiHit::Menu(MenuAction::BeginCreate))
             );
             assert_eq!(
                 hit_test(app, area, 13, 0),
                 Some(UiHit::Menu(MenuAction::Quit))
             );
+            // "+" opens the create dropdown; picking "New workspace" creates
+            // one (menu anchored at (10,0): items at rows 3+/1-based 3+).
             click(app, area, 10, 0, MouseButton::Left);
+            assert!(
+                matches!(app.menu, Some(ref m) if matches!(m.kind, MenuKind::Create)),
+                "the header + opens the create dropdown"
+            );
+            click(app, area, 11, 3, MouseButton::Left);
             assert_eq!(
                 app.model.workspace_order().len(),
                 3,
-                "the header + creates a workspace"
+                "New workspace in the dropdown creates a workspace"
             );
         });
     }

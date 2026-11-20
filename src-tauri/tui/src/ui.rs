@@ -598,6 +598,8 @@ pub enum MenuAction {
     DeleteGroup(String),
     /// Open a workspace row's "move to group" submenu.
     BeginMoveGroup(String),
+    /// Open the sidebar header's create dropdown (workspace / group).
+    BeginCreate,
     /// Toggle the agent-status glyphs (the term store's own settings copy).
     ToggleAgentStatuses,
     /// File a workspace under a group (None = top level).
@@ -619,6 +621,8 @@ pub enum MenuKind {
     Group(String),
     /// The "move to group" submenu of a workspace row.
     MoveGroup(String),
+    /// The sidebar header's create dropdown (workspace / group).
+    Create,
     /// The chrome generally (sidebar header, tab-bar gaps, footer).
     Header,
 }
@@ -648,6 +652,8 @@ pub enum UiHit {
     Workspace(String),
     /// A sidebar group header (click toggles collapse).
     Group(String),
+    /// The sidebar header's "+" — opens the create dropdown.
+    BeginCreate,
     /// The tab bar's "v" shell-picker button.
     ShellMenu,
 }
@@ -750,6 +756,10 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
             }
             items
         }
+        MenuKind::Create => vec![
+            Some(MenuAction::NewWorkspace),
+            Some(MenuAction::NewGroup),
+        ],
         MenuKind::Header => vec![
             Some(MenuAction::NewWorkspace),
             Some(MenuAction::NewGroup),
@@ -795,6 +805,7 @@ fn menu_title(app: &App, kind: &MenuKind) -> String {
                 .map(|ws| ws.name.clone())
                 .unwrap_or_else(|| "?".into())
         ),
+        MenuKind::Create => " create ".into(),
         MenuKind::Header => " menu ".into(),
     }
 }
@@ -902,15 +913,13 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             width: sidebar_w,
             height: area.height,
         });
-        // Header row: its two buttons only ("+" new workspace, "Q" quit).
-        // The quit hit-area runs one cell further right, over the sidebar's
-        // border column — a click a cell too far right still quits.
+        // Header row: its two buttons only ("+" opens the create dropdown,
+        // "Q" quits). The quit hit-area runs one cell further right, over
+        // the sidebar's border column — a click a cell too far right still
+        // quits.
         if row == inner.y {
             let (plus, quit) = sidebar_header_buttons(inner);
-            for (rect, action) in [
-                (plus, MenuAction::NewWorkspace),
-                (quit, MenuAction::Quit),
-            ] {
+            for (rect, action) in [(plus, MenuAction::BeginCreate), (quit, MenuAction::Quit)] {
                 if let Some(rect) = rect {
                     let width = if action == MenuAction::Quit {
                         rect.width + 1
@@ -1107,6 +1116,7 @@ fn menu_label(app: &App, action: &MenuAction) -> String {
         MenuAction::BeginRenameWorkspace(_) => "Rename workspace".into(),
         MenuAction::BeginRenameTab(_) => "Rename tab".into(),
         MenuAction::Separate(_) => "Separate".into(),
+        MenuAction::BeginCreate => "Create".into(),
         MenuAction::TogglePinTab(tab_id) => {
             if app.model.tab_pinned(tab_id) {
                 "Unpin tab".into()
