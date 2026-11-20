@@ -339,10 +339,14 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                         style = style.fg(c);
                     }
                 }
+                // The name reserves only what the chips actually occupy —
+                // an empty chip block never eats the workspace's name.
+                let chip_text = chips.clone().unwrap_or_default();
+                let reserve = 2 + chip_text.chars().count();
                 let mut spans: Vec<Span> = vec![Span::styled(
                     format!(
                         "{pad}{marker} {pin}{} ",
-                        truncate(name, rows.width.saturating_sub(10) as usize)
+                        truncate(name, rows.width.saturating_sub(reserve) as usize)
                     ),
                     style,
                 )];
