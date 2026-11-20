@@ -111,6 +111,10 @@ pub struct App {
     hover: Option<(u16, u16)>,
     /// The last known pane-grid size (cols, rows) — new panes spawn at it.
     pane_dims: (u16, u16),
+    /// A cwd waiting to be inherited by the NEXT spawned pane (the desktop's
+    /// "starts in the tab-I-was-on's folder" rule — captured BEFORE the
+    /// selection moves to the new pane).
+    pending_cwd: Option<String>,
     /// The shell picker dropdown (the tab bar's "v" button) is showing.
     shell_menu: bool,
     /// The open context menu (right-click chrome), if any.
@@ -162,6 +166,7 @@ impl App {
             drag: None,
             hover: None,
             pane_dims: (80, 24),
+            pending_cwd: None,
             shell_menu: false,
             menu: None,
             confirm: None,
@@ -247,8 +252,19 @@ impl App {
                 }
             }
         }
+        // A pending inherited cwd applies to the FIRST pane this call spawns
+        // (the desktop's "starts in the tab-I-was-on's folder" rule).
+        let mut inherit = self.pending_cwd.take();
         for (ws_id, tab_id, leaf_id) in missing {
-            self.spawn_pane(&ws_id, &tab_id, &leaf_id, cols.max(10), rows.max(4));
+            self.spawn_pane_in(
+                &ws_id,
+                &tab_id,
+                &leaf_id,
+                cols.max(10),
+                rows.max(4),
+                None,
+                inherit.take(),
+            );
         }
     }
 
@@ -256,6 +272,9 @@ impl App {
     /// desktop's #78 semantics — spawn-time only, nothing persists; `None`
     /// means Auto, the backend's fallback chain).
     fn new_tab_in_shell(&mut self, shell: Option<String>, cols: u16, rows: u16) {
+        // The donor's folder is captured BEFORE the selection moves to the
+        // fresh tab (the inheritance rule).
+        let donor = self.donor_cwd();
         let Some(tab_id) = self.model.create_tab(&self.active_ws, &mut self.ids) else {
             return;
         };
@@ -272,7 +291,15 @@ impl App {
             .into_iter()
             .next();
         if let Some(leaf) = leaf {
-            self.spawn_pane_in(&ws, &tab_id, &leaf, cols.max(10), rows.max(4), shell);
+            self.spawn_pane_in(
+                &ws,
+                &tab_id,
+                &leaf,
+                cols.max(10),
+                rows.max(4),
+                shell,
+                donor,
+            );
             self.active_pane = leaf;
         }
     }
@@ -280,7 +307,8 @@ impl App {
     /// Spawn one pane's PTY session through the driver seam and start its
     /// output pump.
     fn spawn_pane(&mut self, ws_id: &str, tab_id: &str, leaf_id: &str, cols: u16, rows: u16) {
-        self.spawn_pane_in(ws_id, tab_id, leaf_id, cols, rows, None);
+        let cwd_override = self.pending_cwd.take();
+        self.spawn_pane_in(ws_id, tab_id, leaf_id, cols, rows, None, cwd_override);
     }
 
     fn spawn_pane_in(
@@ -291,6 +319,7 @@ impl App {
         cols: u16,
         rows: u16,
         shell_override: Option<String>,
+        cwd_override: Option<String>,
     ) {
         // The shell: a picker override first, then the chosen chain — term
         // store, the desktop store's choice, $SHELL, the per-OS default.
@@ -301,12 +330,9 @@ impl App {
                 .or(self.desk_shell.as_deref()),
             Some(&std::env::var("SHELL").unwrap_or_default()),
         );
-        // The folder: the focused pane's last reported cwd (the desktop's
-        // inherit-CWD rule), else the launch default.
-        let cwd = self
-            .panes
-            .get(&self.active_pane)
-            .and_then(|p| p.cwd.clone())
+        // The folder: an explicit donor (the focused pane's last reported
+        // cwd — the desktop's inherit rule), else the launch default.
+        let cwd = cwd_override
             .map(std::path::PathBuf::from)
             .unwrap_or_else(default_cwd);
         let params = OpenParams {
@@ -427,6 +453,7 @@ impl App {
     fn run_menu_action(&mut self, action: MenuAction, cols: u16, rows: u16) {
         match action {
             MenuAction::NewTab => {
+                self.pending_cwd = self.donor_cwd();
                 let Some(tab_id) = self.model.create_tab(&self.active_ws, &mut self.ids) else {
                     return;
                 };
@@ -535,6 +562,9 @@ impl App {
         let Some(tab_id) = self.active_tab_id() else {
             return;
         };
+        // The split inherits the focused pane's folder (the same rule as a
+        // new tab).
+        let donor = self.donor_cwd();
         let active = self.active_pane.clone();
         if let Some((_, new_leaf)) =
             self.model
@@ -542,7 +572,15 @@ impl App {
         {
             let ws = self.active_ws.clone();
             self.model.persist();
-            self.spawn_pane(&ws, &tab_id, &new_leaf, cols.max(10), rows.max(4));
+            self.spawn_pane_in(
+                &ws,
+                &tab_id,
+                &new_leaf,
+                cols.max(10),
+                rows.max(4),
+                None,
+                donor,
+            );
             self.active_pane = new_leaf;
         }
     }
@@ -712,6 +750,12 @@ impl App {
         }
     }
 
+    /// The focused pane's last reported cwd — the inheritance donor for a
+    /// new tab / panel / split.
+    fn donor_cwd(&self) -> Option<String> {
+        self.panes.get(&self.active_pane).and_then(|p| p.cwd.clone())
+    }
+
     /// A sidebar click (or a menu action) landing on this workspace.
     fn activate_workspace(&mut self, ws_id: &str) {
         if self.model.workspace(ws_id).is_none() {
@@ -725,6 +769,10 @@ impl App {
 
     /// A tab-title click landing on this tab of the active workspace.
     fn activate_tab(&mut self, tab_id: &str) {
+        // The tab you were ON donates its folder to the tab you switch to
+        // (the desktop's inherit-CWD rule) — captured before the selection
+        // moves, because the fresh pane does not exist yet.
+        self.pending_cwd = self.donor_cwd();
         let known = self
             .model
             .workspace(&self.active_ws)
