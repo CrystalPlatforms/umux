@@ -374,62 +374,62 @@ impl TermModel {
     }
 
     /// One row of the sidebar tree: a group header or a workspace (with the
-    /// group it sits under, for the indent). The ONE shape the renderer,
-    /// hit-tests and menus share.
+    /// group it sits under, for the indent).
     pub fn sidebar_tree(&self) -> Vec<SidebarEntry> {
-        let groups: std::collections::HashMap<&str, &Group> = self
-            .data
-            .groups
-            .iter()
-            .map(|g| (g.id.as_str(), g))
-            .collect();
-        let ws_by_id: std::collections::HashMap<&str, &Workspace> = self
-            .data
-            .workspaces
-            .iter()
-            .map(|w| (w.id.as_str(), w))
-            .collect();
+        // The PO-mandated hierarchy (round 5): every group header first,
+        // followed by ITS OWN workspaces (in sidebar order, indented by the
+        // renderer), and the ungrouped workspaces below the groups.
+        let mut groups_by_order: Vec<&Group> = self.data.groups.iter().collect();
+        groups_by_order.sort_by_key(|g| {
+            self.data
+                .order
+                .iter()
+                .position(|id| id == &g.id)
+                .unwrap_or(usize::MAX)
+        });
         let mut rows = Vec::new();
+        for g in groups_by_order {
+            rows.push(SidebarEntry::Group {
+                id: g.id.clone(),
+                name: g.name.clone(),
+                collapsed: g.collapsed.unwrap_or(false),
+            });
+            for id in &self.data.order {
+                if let Some(w) = self.data.workspaces.iter().find(|w| w.id == *id) {
+                    if w.group_id.as_deref() == Some(g.id.as_str()) {
+                        rows.push(SidebarEntry::Workspace {
+                            id: w.id.clone(),
+                            name: w.name.clone(),
+                            group: w.group_id.clone(),
+                        });
+                    }
+                }
+            }
+        }
         for id in &self.data.order {
-            if let Some(g) = groups.get(id.as_str()) {
-                rows.push(SidebarEntry::Group {
-                    id: g.id.clone(),
-                    name: g.name.clone(),
-                    collapsed: g.collapsed.unwrap_or(false),
-                });
-            } else if let Some(w) = ws_by_id.get(id.as_str()) {
-                rows.push(SidebarEntry::Workspace {
-                    id: w.id.clone(),
-                    name: w.name.clone(),
-                    group: w.group_id.clone(),
-                });
+            if let Some(w) = self.data.workspaces.iter().find(|w| w.id == *id) {
+                if w.group_id.is_none() {
+                    rows.push(SidebarEntry::Workspace {
+                        id: w.id.clone(),
+                        name: w.name.clone(),
+                        group: None,
+                    });
+                }
             }
         }
-        // Anything missing from `order` (a pre-order config, a fresh group
-        // the create path appended) joins the end: groups first, then their
-        // workspaces, then top-level workspaces.
-        for g in &self.data.groups {
-            if !self.data.order.contains(&g.id) {
-                rows.push(SidebarEntry::Group {
-                    id: g.id.clone(),
-                    name: g.name.clone(),
-                    collapsed: g.collapsed.unwrap_or(false),
-                });
-            }
-        }
+        // A workspace missing from `order` entirely (pre-order configs).
         for w in &self.data.workspaces {
-            if !self.data.order.contains(&w.id) {
+            if !self.data.order.contains(&w.id) && w.group_id.is_none() {
                 rows.push(SidebarEntry::Workspace {
                     id: w.id.clone(),
                     name: w.name.clone(),
-                    group: w.group_id.clone(),
+                    group: None,
                 });
             }
         }
         rows
     }
 
-    /// A fresh group node ("Group N" naming is the caller's).
     pub fn add_group(&mut self, id: String, name: String) {
         self.data.groups.push(Group {
             id: id.clone(),
@@ -708,5 +708,34 @@ mod tests {
         let unnamed = bare(ids.next());
         assert_eq!(tab_display_name(0, &unnamed), "Tab 1");
         assert_eq!(tab_display_name(2, &unnamed), "Tab 3");
+    }
+    #[test]
+    fn the_sidebar_tree_nests_workspaces_under_their_groups() {
+        with_tmp_config(|_| {
+            let mut ids = Ids::new();
+            let mut model = TermModel::open();
+            // One ungrouped workspace, then a group with a member workspace.
+            let ws_ungrouped = model.create_workspace(&mut ids);
+            model.add_group("g1".into(), "Group 1".into());
+            let ws_member = model.create_workspace(&mut ids);
+            assert!(model.set_workspace_group(&ws_member, Some("g1".into())));
+
+            let tree = model.sidebar_tree();
+            assert_eq!(tree.len(), 3, "group header + member + ungrouped");
+            // The GROUP header comes first, the member workspace sits UNDER
+            // it (round-5 hierarchy), and the ungrouped one trails.
+            assert!(matches!(
+                &tree[0],
+                SidebarEntry::Group { id, collapsed: false, .. } if id == "g1"
+            ));
+            assert!(matches!(
+                &tree[1],
+                SidebarEntry::Workspace { id, group: Some(g), .. } if id == &ws_member && g == "g1"
+            ));
+            assert!(matches!(
+                &tree[2],
+                SidebarEntry::Workspace { id, group: None, .. } if id == &ws_ungrouped
+            ));
+        });
     }
 }

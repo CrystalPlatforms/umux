@@ -15,7 +15,7 @@
 // (B5's wiring, the same inspect-never-mutate rule as the desktop).
 
 use std::collections::HashMap;
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -750,6 +750,23 @@ impl App {
 
     // --- event handling -------------------------------------------------------
 
+    /// Input-path diagnostics, ONLY when `UMUX_TUI_TRACE` is set: every raw
+    /// event and hit-test result appends to `<temp dir>/umux-tui-trace.log`.
+    /// Off by default — zero cost, zero I/O when the variable is absent.
+    fn trace(msg: &str) {
+        if std::env::var("UMUX_TUI_TRACE").is_err() {
+            return;
+        }
+        let path = std::env::temp_dir().join("umux-tui-trace.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(f, "{stamp} {msg}");
+        }
+    }
+
     fn handle_input(&mut self, event: Event, area: Rect) {
         match event {
             Event::Key(key) => {
@@ -908,6 +925,10 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) {
+        Self::trace(&format!(
+            "mouse {:?} at {},{} area {}x{}",
+            mouse.kind, mouse.column, mouse.row, area.width, area.height
+        ));
         // Hover follows EVERY pointer event — moves, drags and clicks alike
         // (a menu opening under a still cursor must highlight at once).
         self.hover = Some((mouse.column, mouse.row));
@@ -981,9 +1002,7 @@ impl App {
                 // The clickable chrome first: tab titles, their x buttons,
                 // the sidebar — panes come last.
                 let hit = ui::hit_test(self, area, mouse.column, mouse.row);
-                if std::env::var("UMUX_TUI_TRACE").is_ok() {
-                    eprintln!("[tui-trace] hit {:?}", hit);
-                }
+                Self::trace(&format!("hit {hit:?}"));
                 if let Some(hit) = hit {
                     let dims = self.pane_area_dims();
                     match hit {
