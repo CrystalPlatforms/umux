@@ -212,6 +212,8 @@ export function SettingsDialog({
   onSessionExtend,
   onSessionStop,
   onSessionExpiry,
+  onTransfer,
+  transferStatus = null,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -298,6 +300,16 @@ export function SettingsDialog({
   // whose settled view (active=false, lastEndedAt) is the end state's
   // source — the UI never declares expiry on its own.
   onSessionExpiry?: () => void
+  // The Desktop↔Terminal transfer (#80, v1.9.0 F1): the two buttons report
+  // UPWARD like every control here (this component stays invoke-free) — the
+  // parent runs the transfer through the backend command that rides
+  // store_core::transfer::merge_states, the same merge the B7 CLI commands
+  // perform. Absent = the row is not rendered.
+  onTransfer?: (direction: 'export' | 'import') => void
+  // The last transfer outcome, mirrored from the parent. `busy` disables the
+  // buttons (two transfers must never race); `error` renders in the error
+  // style. null = no status line.
+  transferStatus?: { kind: 'busy' | 'info' | 'error'; text: string } | null
 }) {
   // The sub-views (2026-10-02 rework, Adam): 'main' is the regular settings
   // page; 'storestation', 'core' and 'reset' are the dedicated screens the
@@ -562,6 +574,18 @@ export function SettingsDialog({
           onToggle={(next) => onChange({ showTabFolders: next })}
         />
 
+        {/* Launch mode (#78, v1.9.0 F1): what plain `umux` opens — this app
+            ("gui", the default) or umux Terminal ("tui"). The key is the SAME
+            `defaultLaunchMode` the store already carries and
+            `umux config set default-launch-mode` writes; the switch flips it
+            through the usual onChange round-trip, nothing else. */}
+        <SettingsToggle
+          label="Plain umux opens the Terminal"
+          checked={settings.defaultLaunchMode === 'tui'}
+          testId="toggle-launch-mode"
+          onToggle={(next) => onChange({ defaultLaunchMode: next ? 'tui' : 'gui' })}
+        />
+
         {/* Default shell (#77, v1.6.0): what every newly opened LOCAL tab
             spawns through. The picker is the SAME dropdown the sidebar "+"
             uses — a press-styled button unfolding a .create-dropdown menu —
@@ -719,6 +743,53 @@ export function SettingsDialog({
                 )}
               </div>
             </div>
+          </>
+        )}
+        {/* Desktop ↔ Terminal transfer (#80, v1.9.0 F1): the same moves the
+            `umux workspaces import desk|term` CLI commands perform — one
+            merge code path behind the parent's invoke. The row renders only
+            when the parent wires the transfer (onTransfer); a failed run
+            degrades into the status line, never silence. While a transfer is
+            busy both buttons disable, so two transfers can never race. */}
+        {onTransfer != null && (
+          <>
+            <div className="settings-row" data-testid="transfer-row">
+              <div className="settings-row__text">
+                <span className="settings-row__label">Desktop ↔ Terminal</span>
+                <span className="settings-row__description">
+                  Move your workspaces between this app and umux Terminal.
+                  Merges — nothing is overwritten.
+                </span>
+              </div>
+              <div className="settings-import">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  data-testid="transfer-export"
+                  disabled={transferStatus?.kind === 'busy'}
+                  onClick={() => onTransfer('export')}
+                >
+                  Export to Terminal
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  data-testid="transfer-import"
+                  disabled={transferStatus?.kind === 'busy'}
+                  onClick={() => onTransfer('import')}
+                >
+                  Import from Terminal
+                </button>
+              </div>
+            </div>
+            {transferStatus != null && (
+              <p
+                className={`settings-status${transferStatus.kind === 'error' ? ' settings-status--error' : ''}`}
+                data-testid="transfer-status"
+              >
+                {transferStatus.text}
+              </p>
+            )}
           </>
         )}
         {/* Close of the view==='main' fragment — everything above is the

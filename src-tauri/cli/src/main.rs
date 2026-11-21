@@ -920,6 +920,23 @@ enum ImportAction {
         #[arg(long, value_name = "FILE")]
         session: Option<std::path::PathBuf>,
     },
+    /// Merge the DESKTOP store's saved state into the target store
+    /// (v1.9.0 #80, the Desktop↔Terminal transfer: run with --term). MERGE,
+    /// never replace — collisions suffixed ` from desk`; the source store is
+    /// never written
+    Desk {
+        /// Print what would land and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Merge the TERMINAL store's saved state into the target store
+    /// (v1.9.0 #80, run with --desk). MERGE, never replace — collisions
+    /// suffixed ` from term`; the source store is never written
+    Term {
+        /// Print what would land and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Restore an umux exchange document written by `umux export` —
     /// REPLACES the chosen store with the document's state
     Umux {
@@ -4192,13 +4209,62 @@ fn layout_offline(
     }
 }
 
+/// What `umux` does when it is not running a subcommand (B1, v1.9.0):
+/// `Help` is the historical behavior — the full command list on stdout,
+/// exit 0; `LaunchTui` runs the umux Terminal in-process on this terminal.
+enum LaunchDecision {
+    Help,
+    LaunchTui,
+}
+
+/// The pure launcher decision (B1): the saved `default-launch-mode` plus the
+/// presence of the `--term`/`--terminal` flag decide between the help screen
+/// and the TUI. `--term` ALWAYS overrides the setting (it names the Terminal
+/// explicitly); a subcommand (`umux list --term`) is store targeting, never a
+/// launch. Unit-tested on the default, the tui setting, and the override.
+fn decide_launch(default_launch_mode: &str, term_flag: bool, has_command: bool) -> LaunchDecision {
+    if has_command {
+        return LaunchDecision::Help;
+    }
+    if term_flag || default_launch_mode == "tui" {
+        return LaunchDecision::LaunchTui;
+    }
+    LaunchDecision::Help
+}
+
+/// The saved default-launch-mode, read from the DESKTOP settings (the store
+/// the GUI Settings screen writes, F1's switch included): the launcher's one
+/// source of truth. A missing or corrupt file loads the default "gui" —
+/// the read never writes.
+fn launch_mode_saved() -> String {
+    settings_store_for(Target::Desk).load().default_launch_mode
+}
+
+/// Run the umux Terminal in-process. A failure (no tty — a spawned test, a
+/// pipe) prints the honest message on stderr and exits 1; success leaves the
+/// terminal restored and exits 0.
+fn launch_tui() {
+    if let Err(message) = umux_tui::run() {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Bare `umux` is the "what can this do?" entry: the full command list on
-    // stdout, exit 0 — friendlier than a usage error.
+    // stdout, exit 0 — friendlier than a usage error. With
+    // `default-launch-mode = "tui"` (story #78) it launches the Terminal
+    // instead; the default stays byte-identical help. The launcher consults
+    // the saved setting ONLY here — no other invocation gains a settings
+    // read.
     if args.len() == 1 {
-        let _ = Cli::command().print_help();
-        return;
+        return match decide_launch(&launch_mode_saved(), false, false) {
+            LaunchDecision::LaunchTui => launch_tui(),
+            LaunchDecision::Help => {
+                let _ = Cli::command().print_help();
+            }
+        };
     }
     let cli = Cli::parse();
 
@@ -4210,11 +4276,14 @@ fn main() {
         std::env::set_var("UMUX_CONFIG_DIR", dir.as_os_str());
     }
 
-    // The bare `--term` launcher: the TUI itself ships in v1.7.0 — say so,
-    // launch nothing, touch no store.
+    // The bare `--term` launcher (B1, v1.9.0): the umux Terminal runs here,
+    // in-process, on this terminal. The flag always overrides the saved
+    // default-launch-mode — it names the Terminal explicitly — and a
+    // `--term` WITH a command never reaches this arm (that is store
+    // targeting, dispatched below). The old "nothing to launch yet" notice
+    // from v1.7.0 is gone.
     if cli.term && cli.command.is_none() {
-        println!("The umux terminal UI (TUI) ships in v1.7.0 — nothing to launch yet.");
-        println!("Manage saved workspaces for it today: umux list --term, umux new <name> --term");
+        launch_tui();
         return;
     }
 
@@ -4422,12 +4491,13 @@ fn run_workspaces_export(target: Target, output: Option<std::path::PathBuf>, jso
     }
 }
 
-/// `umux workspaces import` (alias `import`). The import WRITES the chosen
-/// store, so the single-writer probe (#125) runs first: while the app or
-/// the daemon answers the socket, the store is owned by the live side and
-/// the offline write is refused — close umux first, or run the import while
-/// nothing is alive.
-fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) {
+/// The single-writer gate (#125) every offline STORE WRITE runs first: while
+/// the app or the daemon answers the socket, the store is owned by the live
+/// side and the write is refused — close umux first, or run the command
+/// while nothing is alive. A stale socket is cleaned up on the way through.
+/// Shared by `workspaces import` and the v1.9.0 desk↔term transfer (the
+/// exact refusal shapes and exit codes of the v1.8.0 import).
+fn refuse_live_store_write(json_mode: bool) {
     match probe_world() {
         World::Offline { stale } => {
             if stale {
@@ -4464,6 +4534,15 @@ fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) 
             );
         }
     }
+}
+
+/// `umux workspaces import` (alias `import`). The import WRITES the chosen
+/// store, so the single-writer probe (#125) runs first: while the app or
+/// the daemon answers the socket, the store is owned by the live side and
+/// the offline write is refused — close umux first, or run the import while
+/// nothing is alive.
+fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) {
+    refuse_live_store_write(json_mode);
     match action {
         ImportAction::Cmux {
             dry_run,
@@ -4495,6 +4574,78 @@ fn run_workspaces_import(target: Target, action: ImportAction, json_mode: bool) 
         ImportAction::Umux { file, dry_run } => {
             run_umux_import(target, &file, dry_run, json_mode)
         }
+        ImportAction::Desk { dry_run } => run_store_transfer(target, Target::Desk, dry_run, json_mode),
+        ImportAction::Term { dry_run } => run_store_transfer(target, Target::Term, dry_run, json_mode),
+    }
+}
+
+/// The Desktop↔Terminal transfer's import half (B7, v1.9.0 / #80): merge the
+/// SOURCE store's saved state into the TARGET store (`umux workspaces import
+/// desk --term`, `import term --desk`). The source store is opened
+/// read-only and NEVER written; the merge goes through
+/// `store_core::transfer` — the same pure code path any future UI button
+/// rides (F1 shells out to these commands, it does not reimplement the
+/// transfer). Settings are NOT transferable — per-surface app config, the
+/// exchange module's documented rule.
+fn run_store_transfer(target: Target, source: Target, dry_run: bool, json_mode: bool) {
+    if target == source {
+        let (name, other) = match target {
+            Target::Desk => ("desk", "--term"),
+            Target::Term => ("term", "--desk"),
+        };
+        fail(
+            json_mode,
+            &ErrorObj::new(
+                codes::BAD_PARAMS,
+                format!("the {name} store cannot import from itself"),
+                vec![format!("target the other store with {other}")],
+            ),
+            2,
+        );
+    }
+    let label = match source {
+        Target::Desk => "desk",
+        Target::Term => "term",
+    };
+    let incoming = workspace_store_for(source).load();
+    let live = workspace_store_for(target).load();
+    let mut ids = Ids::new();
+    let planned = store_core::transfer::merge_states(&live, &incoming, label, &mut || ids.next());
+    if dry_run {
+        if json_mode {
+            print_doc(&json!({
+                "planned": {
+                    "from": label,
+                    "workspaces": planned.workspaces.len() - live.workspaces.len(),
+                    "groups": planned.groups.len() - live.groups.len(),
+                }
+            }));
+            return;
+        }
+        let preview = build_import_preview(&live, &planned);
+        let tree = build_preview_tree(&preview);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tree).expect("preview tree is always serializable")
+        );
+        return;
+    }
+    workspace_store_for(target).save(&planned).expect("save workspace store");
+    if json_mode {
+        print_doc(&json!({
+            "imported": {
+                "from": label,
+                "workspaces": planned.workspaces.len() - live.workspaces.len(),
+                "groups": planned.groups.len() - live.groups.len(),
+            }
+        }));
+    } else {
+        println!(
+            "Merged {} workspaces and {} groups from the {label} store \
+             (collisions suffixed \" from {label}\").",
+            planned.workspaces.len() - live.workspaces.len(),
+            planned.groups.len() - live.groups.len()
+        );
     }
 }
 
@@ -5522,7 +5673,9 @@ const COMMAND_TABLE: &[CmdSpec] = &[
         notes: &[
             "cmux: imports cmux's saved files (dry-run prints the plan; not available on Windows)",
             "umux <file>: REPLACES the chosen store with the exchange document",
-            "--json: {imported: {workspaces, groups}}; failures are catalog error objects",
+            "desk (v1.9.0 #80, with --term): MERGES the desktop store's state in, collisions suffixed \" from desk\"; the source store is never written",
+            "term (v1.9.0 #80, with --desk): the reverse — the terminal store merges into the desktop store",
+            "--json: {imported: {workspaces, groups}} (desk/term add \"from\"); failures are catalog error objects",
         ],
     },
     CmdSpec {
@@ -6822,5 +6975,61 @@ mod attach_resolution {
         assert_eq!(err.code, codes::STORESTATION_NOT_RUNNING);
         let message = err.message.clone();
         assert!(message.contains("app gateway"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod launch_decision {
+    //! The pure launcher decision (B1, #78): the saved default-launch-mode
+    //! plus the `--term` flag pick between the historical help screen and
+    //! the TUI. The plan's three covered cases — the default, the tui
+    //! setting, the `--term` override — plus the has-command guard.
+
+    use super::{decide_launch, LaunchDecision};
+
+    #[test]
+    fn the_default_launch_mode_prints_help() {
+        assert!(matches!(
+            decide_launch("gui", false, false),
+            LaunchDecision::Help
+        ));
+    }
+
+    #[test]
+    fn the_tui_setting_launches_the_terminal() {
+        assert!(matches!(
+            decide_launch("tui", false, false),
+            LaunchDecision::LaunchTui
+        ));
+    }
+
+    #[test]
+    fn the_term_flag_overrides_the_gui_setting() {
+        assert!(matches!(
+            decide_launch("gui", true, false),
+            LaunchDecision::LaunchTui
+        ));
+    }
+
+    #[test]
+    fn a_subcommand_is_store_targeting_never_a_launch() {
+        // `umux list --term` targets the term store — it must not spawn a TUI.
+        assert!(matches!(
+            decide_launch("tui", true, true),
+            LaunchDecision::Help
+        ));
+    }
+
+    #[test]
+    fn an_unknown_saved_value_falls_back_to_help() {
+        // The settings store coerces, but the launcher stays defensive.
+        assert!(matches!(
+            decide_launch("", false, false),
+            LaunchDecision::Help
+        ));
+        assert!(matches!(
+            decide_launch("something-else", false, false),
+            LaunchDecision::Help
+        ));
     }
 }

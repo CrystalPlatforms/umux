@@ -1597,3 +1597,153 @@ describe('Core Session helpers (#114)', () => {
     expect(formatSessionClock(Math.floor(d.getTime() / 1000))).toBe('23:59')
   })
 })
+
+// Launch mode (#78, v1.9.0 F1): the "Plain umux opens the Terminal" switch.
+// The key is the SAME defaultLaunchMode the store already carries and the
+// CLI already writes; the switch mirrors it through aria-checked and flips
+// it through the usual onChange round-trip — nothing else.
+describe('SettingsDialog: launch-mode switch (#78, v1.9.0)', () => {
+  it('renders the saved defaultLaunchMode through aria-checked', () => {
+    const gui = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultLaunchMode: 'gui' }}
+        onChange={() => {}}
+        onClose={() => {}}
+      />,
+    )
+    expect(gui.getByTestId('toggle-launch-mode')).toHaveAttribute('aria-checked', 'false')
+    gui.unmount()
+
+    const tui = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultLaunchMode: 'tui' }}
+        onChange={() => {}}
+        onClose={() => {}}
+      />,
+    )
+    expect(tui.getByTestId('toggle-launch-mode')).toHaveAttribute('aria-checked', 'true')
+    tui.unmount()
+  })
+
+  it('flipping the switch reports the launch-mode patch and nothing else', () => {
+    // The component stays dumb: with the saved value "gui", a click reports
+    // 'tui' — the PARENT applies the patch by re-rendering with new props.
+    const onChange = vi.fn()
+    const first = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultLaunchMode: 'gui' }}
+        onChange={onChange}
+        onClose={() => {}}
+      />,
+    )
+    fireEvent.click(first.getByTestId('toggle-launch-mode'))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ defaultLaunchMode: 'tui' })
+    first.unmount()
+
+    // The applied state ("tui") round-trips back down: the next click
+    // reports 'gui'.
+    const second = render(
+      <SettingsDialog
+        settings={{ ...defaultSettings, defaultLaunchMode: 'tui' }}
+        onChange={onChange}
+        onClose={() => {}}
+      />,
+    )
+    fireEvent.click(second.getByTestId('toggle-launch-mode'))
+    expect(onChange).toHaveBeenLastCalledWith({ defaultLaunchMode: 'gui' })
+    second.unmount()
+  })
+})
+
+// Desktop ↔ Terminal transfer (#80, v1.9.0 F1): the two buttons report
+// UPWARD (the component stays invoke-free — the parent shells out to the
+// SAME `umux workspaces import desk|term` code path B7's tests pin, via the
+// backend command). Absent onTransfer = the row is not rendered at all.
+describe('SettingsDialog: Desktop-Terminal transfer row (#80, v1.9.0)', () => {
+  it('renders the row only when the parent wires the transfer', () => {
+    const bare = render(
+      <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
+    )
+    expect(bare.queryByTestId('transfer-row')).toBeNull()
+    expect(bare.queryByTestId('transfer-export')).toBeNull()
+    expect(bare.queryByTestId('transfer-import')).toBeNull()
+    bare.unmount()
+
+    const wired = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onTransfer={() => {}}
+      />,
+    )
+    expect(wired.getByTestId('transfer-row')).toBeTruthy()
+    expect(wired.getByTestId('transfer-export')).toBeTruthy()
+    expect(wired.getByTestId('transfer-import')).toBeTruthy()
+  })
+
+  it('each button reports its direction upward — the invocation the parent shells out', () => {
+    const onTransfer = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onTransfer={onTransfer}
+      />,
+    )
+
+    fireEvent.click(getByTestId('transfer-export'))
+    expect(onTransfer).toHaveBeenCalledTimes(1)
+    expect(onTransfer).toHaveBeenLastCalledWith('export')
+
+    fireEvent.click(getByTestId('transfer-import'))
+    expect(onTransfer).toHaveBeenCalledTimes(2)
+    expect(onTransfer).toHaveBeenLastCalledWith('import')
+  })
+
+  it('a busy transfer disables both buttons so two transfers never race', () => {
+    const onTransfer = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onTransfer={onTransfer}
+        transferStatus={{ kind: 'busy', text: 'Exporting to umux Terminal…' }}
+      />,
+    )
+
+    expect(getByTestId('transfer-export')).toBeDisabled()
+    expect(getByTestId('transfer-import')).toBeDisabled()
+    fireEvent.click(getByTestId('transfer-export'))
+    expect(onTransfer).not.toHaveBeenCalled()
+  })
+
+  it('the status line renders the outcome; errors take the error style', () => {
+    const info = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onTransfer={() => {}}
+        transferStatus={{ kind: 'info', text: 'Merged 2 workspaces and 1 group into umux Terminal.' }}
+      />,
+    )
+    expect(info.getByTestId('transfer-status').textContent).toContain('Merged 2 workspaces')
+    info.unmount()
+
+    const failure = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onTransfer={() => {}}
+        transferStatus={{ kind: 'error', text: 'transfer failed' }}
+      />,
+    )
+    expect(failure.getByTestId('transfer-status').textContent).toContain('transfer failed')
+    expect(failure.getByTestId('transfer-status').className).toContain('settings-status--error')
+  })
+})

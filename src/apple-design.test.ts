@@ -23,22 +23,42 @@ const css = fs.readFileSync(path.join(here, "app.css"), "utf8");
 // otherwise shadow the real rules during lookups.
 const cssNoReduced = stripMedia(css, "prefers-reduced-motion: reduce");
 
-/** Extract the body of a @media (...) { ... } block, if present. Balances
- * braces so nested rules (e.g. a :root override inside the query) survive. */
-function mediaBlock(source: string, query: string): string | null {
-  const start = source.indexOf(`@media (${query})`);
-  if (start === -1) return null;
-  const open = source.indexOf("{", start);
-  if (open === -1) return null;
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}") {
-      depth--;
-      if (depth === 0) return source.slice(open + 1, i);
+/** Extract the body of EVERY @media (...) { ... } block, joined. The
+ * stylesheet grew a second reduced-motion block (2026-11-18, the skeleton
+ * loading states) before the original one, so the lookups must see ALL
+ * matching blocks, not just the first. Balances braces so nested rules
+ * (e.g. a :root override inside the query) survive. */
+function mediaBlocks(source: string, query: string): string {
+  let out = "";
+  let rest = source;
+  for (;;) {
+    const start = rest.indexOf(`@media (${query})`);
+    if (start === -1) return out;
+    const open = rest.indexOf("{", start);
+    if (open === -1) return out;
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < rest.length; i++) {
+      if (rest[i] === "{") depth++;
+      else if (rest[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
     }
+    if (end === -1) return out;
+    out += rest.slice(open + 1, end) + "\n";
+    rest = rest.slice(end + 1);
   }
-  return null;
+}
+
+/** The joined body of every matching block, or null when the query is
+ * absent entirely (the "must exist" assertions keep working). */
+function mediaBlock(source: string, query: string): string | null {
+  const joined = mediaBlocks(source, query);
+  return joined === "" ? null : joined;
 }
 
 describe("apple-design: reduced motion (app.css)", () => {
@@ -171,18 +191,28 @@ describe("apple-design: uniform control sizes (app.css)", () => {
 /** Remove a whole @media block (header + balanced body) from the source, so
  * rule lookups find the REAL rule, not the reduced-motion override of it. */
 function stripMedia(source: string, query: string): string {
-  const start = source.indexOf(`@media (${query})`);
-  if (start === -1) return source;
-  const open = source.indexOf("{", start);
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}") {
-      depth--;
-      if (depth === 0) return source.slice(0, start) + source.slice(i + 1);
+  let out = source;
+  // Strip repeatedly: every matching block must go, not just the first.
+  for (;;) {
+    const start = out.indexOf(`@media (${query})`);
+    if (start === -1) return out;
+    const open = out.indexOf("{", start);
+    if (open === -1) return out;
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < out.length; i++) {
+      if (out[i] === "{") depth++;
+      else if (out[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
     }
+    if (end === -1) return out;
+    out = out.slice(0, start) + out.slice(end + 1);
   }
-  return source;
 }
 
 describe("apple-design: enter animations (app.css)", () => {

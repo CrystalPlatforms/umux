@@ -1893,6 +1893,55 @@ export function WorkspaceShell() {
     setSettingsOpen(false)
   }
 
+  // --- Desktop↔Terminal transfer (#80 UI, v1.9.0 F1) --------------------------
+  // Settings → "Desktop ↔ Terminal": the two buttons perform the SAME moves
+  // the B7 CLI commands do — the backend command rides
+  // store_core::transfer::merge_states, the one merge implementation the CLI
+  // and the UI share. Export writes the TERM store in the backend (no live
+  // owner); Import returns the merged tree, which the shell ADOPTS as its
+  // live state and persists — the app stays the single writer of its own
+  // store. The status line mirrors the outcome; a refusal is never silent.
+  const [transferStatus, setTransferStatus] = useState<{
+    kind: 'busy' | 'info' | 'error'
+    text: string
+  } | null>(null)
+  const runTransfer = (direction: 'export' | 'import') => {
+    setTransferStatus({
+      kind: 'busy',
+      text:
+        direction === 'export'
+          ? 'Exporting to umux Terminal…'
+          : 'Importing from umux Terminal…',
+    })
+    invoke<{
+      imported: { from: string; workspaces: number; groups: number }
+      state?: { workspaces: Workspace[]; groups: Group[]; order: string[] }
+    }>('workspaces_transfer', { direction })
+      .then((doc) => {
+        if (direction === 'import' && doc.state != null) {
+          persist({
+            ...stateRef.current,
+            workspaces: doc.state.workspaces,
+            groups: doc.state.groups,
+            order: doc.state.order,
+          })
+        }
+        const { workspaces, groups } = doc.imported
+        setTransferStatus(
+          workspaces === 0 && groups === 0
+            ? {
+                kind: 'info',
+                text: 'Nothing to move — the other store has no workspaces or groups yet.',
+              }
+            : {
+                kind: 'info',
+                text: `Merged ${workspaces} workspace${workspaces === 1 ? '' : 's'} and ${groups} group${groups === 1 ? '' : 's'} ${direction === 'export' ? 'into umux Terminal' : 'into this app'}.`,
+              },
+        )
+      })
+      .catch((e) => setTransferStatus({ kind: 'error', text: String(e) }))
+  }
+
   const muted = !settings.notificationsEnabled
 
   // Surface a config fallback as a visible warning (AC3). The backend emits
@@ -4560,6 +4609,8 @@ export function WorkspaceShell() {
           onClose={() => setSettingsOpen(false)}
           onOpenSettingsFile={openSettingsFile}
           onImportWizard={() => setWizardOpen(true)}
+          onTransfer={runTransfer}
+          transferStatus={transferStatus}
           onResetAll={() => {
             void resetAllAndRelaunch()
           }}

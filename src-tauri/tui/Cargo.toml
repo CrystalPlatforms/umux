@@ -1,0 +1,30 @@
+[package]
+name = "umux-tui"
+version = "1.8.5"
+edition = "2021"
+rust-version = "1.77.2"
+description = "umux Terminal â the terminal-native UI (TUI, v1.9.0): sidebar, tabs, unlimited panes, Ctrl+B prefix shortcuts, agent statuses"
+
+# Member crate versions move with the workspace version (autom/release rule):
+# every crate in src-tauri carries the same number and CI builds --locked.
+
+[dependencies]
+# Pure-Rust TUI stack (PRD decision: no webview). ratatui renders the widgets,
+# crossterm owns raw mode / the alternate screen / input events.
+ratatui = "0.29"
+crossterm = "0.28"
+# The vte parser (alacritty's) â the state machine under grid.rs.
+vte = "0.13"
+# The ONE session engine (B2) and the daemon client (B6) â no TUI-specific
+# PTY or socket code.
+session_core = { path = "../session_core" }
+umux-storestation = { path = "../storestation" }
+# Term-store access goes through store_core ONLY (the one-code-path rule).
+store_core = { path = "../store_core" }
+# The daemon write payload rides base64 (the protocol's wire shape).
+base64 = "0.22"
+serde_json = "1"
+
+[dev-dependencies]
+# The store round-trip tests run on tmpdirs (the CLI suite's pattern).
+tempfile = "3"

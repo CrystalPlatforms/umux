@@ -24,6 +24,7 @@ umux watches the terminal byte stream for the completion signals emitted by AI C
 - **Session restore** — reopening umux brings back your workspaces, panels, layout, working directories, and shells.
 - **In-app updates** — umux checks quietly on startup and via **Settings → App updates → Check for updates**. When a new release is found, one click downloads, applies, and relaunches. Updates come from GitHub Releases only and are signature-verified — a tampered or unsigned bundle is rejected.
 - **Keyboard-first** — switch workspaces, split/close panels, and more without leaving the keyboard.
+- **umux Terminal (v1.9.0)** — the same workspaces, tabs, and unlimited panes as a **full-screen terminal UI**: `umux --term` runs umux inside any terminal, over SSH, or headless, with full mouse support (buttons, context menus, drag-resize), the same agent statuses, and Core attach. See [umux Terminal](#umux-terminal-v190).
 
 ---
 
@@ -378,7 +379,9 @@ cargo build --release --package umux --package umux-storestation
 # → src-tauri/target/release/umux + umux-storestation
 ```
 
-Every command that touches a store needs a target: `--desk` (the desktop app's store) or `--term` (the terminal-UI store, whose TUI ships in v1.9.0).
+The umux Terminal itself needs **no separate build**: it lives in the `umux-tui` crate under `src-tauri/tui/`, a member of the same Cargo workspace, and compiles into the same `umux` binary (`umux --term` runs it in-process). `cargo test --workspace` covers its pure modules too.
+
+Every command that touches a store needs a target: `--desk` (the desktop app's store) or `--term` (the terminal-UI store, whose TUI is [umux Terminal](#umux-terminal-v190)).
 
 ```bash
 umux list --desk                    # saved workspaces as JSON
@@ -498,6 +501,75 @@ Created ids are echoed in every result document — that is how one command's ou
 ### The socket (security note)
 
 The live CLI talks to the app/daemon over **one local, per-user transport** — a Unix socket with `0600` permissions, or a per-user named pipe on Windows. There is **no auth, no token, and no network listener** — nothing ever binds a TCP port; another machine cannot reach it, and on your machine the socket belongs to your user alone. Its path derives from the config directory, so `UMUX_CONFIG_DIR` isolates store, socket and sessions together (that is how tests stay hermetic).
+
+---
+
+## umux Terminal (v1.9.0)
+
+**umux Terminal** is umux's terminal-native face: a full-screen TUI — sidebar, tabs, **unlimited panes** — rendered in pure Rust (ratatui + crossterm, no webview). It runs inside any terminal, over SSH, or on a headless machine, and it ships inside the same installers as everything else: the TUI compiles into the same `umux` binary, so there is nothing extra to install. Per the release gate, it works with the same feature set on **all three platforms** — Linux, macOS, and Windows (ConPTY, the same path the desktop app already rides).
+
+### Launching it
+
+```bash
+umux --term         # launch umux Terminal right here (also spelled --terminal)
+umux                # plain `umux` prints the command help
+```
+
+If you live in the Terminal, flip the default. Both ways read and write the same `default-launch-mode` setting in the desktop store:
+
+```bash
+umux config set default-launch-mode tui --desk    # bare `umux` now launches the Terminal
+umux config set default-launch-mode gui --desk    # back to the help screen
+```
+
+or flip the **"Plain umux opens the Terminal"** switch in the desktop app's Settings. `umux --term` always launches the Terminal regardless of the setting, and a flag on a subcommand (`umux list --term`) is store targeting, never a launch.
+
+### Separate state
+
+Desktop and Terminal keep **separate saved states** — the `--desk` and `--term` stores from the [CLI](#cli-umux) section. Neither mode surprises the other, and **Settings are not exchanged**: each surface carries its own. Moving workspace state between them is always explicit (see [Moving state between Desktop and Terminal](#moving-state-between-desktop-and-terminal)).
+
+### Chrome: buttons and context menus
+
+The Terminal has no reserved keyboard shortcuts — **every keystroke reaches the focused pane** (emacs-style bindings, `Ctrl+C`, everything). All Terminal actions live on the chrome, the way the desktop app arranges them:
+
+| Where | What |
+| ----- | ---- |
+| Tab bar | titles switch tabs (each carries the tab's agent-status glyph), the inline **`x`** closes a tab, **`+`** opens a new tab, **`v`** opens the shell picker |
+| Shell picker (`v`) | **Auto** (the backend's fallback chain) or any shell found on your `PATH` — a pick spawns **one new tab in that shell** (spawn-time only, nothing persists) |
+| Sidebar | the header **`+`** creates a workspace, **`Q`** quits; group headers collapse/expand; clicking a workspace row switches to it; each row carries the workspace's aggregate status |
+| Right-click a **pane** | focus, split horizontal / vertical, zoom, close |
+| Right-click a **tab** | rename, pin / unpin, new tab, split horizontal / vertical, zoom, color (the eight-color palette), separate (a split tab's panes become their own tabs), close |
+| Right-click a **workspace row** | rename, move to group, close workspace — with a confirmation dialog when it holds live panes |
+| Right-click a **group header** | collapse / expand, delete the group (its workspaces return to the top level) |
+| Right-click the **header/footer** | new workspace, new group, the agent-statuses toggle, quit |
+
+Context menus navigate with the mouse or the **arrow keys + Enter** (`Esc` closes). **`Esc`** also restores the chrome when a zoomed pane fills the screen. New tabs and panels **inherit the focused pane's folder** (the same `OSC 9;9` tracking the desktop uses). Minimum pane sizes are enforced — no pane collapses to nothing — and narrow terminals degrade gracefully (sections shrink instead of crashing).
+
+### Agent status
+
+The sidebar and pane titles carry the same live agent statuses as the desktop app — **working** while an AI CLI streams or thinks, **needs-attention** the moment it waits for you, **idle** after exit. Detection is the same OSC parsing (`OSC 9;9` / `99` / `777`) plus the foreground-process check — never screen-content classification — so statuses match across both surfaces for the same sessions.
+
+### Core attach: where sessions live
+
+The footer's first token shows which driver answered at startup:
+
+- **`local`** (default) — the session engine runs in-process. **Closing the terminal ends its sessions.**
+- **`daemon`** — with umux Core ([Storestation](#umux-storestation-v170)) enabled, the Terminal attaches to the **same living sessions** as the desktop app: closing the Terminal only **detaches**, agents and long jobs keep running headlessly, and the desktop app can reattach.
+
+The choice is one startup decision: a dead, unreachable, or incompatible daemon falls back to the in-process local driver — never a crash, never a gate card.
+
+### Moving state between Desktop and Terminal
+
+Two merge commands move saved workspace state between the stores in both directions. They **merge, never replace** — the source store is never written, and a name that already exists gets a ` from desk` / ` from term` suffix (numbered further when taken):
+
+```bash
+umux workspaces import desk --term             # pull the desktop store into the Terminal's
+umux workspaces import term --desk             # push the Terminal's store into the desktop's
+umux workspaces import desk --term --dry-run   # preview what would land, write nothing
+umux workspaces import desk --term --json      # machine-readable result document
+```
+
+(`umux import desk --term` is the same command — `workspaces import` and `import` are aliases. These are the same invocations the desktop Settings' export/import buttons run.) For full backups, `umux export --term -o backup.json` and `umux import umux backup.json --term` read and write the exchange format from [Exchange format](#exchange-format) — note that import `umux` **replaces** the chosen store, unlike the merges above.
 
 ---
 
