@@ -22,6 +22,13 @@ jobs:
       - name: Pobierz kod repozytorium
         uses: actions/checkout@v4
 
+      # CI fix 2026-11-21: runnerowy "stable" Rust (cargo 1.100+) tworzy dla
+      # binariów nowy layout katalogów (release/umux/), na którym tauri-build
+      # 2.6.3 panikuje (remove_file -> EISDIR). Pinujemy 1.98.0 — wersję, na
+      # której zbudowano v1.8.5/v1.8.6 i całą serię lokalnych buildów.
+      - name: Zainstaluj Rust 1.98.0 (pin, patrz CI fix)
+        uses: dtolnay/rust-toolchain@1.98.0
+
       - name: Zainstaluj Node.js
         uses: actions/setup-node@v4
         with:
@@ -104,6 +111,11 @@ jobs:
       - name: Pobierz kod repozytorium
         uses: actions/checkout@v4
 
+      # CI fix 2026-11-21: pin Rusta 1.98.0 (patrz komentarz w build-linux) —
+      # runnerowy stable psuje sidecar-copy w tauri-build (EPERM).
+      - name: Zainstaluj Rust 1.98.0 (pin, patrz CI fix)
+        uses: dtolnay/rust-toolchain@1.98.0
+
       - name: Zainstaluj Node.js
         uses: actions/setup-node@v4
         with:
@@ -176,6 +188,11 @@ jobs:
     steps:
       - name: Pobierz kod repozytorium
         uses: actions/checkout@v4
+
+      # CI fix 2026-11-21: pin Rusta 1.98.0 (patrz komentarz w build-linux) —
+      # spójność wszystkich trzech platform; runnerowe stable może dryfować.
+      - name: Zainstaluj Rust 1.98.0 (pin, patrz CI fix)
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Zainstaluj Node.js
         uses: actions/setup-node@v4
