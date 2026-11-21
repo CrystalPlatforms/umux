@@ -735,11 +735,6 @@ pub enum MenuAction {
     ToggleBranches,
     /// Toggle the per-panel folder lines (showTabFolders, term store).
     ToggleFolders,
-    /// Toggle the listening-ports section (portsTooltipEnabled, term store).
-    TogglePorts,
-    /// The tab's listening-ports info row (the terminal stand-in for the
-    /// desktop's hover tooltip — data identical, no hover in a TUI).
-    PortsInfo(String),
     /// Create a new workspace group.
     NewGroup,
     /// Dissolve a group; its workspaces return to the top level.
@@ -874,11 +869,6 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
                 items.push(Some(MenuAction::Separate(tab_id.clone())));
             }
             items.push(Some(MenuAction::ZoomToggle));
-            // The listening ports — the terminal stand-in for the desktop's
-            // hover tooltip: the same backend data, listed in the menu.
-            if app.model.settings.ports_tooltip_enabled {
-                items.push(Some(MenuAction::PortsInfo(tab_id.clone())));
-            }
             items.push(None);
             items.push(Some(MenuAction::CloseTab(tab_id.clone())));
             items
@@ -987,7 +977,6 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
             Some(MenuAction::ToggleAgentStatuses),
             Some(MenuAction::ToggleBranches),
             Some(MenuAction::ToggleFolders),
-            Some(MenuAction::TogglePorts),
             None,
             Some(MenuAction::Quit),
         ],
@@ -996,7 +985,6 @@ pub fn menu_items(app: &App, kind: &MenuKind) -> Vec<Option<MenuAction>> {
 
 /// Which element does this menu sit on? — the box's title, so the menu
 /// never lies about its target (the round-2 complaint: "the menu of ANOTHER
-/// workspace").
 fn menu_title(app: &App, kind: &MenuKind) -> String {
     match kind {
         MenuKind::Tab(tab_id) => format!(" tab: {} ", app.tab_name(tab_id)),
@@ -1592,40 +1580,6 @@ fn menu_label(app: &App, action: &MenuAction) -> String {
                 "Folder lines: on".into()
             } else {
                 "Folder lines: off".into()
-            }
-        }
-        MenuAction::TogglePorts => {
-            if app.model.settings.ports_tooltip_enabled {
-                "Listening ports: on".into()
-            } else {
-                "Listening ports: off".into()
-            }
-        }
-        MenuAction::PortsInfo(tab_id) => {
-            // The union of the tab's panes' listening ports, ascending —
-            // the desktop's tooltip body (formatPorts).
-            let mut ports: Vec<u16> = Vec::new();
-            if let Some(tree) = app.model.tab_layout(tab_id) {
-                for leaf in crate::layout::leaf_ids(&tree) {
-                    if let Some(p) = app.panes.get(&leaf) {
-                        for port in &p.ports {
-                            if !ports.contains(port) {
-                                ports.push(*port);
-                            }
-                        }
-                    }
-                }
-                ports.sort_unstable();
-            }
-            if ports.is_empty() {
-                "Listening: none".into()
-            } else {
-                let list = ports
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" \u{00b7} ");
-                format!("Listening: {list}")
             }
         }
         MenuAction::ToggleAgentStatuses => {

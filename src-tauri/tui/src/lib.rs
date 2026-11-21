@@ -31,7 +31,6 @@ pub mod git_branch;
 pub mod grid;
 pub mod keymap;
 pub mod layout;
-pub mod listening_ports;
 pub mod model;
 pub mod prefix;
 pub mod status;

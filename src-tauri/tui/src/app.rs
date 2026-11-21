@@ -56,9 +56,6 @@ pub struct Pane {
     /// The git branch resolved from the cwd (the desktop's #41 tab labels,
     /// gated by the Terminal's own showTabBranch).
     pub branch: Option<String>,
-    /// Listening TCP ports of this pane's process tree (the desktop's
-    /// #42 hover-tooltip data, gated by portsTooltipEnabled).
-    pub ports: Vec<u16>,
 }
 
 /// The messages the main loop consumes.
@@ -66,8 +63,6 @@ enum Msg {
     Input(Event),
     /// Raw PTY bytes for the pane with this leaf id (pumped verbatim).
     Output { pane: String, bytes: Vec<u8> },
-    /// A listening-ports scan answer for one pane (the off-thread scanner).
-    Ports { pane: String, ports: Vec<u16> },
 }
 
 /// A divider drag in progress (mouse B4).
@@ -135,8 +130,7 @@ pub struct App {
     /// "starts in the tab-I-was-on's folder" rule — captured BEFORE the
     /// selection moves to the new pane).
     pending_cwd: Option<String>,
-    /// leaf id → shell child pid, shared with the off-thread ports scanner.
-    pub ports_pids: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>>,
+
     /// The shell picker dropdown (the tab bar's "v" button) is showing.
     shell_menu: bool,
     /// The open context menu (right-click chrome), if any.
@@ -190,7 +184,6 @@ impl App {
             hover: None,
             pane_dims: (80, 24),
             pending_cwd: None,
-            ports_pids: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             shell_menu: false,
             menu: None,
             confirm: None,
@@ -377,12 +370,6 @@ impl App {
         };
         match self.driver.open(&params) {
             Ok((session, rx)) => {
-                // Register the shell's pid for the listening-ports scanner.
-                if let Some(pid) = self.driver.pty_child_pid(session) {
-                    if let Ok(mut pids) = self.ports_pids.lock() {
-                        pids.insert(leaf_id.to_string(), pid);
-                    }
-                }
                 self.panes.insert(
                     leaf_id.to_string(),
                     Pane {
@@ -394,7 +381,6 @@ impl App {
                         pty_rows: rows,
                         cwd: Some(start_cwd),
                         branch: None,
-                        ports: Vec::new(),
                     },
                 );
                 let tx = self.msg_tx.clone();
@@ -429,9 +415,6 @@ impl App {
     fn kill_pane(&mut self, leaf_id: &str) {
         if let Some(pane) = self.panes.remove(leaf_id) {
             self.driver.close(pane.session);
-        }
-        if let Ok(mut pids) = self.ports_pids.lock() {
-            pids.remove(leaf_id);
         }
     }
 
@@ -657,14 +640,6 @@ impl App {
                 self.model.settings.show_tab_folders = !self.model.settings.show_tab_folders;
                 self.model.persist_settings();
             }
-            MenuAction::TogglePorts => {
-                self.model.settings.ports_tooltip_enabled =
-                    !self.model.settings.ports_tooltip_enabled;
-                self.model.persist_settings();
-            }
-            // Pure information (the desktop's tooltip body) — a click just
-            // closes the menu.
-            MenuAction::PortsInfo(_) => {}
             MenuAction::BeginRenameWorkspace(ws_id) => {
                 let value = self
                     .model
@@ -1694,34 +1669,6 @@ fn event_loop(
         })
         .expect("spawn the input reader");
 
-    // The listening-ports scanner (the desktop's #42 hover data): pids are
-    // registered at spawn, the socket tables are scanned OFF-thread every
-    // 10 s (hundreds of ms on Windows — never on the input path), and the
-    // answers ride the same message channel.
-    let ports_pids = Arc::clone(&app.ports_pids);
-    let ports_tx = app.msg_tx.clone();
-    std::thread::Builder::new()
-        .name("tui-ports".into())
-        .spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(10));
-            let snapshot: Vec<(String, u32)> = match ports_pids.lock() {
-                Ok(m) => m.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                Err(_) => Vec::new(),
-            };
-            if snapshot.is_empty() {
-                continue;
-            }
-            let listeners = crate::listening_ports::listening_sockets();
-            let edges = crate::listening_ports::parent_edges();
-            for (leaf, pid) in snapshot {
-                let ports =
-                    crate::listening_ports::aggregate_ports(&listeners, &edges, &[pid]);
-                if ports_tx.send(Msg::Ports { pane: leaf, ports }).is_err() {
-                    break;
-                }
-            }
-        })
-        .ok();
 
     // First layout: size the initial sessions to the real terminal.
     let size = terminal.size().map_err(|e| format!("terminal size failed: {e}"))?;
@@ -1742,11 +1689,6 @@ fn event_loop(
                 app.handle_input(ev, Rect::new(0, 0, size.width, size.height));
             }
             Ok(Msg::Output { pane, bytes }) => app.handle_output(&pane, bytes),
-            Ok(Msg::Ports { pane, ports }) => {
-                if let Some(p) = app.panes.get_mut(&pane) {
-                    p.ports = ports;
-                }
-            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
         }
@@ -1967,7 +1909,7 @@ mod tests {
                     pty_rows: 24,
                     cwd: Some("/tmp/proj".into()),
                     branch: None,
-                    ports: Vec::new(),
+
                 },
             );
             let area = Rect::new(0, 0, 100, 30);
@@ -1998,43 +1940,6 @@ mod tests {
                 app.menu.is_none() && !app.should_exit,
                 "the folder-line click performs no neighbour action"
             );
-        });
-    }
-    #[test]
-    fn scratch_rows_dump() {
-        with_two_ws_app(|app| {
-            app.model.settings.show_tab_folders = true;
-            app.model.add_group("g1".into(), "Group 1".into());
-            let order = app.model.workspace_order();
-            let (ws_a, ws_b) = (order[0].clone(), order[1].clone());
-            app.model.set_workspace_group(&ws_a, Some("g1".into()));
-            let tab_id = app
-                .model
-                .workspace(&ws_a)
-                .map(|ws| ws.tabs[0].id.clone())
-                .expect("tab");
-            let leaf = app
-                .model
-                .tab_layout(&tab_id)
-                .map(|t| crate::layout::leaf_ids(&t)[0].clone())
-                .expect("leaf");
-            app.panes.insert(
-                leaf.clone(),
-                Pane {
-                    session: 0,
-                    grid: Grid::new(80, 24),
-                    status: AgentStatusMachine::new(),
-                    parser: session_core::osc_parser::OscParser::new(),
-                    pty_cols: 80,
-                    pty_rows: 24,
-                    cwd: Some("/tmp/proj".into()),
-                    branch: None,
-                    ports: Vec::new(),
-                },
-            );
-            for (i, r) in crate::ui::sidebar_row_summary(app).into_iter().enumerate() {
-                eprintln!("row {i} = {r}");
-            }
         });
     }
 }
