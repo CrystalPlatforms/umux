@@ -318,7 +318,6 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 indent,
                 pinned,
                 color,
-                chips,
                 ..
             } => {
                 let active = id == app.active_ws;
@@ -339,32 +338,21 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                         style = style.fg(c);
                     }
                 }
-                // The name reserves only what the chips actually occupy —
-                // an empty chip block never eats the workspace's name.
-                let chip_text = chips.as_ref().map(|c| c.len()).unwrap_or(0);
-                let reserve = 2 + chip_text;
-                let mut spans: Vec<Span> = vec![Span::styled(
-                    format!(
-                        "{pad}{marker} {pin}{} ",
-                        truncate(name, rows.width.saturating_sub(reserve as u16) as usize)
-                    ),
+                // ZERO status glyphs beside the name (round-final) — the
+                // statuses live on the lines UNDER this row.
+                lines.push(Line::from(Span::styled(
+                    format!("{pad}{marker} {pin}{}", truncate(name, rows.width.saturating_sub(6) as usize)),
                     style,
-                )];
-                // The per-panel chips (the desktop's chip block): one glyph
-                // per panel IN TREE ORDER, colored with the desktop's status
-                // palette — working = the running arrow (amber), waiting =
-                // the accent blue, idle = the faint dot.
-                if let Some(statuses) = &chips {
-                    for s in statuses {
-                        spans.push(Span::styled(
-                            status_glyph(*s),
-                            Style::default().fg(status_color(*s)),
-                        ));
-                    }
+                )));
+            }
+            SidebarRow::StatusLine { status, word, .. } => {
+                // The status TEXT line (round-final): the word in the
+                // desktop's status color.
+                let mut st = Style::default().fg(status_color(status));
+                if hovered(app, row_rect) {
+                    st = st.add_modifier(Modifier::REVERSED);
                 }
-                lines.push(Line::from(spans));
-                // The folder lines draw themselves as their OWN rows (the
-                // FolderLine arm below) — each is its own hit target.
+                lines.push(Line::from(Span::styled(word, st)));
             }
             SidebarRow::FolderLine { text, .. } => {
                 let mut st = Style::default().fg(ratatui::style::Color::DarkGray);
@@ -1116,7 +1104,14 @@ enum SidebarRow {
         indent: bool,
         pinned: bool,
         color: Option<String>,
-        chips: Option<Vec<AgentStatus>>,
+    },
+    /// A per-panel STATUS TEXT line under the workspace (round-final: shown
+    /// when Folder lines are OFF — the words "working" / "needs input" /
+    /// "idle" in the desktop's status colors). Display only.
+    StatusLine {
+        ws_id: String,
+        status: AgentStatus,
+        word: String,
     },
     FolderLine {
         ws_id: String,
@@ -1191,15 +1186,17 @@ pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                 {
                     continue; // members of a collapsed group hide
                 }
-                // Per-panel chips (tree order across the ws's tabs) and the
-                // per-panel FOLDER-LINE ROWS (#81/#121) — the ws NAME row
-                // comes FIRST, its folder lines UNDER it, each its own hit
-                // target (the round-10 hit-identity fix). Chips carry the
-                // STATUS (color + the desktop running arrow).
+                // The ws NAME row carries ONLY the name (round-final: zero
+                // status glyphs beside the name). The statuses live UNDER
+                // the workspace: Folder lines ON → the per-panel folder
+                // lines (chip + folder tail); OFF → per-panel STATUS TEXT
+                // lines ("working" / "needs input" / "idle") in the
+                // desktop's status colors, one line per panel (the same
+                // per-panel rule the folder lines follow).
                 let statuses_on = app.agent_statuses_enabled();
                 let folders_on = app.model.settings.show_tab_folders;
-                let mut chips: Vec<AgentStatus> = Vec::new();
                 let mut folder_lines: Vec<(AgentStatus, String, Option<String>)> = Vec::new();
+                let mut status_words: Vec<(AgentStatus, String)> = Vec::new();
                 let tabs: Vec<String> = app
                     .model
                     .workspace(id)
@@ -1214,9 +1211,6 @@ pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                             continue;
                         };
                         let status = pane.status.status();
-                        if statuses_on {
-                            chips.push(status);
-                        }
                         if folders_on {
                             let tail = pane
                                 .cwd
@@ -1232,6 +1226,8 @@ pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                             } else if statuses_on {
                                 folder_lines.push((status, String::new(), None));
                             }
+                        } else if statuses_on {
+                            status_words.push((status, status_word(status)));
                         }
                     }
                 }
@@ -1241,15 +1237,24 @@ pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                     indent: group.is_some(),
                     pinned: *pinned,
                     color: color.clone(),
-                    chips: if statuses_on { Some(chips) } else { None },
                 });
-                for (status, tail, path) in folder_lines {
-                    rows.push(SidebarRow::FolderLine {
-                        ws_id: id.clone(),
-                        status,
-                        text: format!("  {} {}", status_glyph(status), tail),
-                        path,
-                    });
+                if folders_on {
+                    for (status, tail, path) in folder_lines {
+                        rows.push(SidebarRow::FolderLine {
+                            ws_id: id.clone(),
+                            status,
+                            text: format!("  {} {}", status_glyph(status), tail),
+                            path,
+                        });
+                    }
+                } else {
+                    for (status, word) in status_words {
+                        rows.push(SidebarRow::StatusLine {
+                            ws_id: id.clone(),
+                            status,
+                            word,
+                        });
+                    }
                 }
             }
         }
@@ -1265,6 +1270,9 @@ pub(crate) fn sidebar_row_summary(app: &App) -> Vec<String> {
             SidebarRow::Header => "Header".to_string(),
             SidebarRow::Group { id, name, .. } => format!("Group {id} ({name})"),
             SidebarRow::Workspace { id, name, .. } => format!("Workspace {id} ({name})"),
+            SidebarRow::StatusLine { status, word, .. } => {
+                format!("Status {status:?} ({word})")
+            }
             SidebarRow::FolderLine { ws_id, path, .. } => {
                 format!("FolderLine ws={ws_id} path={path:?}")
             }
@@ -1482,6 +1490,15 @@ fn palette_label(hex: &str) -> String {
         .find(|(_, h)| *h == hex)
         .map(|(n, _)| (*n).to_string())
         .unwrap_or_else(|| hex.to_string())
+}
+
+/// The status WORD (PO's round-final wording, lowercase as spoken).
+fn status_word(status: AgentStatus) -> String {
+    match status {
+        AgentStatus::Working => "working".into(),
+        AgentStatus::NeedsAttention => "needs input".into(),
+        AgentStatus::Idle => "idle".into(),
+    }
 }
 
 /// The folder TAIL (the desktop's formatFolderTail): the last two segments
