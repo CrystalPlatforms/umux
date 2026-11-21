@@ -346,13 +346,22 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 )));
             }
             SidebarRow::StatusLine { status, word, .. } => {
-                // The status TEXT line (round-final): the word in the
-                // desktop's status color.
+                // The status TEXT line (round-final): the status ICON + the
+                // word, both in the desktop's status color. Idle uses the
+                // PO-specified "||".
+                let icon = match status {
+                    AgentStatus::Working => "\u{25b6}",
+                    AgentStatus::NeedsAttention => "!",
+                    AgentStatus::Idle => "||",
+                };
                 let mut st = Style::default().fg(status_color(status));
                 if hovered(app, row_rect) {
                     st = st.add_modifier(Modifier::REVERSED);
                 }
-                lines.push(Line::from(Span::styled(word, st)));
+                lines.push(Line::from(Span::styled(
+                    format!("{icon} {word}"),
+                    st,
+                )));
             }
             SidebarRow::FolderLine { text, .. } => {
                 let mut st = Style::default().fg(ratatui::style::Color::DarkGray);
@@ -805,6 +814,12 @@ pub enum UiHit {
     BeginCreate,
     /// Open a pane's folder in the system file explorer.
     OpenFolder(String),
+    /// A status-line click: navigate to that workspace + tab + pane.
+    StatusLineNav {
+        ws_id: String,
+        tab_id: String,
+        leaf_id: String,
+    },
     /// The tab bar's "v" shell-picker button.
     ShellMenu,
 }
@@ -1095,9 +1110,12 @@ enum SidebarRow {
     },
     /// A per-panel STATUS TEXT line under the workspace (round-final: shown
     /// when Folder lines are OFF — the words "working" / "needs input" /
-    /// "idle" in the desktop's status colors). Display only.
+    /// "idle" in the desktop's status colors). A click NAVIGATES to that
+    /// workspace + tab + pane (the same gesture as the workspace row).
     StatusLine {
         ws_id: String,
+        tab_id: String,
+        leaf_id: String,
         status: AgentStatus,
         word: String,
     },
@@ -1184,7 +1202,7 @@ pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                 let statuses_on = app.agent_statuses_enabled();
                 let folders_on = app.model.settings.show_tab_folders;
                 let mut folder_lines: Vec<(AgentStatus, String, Option<String>)> = Vec::new();
-                let mut status_words: Vec<(AgentStatus, String)> = Vec::new();
+                let mut status_words: Vec<(String, String, String, AgentStatus, String)> = Vec::new();
                 let tabs: Vec<String> = app
                     .model
                     .workspace(id)
@@ -1215,7 +1233,13 @@ pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                                 folder_lines.push((status, String::new(), None));
                             }
                         } else if statuses_on {
-                            status_words.push((status, status_word(status)));
+                            status_words.push((
+                                id.clone(),
+                                tab_id.clone(),
+                                leaf.clone(),
+                                status,
+                                status_word(status),
+                            ));
                         }
                     }
                 }
@@ -1236,9 +1260,11 @@ pub(crate) fn sidebar_rows(app: &App) -> Vec<SidebarRow> {
                         });
                     }
                 } else {
-                    for (status, word) in status_words {
+                    for (ws_id, tab_id, leaf_id, status, word) in status_words {
                         rows.push(SidebarRow::StatusLine {
-                            ws_id: id.clone(),
+                            ws_id,
+                            tab_id,
+                            leaf_id,
                             status,
                             word,
                         });
@@ -1308,6 +1334,15 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> Option<UiHit> {
             return match sidebar_rows(app).get(idx) {
                 Some(SidebarRow::Group { id, .. }) => Some(UiHit::Group(id.clone())),
                 Some(SidebarRow::Workspace { id, .. }) => Some(UiHit::Workspace(id.clone())),
+                // A status-line click NAVIGATES to that workspace + tab +
+                // pane (the same gesture as the workspace row).
+                Some(SidebarRow::StatusLine { ws_id, tab_id, leaf_id, .. }) => {
+                    Some(UiHit::StatusLineNav {
+                        ws_id: ws_id.clone(),
+                        tab_id: tab_id.clone(),
+                        leaf_id: leaf_id.clone(),
+                    })
+                }
                 // A folder line is ITS OWN hit target: a click opens that
                 // pane's folder in the system explorer (the desktop's
                 // double-click open, one click here). A chip-only line (no
@@ -1403,6 +1438,11 @@ pub fn context_kind(app: &App, area: Rect, col: u16, row: u16) -> Option<MenuKin
                 Some(SidebarRow::Group { id, .. }) => Some(MenuKind::Group(id.clone())),
                 Some(SidebarRow::Workspace { id, .. }) => {
                     Some(MenuKind::Workspace(id.clone()))
+                }
+                // A status line under the workspace belongs to that ws (its
+                // right-click shows the workspace menu).
+                Some(SidebarRow::StatusLine { ws_id, .. }) => {
+                    Some(MenuKind::Workspace(ws_id.clone()))
                 }
                 // A folder line belongs to its workspace (the desktop's
                 // row-and-line pattern: the line selects the ws).

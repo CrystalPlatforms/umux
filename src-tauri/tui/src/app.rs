@@ -1309,6 +1309,15 @@ impl App {
                             self.model.toggle_group_collapsed(&gid);
                             self.model.persist();
                         }
+                        // A status-line click NAVIGATES: select the
+                        // workspace, switch to its tab, focus the pane —
+                        // and nothing else (the round-11 status-line
+                        // navigation).
+                        ui::UiHit::StatusLineNav { ws_id, tab_id, leaf_id } => {
+                            self.activate_workspace(&ws_id);
+                            self.activate_tab(&tab_id);
+                            self.focus_pane(&leaf_id);
+                        }
                         ui::UiHit::BeginCreate => {
                             // Anchored at the SIDEBAR'S LEFT edge, one row
                             // under the header — never spilling right (the
