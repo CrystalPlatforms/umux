@@ -29,9 +29,9 @@ import { JSDOM } from "jsdom";
 //    teaser sections proposed in the same phase were REMOVED at Adam's
 //    direction (2026-09-30) — they cluttered the page. The roadmap carries
 //    every released version and every planned one, one short line each
-//    (mirroring the 2026-09-12 renumbered master-PRD roadmap: Core Session
-//    v1.7.7 is current; live CLI v1.8.0, TUI v1.9.0,
-//    Agents View v2.0.0, …, Ecosystem v3.0.0 planned). Internal anchors
+//    (mirroring the 2026-09-12 renumbered master-PRD roadmap: Live CLI
+//    v1.8.0, umux Terminal v1.9.0 are current; Agents View v2.0.0,
+//    …, Ecosystem v3.0.0 planned). Internal anchors
 //    must resolve to real ids; "no dead external links" is asserted as a
 //    destination WHITELIST (we can't fetch the network from a unit test —
 //    a link to an unknown host/path shape is the failure mode worth
@@ -556,7 +556,7 @@ describe("umux landing page — roadmap (Issue #91, Phase 9)", () => {
     it("lists every shipped release up to the current one", () => {
         // The full release history in one short line per version — from the
         // first feature release to the current one. Exactly ONE entry may
-        // be marked current, and it must be v1.7.7 (Core Session).
+        // be marked current, and it must be v1.9.0 (umux Terminal).
         const doc = parse();
         const roadmap = doc.querySelector("section.roadmap#roadmap");
         expect(roadmap, "roadmap section missing").toBeTruthy();
@@ -572,30 +572,36 @@ describe("umux landing page — roadmap (Issue #91, Phase 9)", () => {
             "v1.7.5",
             "v1.7.6",
             "v1.7.7",
+            "v1.8.0",
+            "v1.8.1",
+            "v1.8.5",
+            "v1.8.6",
+            "v1.9.0",
         ]) {
             expect(text, `shipped version ${version} missing`).toContain(version);
         }
         expect(text).toMatch(/storestation/);
         expect(text).toMatch(/always-on/);
         expect(text).toMatch(/core session/);
+        expect(text).toMatch(/live cli/);
+        expect(text).toMatch(/terminal/);
 
         const items = [...roadmap!.querySelectorAll(".timeline-item")];
         const current = items.filter((i) => i.classList.contains("now"));
         expect(current, "exactly one roadmap entry may be current").toHaveLength(1);
-        expect(current[0]?.textContent ?? "").toMatch(/v1\.7\.7/);
+        expect(current[0]?.textContent ?? "").toMatch(/v1\.9\.0/);
     });
 
     it("lists every planned release without drowning in detail", () => {
-        // The planned ladder, one short line each — v1.8.0 through v2.6.0
+        // The planned ladder, one short line each — v2.0.0 through v2.6.0
         // plus the v3.0.0 ecosystem finale (development branch). Each line
-        // stays a headline: no dates, no scope essays.
+        // stays a headline: no dates, no scope essays. v1.8.0 (Live CLI)
+        // and v1.9.0 (Terminal) shipped and moved to the shipped history.
         const doc = parse();
         const roadmap = doc.querySelector("section.roadmap#roadmap");
         expect(roadmap, "roadmap section missing").toBeTruthy();
         const text = (roadmap?.textContent ?? "").toLowerCase();
         for (const [version, topic] of [
-            ["v1.8.0", "live cli"],
-            ["v1.9.0", "terminal"],
             ["v2.0.0", "agents view"],
             ["v2.1.0", "herdr"],
             ["v2.2.0", "command palette"],
