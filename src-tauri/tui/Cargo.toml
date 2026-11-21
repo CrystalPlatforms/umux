@@ -1,9 +1,9 @@
 [package]
 name = "umux-tui"
-version = "1.8.5"
+version = "1.9.0"
 edition = "2021"
 rust-version = "1.77.2"
-description = "umux Terminal â the terminal-native UI (TUI, v1.9.0): sidebar, tabs, unlimited panes, Ctrl+B prefix shortcuts, agent statuses"
+description = "umux Terminal (the terminal-native UI, TUI v1.9.0): sidebar, tabs, unlimited panes, mouse and context-menu chrome, agent statuses"
 
 # Member crate versions move with the workspace version (autom/release rule):
 # every crate in src-tauri carries the same number and CI builds --locked.
@@ -28,3 +28,4 @@ serde_json = "1"
 [dev-dependencies]
 # The store round-trip tests run on tmpdirs (the CLI suite's pattern).
 tempfile = "3"
+

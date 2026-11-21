@@ -25,7 +25,7 @@
 // target/ itself.
 
 import { execSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -114,4 +114,21 @@ if (triple === 'universal-apple-darwin') {
   for (const { pkg, name } of SIDECARS) {
     copySidecar(pkg, path.join('target', triple, 'release', `${name}${exe}`), `${name}-${triple}${exe}`)
   }
+}
+
+// CI fix 2026-11-21 (release v1.9.0): tauri-build's copy_binaries removes a
+// pre-existing sidecar destination with fs::remove_file and panics when that
+// path is a DIRECTORY (Linux: EISDIR) or a provenance-protected file
+// (macOS: EPERM). The cargo relink of the `umux`/`umux-storestation` CLI
+// members can race the app build around those exact paths
+// (target/<triple>/release/<name>), so any DIRECTORY found there is cleared
+// before the bundler's own cargo run starts.
+for (const { name } of SIDECARS) {
+  const cargoArtifact = path.join(srcTauri, 'target', triple, 'release', `${name}${exe}`)
+  try {
+    if (existsSync(cargoArtifact) && !statSync(cargoArtifact).isFile()) {
+      rmSync(cargoArtifact, { recursive: true, force: true })
+      console.log(`[bundle-cli] cleared stray non-file artifact: ${cargoArtifact}`)
+    }
+  } catch { /* nothing to clear */ }
 }
