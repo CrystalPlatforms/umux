@@ -361,6 +361,30 @@
     }
     dialog#after-download a { color: var(--accent); }
     dialog#after-download form { margin-top: 18px; text-align: right; }
+    dialog#after-download code { user-select: all; }
+    /* ActivatePresto block: the command plus its copy row. */
+    dialog#after-download .dlg-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    dialog#after-download .dlg-actions .copy-btn { margin: 0; }
+    dialog#after-download .dlg-copied { color: var(--accent); font-size: 0.85rem; }
+    dialog#after-download .dlg-copied[hidden] { display: none; }
+    .first-run code {
+      display: block;
+      margin: 6px 0 2px;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--accent);
+      font: 0.9rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-x: auto;
+      white-space: nowrap;
+      user-select: all;
+    }
     @media (max-width: 720px) {
       .features { grid-template-columns: 1fr; }
       .hero { padding-top: 32px; }
@@ -502,11 +526,15 @@
   </section>
 
   <section class="first-run reveal">
-    <h2>First run — unsigned builds</h2>
-    <p>umux is free &amp; open source and ships without a paid code-signing certificate, so your system may ask for confirmation once:</p>
+    <h2>First run — ActivatePresto</h2>
+    <p>umux is free &amp; open source and ships without a paid code-signing certificate, so your system blocks the first launch once. Don't click through the warning — run one command instead, and umux starts on its own:</p>
     <ul>
-      <li><strong>macOS:</strong> right-click the app → <em>Open</em>, or System Settings → Privacy &amp; Security → <em>Open Anyway</em>.</li>
-      <li><strong>Windows:</strong> on the SmartScreen prompt choose <em>More info</em> → <em>Run anyway</em>.</li>
+      <li><strong>macOS:</strong> open the DMG, drag umux to <em>Applications</em>, then in Terminal:
+        <code>xattr -cr /Applications/umux.app &amp;&amp; open /Applications/umux.app</code>
+        — it clears the quarantine and launches umux right away. (The click-through way — right-click the app → <em>Open</em>, or System Settings → Privacy &amp; Security → <em>Open Anyway</em> — still works.)</li>
+      <li><strong>Windows:</strong> in PowerShell (not the old cmd):
+        <code>Unblock-File "$env:USERPROFILE\Downloads\umux_x64-setup.exe"; Start-Process "$env:USERPROFILE\Downloads\umux_x64-setup.exe"</code>
+        — it lifts the SmartScreen block and starts the installer for you. (Clicking <em>More info</em> → <em>Run anyway</em> on the blue prompt still works.)</li>
       <li><strong>Linux:</strong> AppImage needs <code>chmod +x</code> once; .deb/.rpm install normally.</li>
     </ul>
     <p><a href="https://github.com/CrystalPlatforms/umux#installation">Full installation instructions →</a></p>
@@ -635,9 +663,60 @@
       var dlg = document.getElementById("after-download");
       var title = document.getElementById("dlg-title");
       var body = document.getElementById("dlg-body");
-      function openDialog(t, html) {
+      function esc(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+      function copyText(text, done) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () {});
+        } else {
+          try {
+            var holder = document.createElement("textarea");
+            holder.value = text;
+            holder.setAttribute("readonly", "");
+            holder.style.position = "fixed";
+            holder.style.opacity = "0";
+            document.body.appendChild(holder);
+            holder.select();
+            document.execCommand("copy");
+            document.body.removeChild(holder);
+            done();
+          } catch (e) { /* clipboard unavailable — the user can still select manually */ }
+        }
+      }
+      function markCopied(block) {
+        var btn = block.querySelector("[data-dlg-copy]");
+        btn.classList.add("copied");
+        btn.textContent = "Copied!";
+        var note = block.querySelector(".dlg-copied");
+        if (note) note.hidden = false;
+      }
+      // ActivatePresto block: the command, a Copy button, and the "it's in
+      // your clipboard" hint.
+      function commandBlock(cmd) {
+        var block = document.createElement("div");
+        block.innerHTML =
+          "<code>" + esc(cmd) + "</code>" +
+          '<div class="dlg-actions">' +
+          '<button class="copy-btn" type="button" data-dlg-copy aria-label="Copy the command">Copy</button>' +
+          '<span class="dlg-copied" hidden>Copied — paste it and press Enter ↵</span>' +
+          "</div>";
+        var btn = block.querySelector("[data-dlg-copy]");
+        btn.addEventListener("click", function () {
+          copyText(cmd, function () { markCopied(block); });
+        });
+        return block;
+      }
+      function openDialog(t, html, autoCmd) {
         title.textContent = t;
         body.innerHTML = html;
+        if (autoCmd) {
+          var block = commandBlock(autoCmd);
+          body.appendChild(block);
+          // The click that started the download is still a user gesture, so
+          // the command can land in the clipboard without another click.
+          copyText(autoCmd, function () { markCopied(block); });
+        }
         try {
           if (typeof dlg.showModal === "function") { dlg.showModal(); return; }
         } catch (e) { /* fall through to the plain open attribute */ }
@@ -647,22 +726,38 @@
         "<p>Your download has started. We wish you'll have many productive sessions in umux, " +
         "hope you'll become a regular. 😃</p>" +
         '<p><a href="https://github.com/CrystalPlatforms/umux#installation" target="_blank" rel="noopener">Installation &amp; first-run notes →</a></p>';
-      var install = {
+      // ActivatePresto — one command lifts the unsigned-build block and starts
+      // umux. Version-less paths, so no edit is needed when a release ships.
+      var activate = {
+        macos: "xattr -cr /Applications/umux.app && open /Applications/umux.app",
+        windows:
+          'Unblock-File "$env:USERPROFILE\\Downloads\\umux_x64-setup.exe"; ' +
+          'Start-Process "$env:USERPROFILE\\Downloads\\umux_x64-setup.exe"',
         // The browser saves the file under the version-less alias name, so
         // these commands stay correct on every release without edits.
-        "AppImage":
-          "<p>No install needed — make it executable and run:</p>" +
-          "<code>chmod +x umux_amd64.AppImage &amp;&amp; ./umux_amd64.AppImage</code>",
-        ".deb":
-          "<p>Install from the downloaded file:</p>" +
-          "<code>sudo apt install ./umux_amd64.deb</code>",
-        ".rpm":
-          "<p>Install from the downloaded file:</p>" +
-          "<code>sudo dnf install ./umux_x86_64.rpm</code> (openSUSE: <code>zypper in</code>)",
+        "AppImage": "chmod +x umux_amd64.AppImage && ./umux_amd64.AppImage",
+        ".deb": "sudo apt install ./umux_amd64.deb",
+        ".rpm": "sudo dnf install ./umux_x86_64.rpm",
+      };
+      var activateIntro = {
+        macos:
+          "<p><strong>ActivatePresto</strong> — one command and umux runs. Open the DMG, drag umux to " +
+          "<em>Applications</em>, then paste this in Terminal and press Enter:</p>",
+        windows:
+          "<p><strong>ActivatePresto</strong> — one command and umux runs. When the download finishes, open " +
+          "<strong>PowerShell</strong>, paste this and press Enter — it clears the SmartScreen block and starts the installer:</p>",
+        "AppImage": "<p>No install needed — make it executable and run:</p>",
+        ".deb": "<p>Install from the downloaded file:</p>",
+        ".rpm": "<p>Install from the downloaded file:</p> (openSUSE: <code>zypper in</code>)",
       };
       document.querySelectorAll("[data-platform]").forEach(function (a) {
         a.addEventListener("click", function () {
-          openDialog("Thanks for downloading umux! 🎉", thanks);
+          var platform = a.getAttribute("data-platform");
+          openDialog(
+            "Thanks for downloading umux! 🎉",
+            thanks + (activateIntro[platform] || ""),
+            activate[platform]
+          );
         });
       });
       document.querySelectorAll("[data-install]").forEach(function (a) {
@@ -670,7 +765,11 @@
           var key = a.getAttribute("data-install");
           var extra =
             '<p>Full guide: <a href="https://github.com/CrystalPlatforms/umux#installation" target="_blank" rel="noopener">README → Installation</a></p>';
-          openDialog("Installing umux on Linux", (install[key] || "") + extra);
+          openDialog(
+            "Installing umux on Linux",
+            (activateIntro[key] || "") + extra,
+            activate[key]
+          );
         });
       });
 

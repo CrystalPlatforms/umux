@@ -90,9 +90,23 @@ To **update**, just download the new `.AppImage` and replace the old file. To **
 
 #### A.3 — Windows & macOS
 
-Each release ships a universal macOS image (`umux_<version>_universal.dmg`, Apple Silicon + Intel in one file). A Windows installer (`umux_<version>_x64-setup.exe`) arrives with the v1.0.0 release. Download, run the installer / drag to Applications, done.
+Each release ships a universal macOS image (`umux_<version>_universal.dmg`, Apple Silicon + Intel in one file) and a Windows installer (`umux_<version>_x64-setup.exe`). Download, run the installer / drag to Applications, done.
 
-> **Unsigned builds:** umux is free open source and uses no paid signing certificates. On first run, macOS will report an "unidentified developer" — right-click the app and choose **Open** (or run `xattr -cr /Applications/umux.app` in a terminal). On Windows, SmartScreen may show a blue warning — click **More info → Run anyway**. This only happens once.
+> **Unsigned builds — ActivatePresto:** umux is free open source and uses no paid signing certificates, so your system blocks the first launch once. Skip the click-through — run one command and umux starts:
+>
+> - **macOS** (after dragging umux to Applications):
+>
+>   ```sh
+>   xattr -cr /Applications/umux.app && open /Applications/umux.app
+>   ```
+>
+> - **Windows** (in PowerShell, not the old cmd):
+>
+>   ```powershell
+>   Unblock-File "$env:USERPROFILE\Downloads\umux_x64-setup.exe"; Start-Process "$env:USERPROFILE\Downloads\umux_x64-setup.exe"
+>   ```
+>
+> The manual way still works too: macOS right-click the app → **Open** (or System Settings → Privacy & Security → **Open Anyway**); Windows SmartScreen → **More info → Run anyway**. This only happens once.
 
 ---
 
