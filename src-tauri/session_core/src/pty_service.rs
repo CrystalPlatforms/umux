@@ -2220,11 +2220,26 @@ mod tests {
         let _ = wait_for_output(&rx, b" ", Duration::from_secs(3));
 
         svc.resize(&handle, 120, 40).expect("resize");
-        svc.write(&handle, b"stty size\n").expect("write");
 
-        // stty size prints "rows cols" -> after resize(120, 40): "40 120".
+        // The winsize lands on the pty through the service's I/O path; on a
+        // loaded CI runner the probe once raced it and `stty size` answered
+        // the OLD geometry ("24 80") — the resize had not been applied yet
+        // when the shell read it, and the run failed on a healthy commit.
+        // The assertion stays EXACT (still demands "40 120"); only the ask
+        // retries: up to 5 probes, each waiting out the new geometry, with a
+        // short settle between rounds so a stale answer drains before the
+        // next one goes out.
+        let mut answered = false;
+        for _ in 0..5 {
+            svc.write(&handle, b"stty size\n").expect("write");
+            if wait_for_output(&rx, b"40 120", Duration::from_secs(5)) {
+                answered = true;
+                break;
+            }
+            let _ = wait_for_output(&rx, b" ", Duration::from_secs(1));
+        }
         assert!(
-            wait_for_output(&rx, b"40 120", Duration::from_secs(5)),
+            answered,
             "expected `stty size` to report the new geometry (40 rows, 120 cols)"
         );
 
