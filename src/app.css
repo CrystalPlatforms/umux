@@ -1660,6 +1660,13 @@ body.is-dragging * {
   flex-shrink: 0;
 }
 
+/* PO round 2 (2026-11-22): Import + Export sit side by side in the same
+   action cell; each keeps its own dropdown anchor. */
+.settings-import--pair {
+  display: flex;
+  gap: 8px;
+}
+
 /* Default shell (#77, v1.6.0): the picker button reuses .btn-primary (with
    its press effect); a min-width keeps the label steady and a long custom
    command ellipsizes instead of squeezing the row. The custom-entry cell

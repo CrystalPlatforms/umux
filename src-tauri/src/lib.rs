@@ -1366,76 +1366,143 @@ impl TransferIds {
     }
 }
 
-/// The Desktop↔Terminal transfer's UI half (F1, v1.9.0 / #80): the Settings
-/// buttons perform the SAME moves the B7 CLI commands do — through
-/// `store_core::transfer::merge_states`, the one merge implementation any
-/// UI button rides (no second implementation on either side).
+/// The Desktop↔Terminal transfer's UI half (#80, REWORKED 2026-11-22): the
+/// wizard. Settings → Import → "from Terminal" / "to Terminal" opens the
+/// SAME picker the cmux import uses, over THREE thin commands (the old
+/// one-shot `workspaces_transfer` is gone):
 ///
-/// The buttons do NOT shell out to the `umux` CLI on purpose: the CLI's
-/// import is an offline store write, refused by the single-writer gate
-/// (#125) whenever the app answers the socket — i.e. in the only context
-/// the buttons exist — and a merge INTO the desk store must reach the app's
-/// LIVE state (a child process writing the file behind the running app
-/// would be clobbered by its next save). So "export" writes the TERM store
-/// here (it has no live owner), while "import" returns the merged tree for
-/// the frontend to adopt and persist through its normal save_workspaces
-/// path — the app stays the single writer of its own store. Same merge
-/// semantics as `umux workspaces import desk --term` / `import term --desk`:
-/// additive, collisions suffixed ` from desk|term`, fresh ids, the source
-/// store is never written.
+///   - `workspaces_transfer_read` scans the OTHER store (READ-ONLY) — the
+///     wizard's scan beat;
+///   - `workspaces_transfer_preview` merges a SCOPED source doc into the
+///     target through `store_core::transfer::merge_states` — the ONE merge
+///     implementation the CLI shares — and returns the full planned tree
+///     plus the added rows (collision-suffixed FINAL names): the wizard's
+///     live preview, writing nothing;
+///   - `workspaces_transfer_export` writes the previewed tree to the TERM
+///     store — the only writing beat, export-only (import applies the
+///     planned tree through the app's normal save path, so the app stays
+///     the single writer of its own store).
+///
+/// None of these shell out to the `umux` CLI (the old command's note
+/// stands): a CLI import is an offline store write refused by the
+/// single-writer gate (#125) whenever the app answers the socket, and a
+/// merge INTO the desk store must reach the app's LIVE state (a child
+/// process writing the file behind the running app would be clobbered by
+/// its next save). Direction words mirror the CLI: "import" = the TERM
+/// store is the source / the desk store the target, "export" the mirror
+/// image — so the collision-suffix label stays "term" / "desk".
 #[tauri::command]
-async fn workspaces_transfer(
+async fn workspaces_transfer_read(
     direction: String,
     app: AppHandle,
 ) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let term_store = WorkspaceStore::new(store_core::paths::term_config_path());
-        let desk_store = app.state::<WorkspaceStore>();
-        let mut ids = TransferIds::new();
-        match direction.as_str() {
-            // "Export to Terminal": merge the DESK store's saved state into
-            // the TERM store (`umux workspaces import desk --term`'s twin).
-            "export" => {
-                let desk = desk_store.load();
-                let live_term = term_store.load();
-                let planned =
-                    store_core::transfer::merge_states(&live_term, &desk, "desk", &mut || {
-                        ids.next()
-                    });
-                let doc = serde_json::json!({
-                    "imported": {
-                        "from": "desk",
-                        "workspaces": planned.workspaces.len() - live_term.workspaces.len(),
-                        "groups": planned.groups.len() - live_term.groups.len(),
-                    }
-                });
-                term_store.save(&planned).map_err(|e| e.to_string())?;
-                Ok(doc)
-            }
-            // "Import from Terminal": merge the TERM store's saved state into
-            // the desk store's LIVE state (`import term --desk`'s twin). The
-            // merged tree rides back whole; the frontend adopts it and
-            // persists through save_workspaces.
-            "import" => {
-                let desk = desk_store.load();
-                let live_term = term_store.load();
-                let planned =
-                    store_core::transfer::merge_states(&desk, &live_term, "term", &mut || {
-                        ids.next()
-                    });
-                Ok(serde_json::json!({
-                    "imported": {
-                        "from": "term",
-                        "workspaces": planned.workspaces.len() - desk.workspaces.len(),
-                        "groups": planned.groups.len() - desk.groups.len(),
-                    },
-                    "state": planned,
-                }))
-            }
-            other => Err(format!(
-                "unknown transfer direction \"{other}\" — use \"export\" or \"import\""
-            )),
+    tauri::async_runtime::spawn_blocking(move || match direction.as_str() {
+        "import" => {
+            let term = WorkspaceStore::new(store_core::paths::term_config_path()).load();
+            serde_json::to_value(term).map_err(|e| e.to_string())
         }
+        "export" => {
+            let desk = app.state::<WorkspaceStore>().load();
+            serde_json::to_value(desk).map_err(|e| e.to_string())
+        }
+        other => Err(format!(
+            "unknown transfer direction \"{other}\" — use \"import\" or \"export\""
+        )),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn workspaces_transfer_preview(
+    direction: String,
+    source: serde_json::Value,
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // The frontend's scope filter (transferWizard.ts) shaped this doc;
+        // a malformed one is refused HERE, before anything loads.
+        let scoped: WorkspaceData = serde_json::from_value(source).map_err(|e| e.to_string())?;
+        let (live, label) = match direction.as_str() {
+            "import" => (app.state::<WorkspaceStore>().load(), "term"),
+            "export" => (
+                WorkspaceStore::new(store_core::paths::term_config_path()).load(),
+                "desk",
+            ),
+            other => {
+                return Err(format!(
+                    "unknown transfer direction \"{other}\" — use \"import\" or \"export\""
+                ))
+            }
+        };
+        let mut ids = TransferIds::new();
+        let planned = store_core::transfer::merge_states(&live, &scoped, label, &mut || {
+            ids.next()
+        });
+        let (rows, group_rows) = store_core::transfer::added_rows(&live, &planned);
+        Ok(serde_json::json!({
+            "state": planned,
+            "workspaces": rows,
+            "groups": group_rows,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn workspaces_transfer_export(
+    planned: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let tree: WorkspaceData = serde_json::from_value(planned).map_err(|e| e.to_string())?;
+        let term_store = WorkspaceStore::new(store_core::paths::term_config_path());
+        let live = term_store.load();
+        let doc = serde_json::json!({
+            "imported": {
+                "from": "desk",
+                "workspaces": tree.workspaces.len().saturating_sub(live.workspaces.len()),
+                "groups": tree.groups.len().saturating_sub(live.groups.len()),
+            }
+        });
+        term_store.save(&tree).map_err(|e| e.to_string())?;
+        Ok(doc)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "to file (.json)" (PO round 2, 2026-11-22): the whole persisted DESK
+/// layout doc as pretty JSON into the user's Downloads folder — one local
+/// file write, no dialog, no wizard (the written path mirrors back into the
+/// Settings row). Read-only for the app's own store: nothing here changes
+/// the live state. The filename carries a UTC stamp
+/// (`umux-layouts-YYYY-MM-DD-HHMMSS.json`, `export_file_stamp`) so exports
+/// sort naturally and never overwrite each other.
+#[tauri::command]
+async fn workspaces_export_file(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let doc = app.state::<WorkspaceStore>().load();
+        let content = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let name = format!("umux-layouts-{}.json", export_file_stamp(secs));
+        let dir = match app.path().download_dir() {
+            Ok(dir) => dir,
+            Err(_) => {
+                // No Downloads resolution (rare, sandboxed): the conventional
+                // path off the home dir is the honest fallback.
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .map_err(|_| "could not resolve the Downloads folder".to_string())?;
+                std::path::Path::new(&home).join("Downloads")
+            }
+        };
+        let path = dir.join(&name);
+        std::fs::write(&path, content).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "path": path.display().to_string() }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2282,7 +2349,10 @@ pub fn run() {
             ssh_close,
             load_workspaces,
             save_workspaces,
-            workspaces_transfer,
+            workspaces_transfer_read,
+            workspaces_transfer_preview,
+            workspaces_transfer_export,
+            workspaces_export_file,
             set_notifications_muted,
             notifications_muted,
             notify_panel_needs_input,
@@ -3159,5 +3229,58 @@ mod tests {
             flags.contains(tauri_plugin_window_state::StateFlags::FULLSCREEN),
             "Windows and Linux keep the fullscreen restore"
         );
+    }
+}
+
+/// The layouts export's filename stamp ("to file (.json)", PO round 2,
+/// 2026-11-22): pure UTC "YYYY-MM-DD-HHMMSS" from UNIX seconds — the file
+/// sorts naturally and two exports never collide within a second. No chrono
+/// dependency: Hinnant's civil-from-days over the epoch day count.
+fn export_file_stamp(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let rem = unix_secs % 86_400;
+    // Civil-from-days (Howard Hinnant): valid for the whole u64-seconds range
+    // that matters here; negative days cannot occur (u64 input cast).
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    let (h, mi, s) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    format!("{y:04}-{m:02}-{d:02}-{h:02}{mi:02}{s:02}")
+}
+
+#[cfg(test)]
+mod export_stamp_tests {
+    use super::export_file_stamp;
+
+    #[test]
+    fn epoch_zero_is_new_years_day_1970() {
+        assert_eq!(export_file_stamp(0), "1970-01-01-000000");
+    }
+
+    #[test]
+    fn last_second_of_day_rolls_into_the_same_date() {
+        assert_eq!(export_file_stamp(86_399), "1970-01-01-235959");
+    }
+
+    #[test]
+    fn next_day_is_the_second() {
+        assert_eq!(export_file_stamp(86_400), "1970-01-02-000000");
+    }
+
+    // Well-known epoch milestones (UTC), year and leap-year boundaries
+    // included via the 400-year civil algorithm.
+    #[test]
+    fn known_milestones_convert() {
+        assert_eq!(export_file_stamp(1_600_000_000), "2020-09-13-122640");
+        assert_eq!(export_file_stamp(1_700_000_000), "2023-11-14-221320");
+        // Leap day: 2024-02-29 00:00:00 UTC = 1709164800.
+        assert_eq!(export_file_stamp(1_709_164_800), "2024-02-29-000000");
     }
 }

@@ -508,12 +508,16 @@ describe('SettingsDialog', () => {
 })
 
 
-// --- Import dropdown → wizard (#59 rework) -----------------------------------
+// --- Import + Export dropdowns → wizards / file (#59 rework; #80 moved in,
+// --- 2026-11-22; Export button + file export, 2026-11-22 PO round 2) --------
 //
-// The "from cmux" item now OPENS the import wizard (rendered by the shell);
-// this dialog only reports upward. The item is absent on Windows (v1.2.0
-// decision #4). The wizard's own behavior lives in CmuxImportWizard.test.tsx.
-describe('SettingsDialog import dropdown (#59 rework)', () => {
+// The row carries TWO buttons now: "Import" unfolds from cmux / from umux
+// Terminal; "Export" unfolds to umux Terminal (the wizard) / to file (.json)
+// (a direct write to Downloads, reported upward). Both report upward — this
+// dialog stays invoke-free. The cmux item stays absent on Windows (v1.2.0
+// decision #4); every other item works on every platform. The wizard's own
+// behavior lives in ImportWizardDialog.test.tsx.
+describe('SettingsDialog import + export dropdowns (PO round 2, 2026-11-22)', () => {
   it('the "from cmux" item reports upward instead of importing inline', () => {
     const onImportWizard = vi.fn()
     const { getByTestId } = render(
@@ -531,7 +535,42 @@ describe('SettingsDialog import dropdown (#59 rework)', () => {
     expect(onImportWizard).toHaveBeenCalledTimes(1)
   })
 
-  it('hides the whole import row on Windows', () => {
+  it('the Terminal items report their direction upward, one press each', () => {
+    const onTransferWizard = vi.fn()
+    const onExportFile = vi.fn()
+    const { getByTestId } = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onTransferWizard={onTransferWizard}
+        onExportFile={onExportFile}
+      />,
+    )
+
+    fireEvent.click(getByTestId('import-toggle'))
+    const importTerminal = getByTestId('import-terminal')
+    expect(importTerminal.textContent).toBe('from umux Terminal')
+    fireEvent.click(importTerminal)
+    expect(onTransferWizard).toHaveBeenCalledTimes(1)
+    expect(onTransferWizard).toHaveBeenLastCalledWith('import')
+
+    fireEvent.click(getByTestId('export-toggle'))
+    const exportTerminal = getByTestId('export-terminal')
+    expect(exportTerminal.textContent).toBe('to umux Terminal')
+    fireEvent.click(exportTerminal)
+    expect(onTransferWizard).toHaveBeenCalledTimes(2)
+    expect(onTransferWizard).toHaveBeenLastCalledWith('export')
+
+    fireEvent.click(getByTestId('export-toggle'))
+    const exportFile = getByTestId('export-file')
+    expect(exportFile.textContent).toBe('to file (.json)')
+    fireEvent.click(exportFile)
+    expect(onExportFile).toHaveBeenCalledTimes(1)
+    expect(onTransferWizard).toHaveBeenCalledTimes(2) // file export never opens the wizard
+  })
+
+  it('hides the whole row on Windows when only cmux is wired', () => {
     Object.defineProperty(window.navigator, 'platform', {
       value: 'Win32',
       configurable: true,
@@ -549,6 +588,64 @@ describe('SettingsDialog import dropdown (#59 rework)', () => {
     } finally {
       delete (window.navigator as { platform?: string }).platform
     }
+  })
+
+  it('on Windows the row stays for the Terminal items — cmux stays hidden, export shows both', () => {
+    Object.defineProperty(window.navigator, 'platform', {
+      value: 'Win32',
+      configurable: true,
+    })
+    try {
+      const { getByTestId, queryByTestId } = render(
+        <SettingsDialog
+          settings={defaultSettings}
+          onChange={() => {}}
+          onClose={() => {}}
+          onImportWizard={() => {}}
+          onTransferWizard={() => {}}
+          onExportFile={() => {}}
+        />,
+      )
+      expect(getByTestId('import-toggle')).toBeTruthy()
+      expect(getByTestId('export-toggle')).toBeTruthy()
+      fireEvent.click(getByTestId('import-toggle'))
+      expect(getByTestId('import-terminal')).toBeTruthy()
+      expect(queryByTestId('import-cmux')).toBeNull()
+
+      fireEvent.click(getByTestId('export-toggle'))
+      expect(getByTestId('export-terminal')).toBeTruthy()
+      expect(getByTestId('export-file')).toBeTruthy()
+    } finally {
+      delete (window.navigator as { platform?: string }).platform
+    }
+  })
+
+  it('the file-export status line renders under the row; errors take the error style', () => {
+    const info = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onExportFile={() => {}}
+        exportStatus={{ kind: 'info', text: 'Exported to /home/adam/Downloads/umux-layouts.json' }}
+      />,
+    )
+    expect(info.getByTestId('export-status').textContent).toContain('Exported to')
+    info.unmount()
+
+    const failure = render(
+      <SettingsDialog
+        settings={defaultSettings}
+        onChange={() => {}}
+        onClose={() => {}}
+        onExportFile={() => {}}
+        exportStatus={{ kind: 'error', text: 'Downloads is not writable' }}
+      />,
+    )
+    expect(failure.getByTestId('export-status').textContent).toContain(
+      'Downloads is not writable',
+    )
+    expect(failure.getByTestId('export-status').className).toContain('settings-status--error')
   })
 })
 
@@ -1656,94 +1753,26 @@ describe('SettingsDialog: launch-mode switch (#78, v1.9.0)', () => {
   })
 })
 
-// Desktop ↔ Terminal transfer (#80, v1.9.0 F1): the two buttons report
-// UPWARD (the component stays invoke-free — the parent shells out to the
-// SAME `umux workspaces import desk|term` code path B7's tests pin, via the
-// backend command). Absent onTransfer = the row is not rendered at all.
-describe('SettingsDialog: Desktop-Terminal transfer row (#80, v1.9.0)', () => {
-  it('renders the row only when the parent wires the transfer', () => {
-    const bare = render(
-      <SettingsDialog settings={defaultSettings} onChange={() => {}} onClose={() => {}} />,
-    )
-    expect(bare.queryByTestId('transfer-row')).toBeNull()
-    expect(bare.queryByTestId('transfer-export')).toBeNull()
-    expect(bare.queryByTestId('transfer-import')).toBeNull()
-    bare.unmount()
-
-    const wired = render(
+// Desktop ↔ Terminal transfer (#80, v1.9.0 F1) → REWORKED 2026-11-22 (PO):
+// the standalone row is GONE — the two actions live in the Import dropdown
+// ("from Terminal" / "to Terminal"), each opening the SAME wizard the cmux
+// import uses. The dialog therefore renders no transfer row, no transfer
+// buttons and no transfer status line ever; the old onTransfer/transferStatus
+// props are replaced by onTransferWizard(direction).
+describe('SettingsDialog: the Desktop-Terminal row is gone (#80 moved into Import, 2026-11-22)', () => {
+  it('no transfer row, buttons or status line render — even fully wired', () => {
+    const { queryByTestId } = render(
       <SettingsDialog
         settings={defaultSettings}
         onChange={() => {}}
         onClose={() => {}}
-        onTransfer={() => {}}
+        onImportWizard={() => {}}
+        onTransferWizard={() => {}}
       />,
     )
-    expect(wired.getByTestId('transfer-row')).toBeTruthy()
-    expect(wired.getByTestId('transfer-export')).toBeTruthy()
-    expect(wired.getByTestId('transfer-import')).toBeTruthy()
-  })
-
-  it('each button reports its direction upward — the invocation the parent shells out', () => {
-    const onTransfer = vi.fn()
-    const { getByTestId } = render(
-      <SettingsDialog
-        settings={defaultSettings}
-        onChange={() => {}}
-        onClose={() => {}}
-        onTransfer={onTransfer}
-      />,
-    )
-
-    fireEvent.click(getByTestId('transfer-export'))
-    expect(onTransfer).toHaveBeenCalledTimes(1)
-    expect(onTransfer).toHaveBeenLastCalledWith('export')
-
-    fireEvent.click(getByTestId('transfer-import'))
-    expect(onTransfer).toHaveBeenCalledTimes(2)
-    expect(onTransfer).toHaveBeenLastCalledWith('import')
-  })
-
-  it('a busy transfer disables both buttons so two transfers never race', () => {
-    const onTransfer = vi.fn()
-    const { getByTestId } = render(
-      <SettingsDialog
-        settings={defaultSettings}
-        onChange={() => {}}
-        onClose={() => {}}
-        onTransfer={onTransfer}
-        transferStatus={{ kind: 'busy', text: 'Exporting to umux Terminal…' }}
-      />,
-    )
-
-    expect(getByTestId('transfer-export')).toBeDisabled()
-    expect(getByTestId('transfer-import')).toBeDisabled()
-    fireEvent.click(getByTestId('transfer-export'))
-    expect(onTransfer).not.toHaveBeenCalled()
-  })
-
-  it('the status line renders the outcome; errors take the error style', () => {
-    const info = render(
-      <SettingsDialog
-        settings={defaultSettings}
-        onChange={() => {}}
-        onClose={() => {}}
-        onTransfer={() => {}}
-        transferStatus={{ kind: 'info', text: 'Merged 2 workspaces and 1 group into umux Terminal.' }}
-      />,
-    )
-    expect(info.getByTestId('transfer-status').textContent).toContain('Merged 2 workspaces')
-    info.unmount()
-
-    const failure = render(
-      <SettingsDialog
-        settings={defaultSettings}
-        onChange={() => {}}
-        onClose={() => {}}
-        onTransfer={() => {}}
-        transferStatus={{ kind: 'error', text: 'transfer failed' }}
-      />,
-    )
-    expect(failure.getByTestId('transfer-status').textContent).toContain('transfer failed')
-    expect(failure.getByTestId('transfer-status').className).toContain('settings-status--error')
+    expect(queryByTestId('transfer-row')).toBeNull()
+    expect(queryByTestId('transfer-export')).toBeNull()
+    expect(queryByTestId('transfer-import')).toBeNull()
+    expect(queryByTestId('transfer-status')).toBeNull()
   })
 })

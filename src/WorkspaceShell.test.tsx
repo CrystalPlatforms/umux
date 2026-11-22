@@ -3780,6 +3780,266 @@ describe('cmux import (#54)', () => {
   // line left to clear itself, so its old 10-second test went with it.
 })
 
+// Desktop↔Terminal transfer wizard (#80 REWORK, 2026-11-22): "from Terminal"
+// and "to Terminal" live in the Import dropdown and open the SAME wizard the
+// cmux import uses — scan reads the other store (read-only), the preview
+// merges WITHOUT writing (the Rust-side merge_states through the preview
+// command), Apply lands exactly the previewed state. Import adopts the
+// planned tree through the app's normal save path (the app stays the single
+// writer of its own store); export hands the planned tree to the backend,
+// which writes the TERM store (it has no live owner).
+//
+// Assumptions encoded:
+//  - The raw docs ride serde camelCase: { workspaces, groups, order }.
+//  - The preview command returns { state, workspaces, groups } — state is
+//    the FULL planned tree, the rows are the display lists (already the
+//    collision-suffixed final names).
+//  - Import Apply persists the planned tree via save_workspaces (no second
+//    merge); export Apply invokes workspaces_transfer_export and never
+//    touches the app's own store.
+describe('Desktop-Terminal transfer wizard (#80 rework, 2026-11-22)', () => {
+  const termDoc = {
+    workspaces: [
+      { id: 'tw-1', name: 'Term Proj', tabs: [{ id: 'tt-1', layout: { id: 'tl-1', kind: 'leaf' } }] },
+    ],
+    groups: [],
+    order: ['tw-1'],
+  }
+  const plannedDoc = {
+    state: {
+      workspaces: [
+        { id: 'nw-1', name: 'Term Proj', tabs: [{ id: 'nt-1', layout: { id: 'nl-1', kind: 'leaf' } }] },
+      ],
+      groups: [],
+      order: ['nw-1'],
+    },
+    workspaces: [{ name: 'Term Proj', groupName: null, tabCount: 1 }],
+    groups: [],
+  }
+
+  beforeEach(() => {
+    invokeMock.mockReset()
+    invokeMock.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      if (cmd === 'workspaces_transfer_read') {
+        if ((args as { direction: string }).direction === 'import')
+          return Promise.resolve(termDoc)
+        return Promise.resolve({ workspaces: [], groups: [], order: [] })
+      }
+      if (cmd === 'workspaces_transfer_preview')
+        return Promise.resolve(
+          (args as { direction: string }).direction === 'import'
+            ? plannedDoc
+            : { state: { workspaces: [], groups: [], order: [] }, workspaces: [], groups: [] },
+        )
+      return Promise.resolve(undefined)
+    })
+  })
+
+  it('"from Terminal" opens the wizard, previews without writing, and Apply adopts the planned tree', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(await screen.findByTestId('import-toggle'))
+    fireEvent.click(await screen.findByTestId('import-terminal'))
+
+    // The scan read the TERM store through the read-only command…
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('workspaces_transfer_read', {
+        direction: 'import',
+      }),
+    )
+    // …the preview merged it against the live tree WITHOUT any write…
+    await screen.findByTestId('wizard-preview-tree')
+    expect(screen.getByTestId('wizard-preview-tree').textContent).toContain('Term Proj')
+    expect(
+      invokeMock.mock.calls.some(
+        (c) =>
+          c[0] === 'workspaces_transfer_preview' &&
+          (c[1] as { direction: string }).direction === 'import',
+      ),
+    ).toBe(true)
+    expect(invokeMock.mock.calls.some((c) => c[0] === 'save_workspaces')).toBe(false)
+
+    // …and Apply adopted exactly the previewed tree through the app's normal
+    // save path, closing both dialogs.
+    fireEvent.click(screen.getByTestId('wizard-apply'))
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_workspaces',
+        expect.objectContaining({
+          workspaces: [expect.objectContaining({ name: 'Term Proj' })],
+        }),
+      ),
+    )
+    await waitFor(() => {
+      expect(screen.queryByTestId('import-wizard-dialog')).toBeNull()
+      expect(screen.queryByTestId('settings-dialog')).toBeNull()
+    })
+  })
+
+  it('"to Terminal" previews the desk side and Apply writes the TERM store — never the app\'s own', async () => {
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(await screen.findByTestId('export-toggle'))
+    fireEvent.click(await screen.findByTestId('export-terminal'))
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('workspaces_transfer_read', {
+        direction: 'export',
+      }),
+    )
+    await screen.findByTestId('wizard-empty')
+
+    // The desk store here is empty — with data the Apply below would fire.
+  })
+
+  it('"to Terminal" with data on the desk side exports the planned tree on Apply', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [{ id: 'dw-1', name: 'Desk Proj' }],
+          groups: [],
+          order: ['dw-1'],
+        })
+      if (cmd === 'workspaces_transfer_read')
+        return Promise.resolve({
+          workspaces: [{ id: 'dw-1', name: 'Desk Proj' }],
+          groups: [],
+          order: ['dw-1'],
+        })
+      if (cmd === 'workspaces_transfer_preview')
+        return Promise.resolve({
+          state: {
+            workspaces: [{ id: 'xw-1', name: 'Desk Proj', tabs: [{ id: 'xt-1', layout: { id: 'xl-1', kind: 'leaf' } }] }],
+            groups: [],
+            order: ['xw-1'],
+          },
+          workspaces: [{ name: 'Desk Proj', groupName: null, tabCount: 1 }],
+          groups: [],
+        })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(await screen.findByTestId('export-toggle'))
+    fireEvent.click(await screen.findByTestId('export-terminal'))
+
+    await screen.findByTestId('wizard-preview-tree')
+    expect(
+      invokeMock.mock.calls.some(
+        (c) =>
+          c[0] === 'workspaces_transfer_preview' &&
+          (c[1] as { direction: string }).direction === 'export',
+      ),
+    ).toBe(true)
+
+    fireEvent.click(screen.getByTestId('wizard-apply'))
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        'workspaces_transfer_export',
+        expect.objectContaining({
+          planned: expect.objectContaining({
+            workspaces: [expect.objectContaining({ name: 'Desk Proj' })],
+          }),
+        }),
+      ),
+    )
+    // The app's own store is NOT rewritten by an export.
+    expect(invokeMock.mock.calls.some((c) => c[0] === 'save_workspaces')).toBe(false)
+    await waitFor(() => {
+      expect(screen.queryByTestId('import-wizard-dialog')).toBeNull()
+      expect(screen.queryByTestId('settings-dialog')).toBeNull()
+    })
+  })
+
+  it('an empty TERM store shows the empty state — nothing to import', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces') return Promise.resolve({ workspaces: [] })
+      if (cmd === 'workspaces_transfer_read')
+        return Promise.resolve({ workspaces: [], groups: [], order: [] })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(await screen.findByTestId('import-toggle'))
+    fireEvent.click(await screen.findByTestId('import-terminal'))
+
+    const empty = await screen.findByTestId('wizard-empty')
+    expect(empty.textContent).toContain('Nothing to import')
+    expect(screen.queryByTestId('wizard-preview-tree')).toBeNull()
+  })
+
+  it('"to file (.json)" writes the layouts to Downloads and reports the path — no wizard, no store write', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'load_workspaces')
+        return Promise.resolve({
+          workspaces: [{ id: 'dw-1', name: 'Desk Proj' }],
+          groups: [],
+          order: ['dw-1'],
+        })
+      if (cmd === 'workspaces_export_file')
+        return Promise.resolve({ path: '/home/adam/Downloads/umux-layouts-2026-11-22-120000.json' })
+      return Promise.resolve(undefined)
+    })
+    render(<WorkspaceShell />)
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(await screen.findByTestId('export-toggle'))
+    fireEvent.click(await screen.findByTestId('export-file'))
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('workspaces_export_file'))
+    const status = await screen.findByTestId('export-status')
+    expect(status.textContent).toContain(
+      '/home/adam/Downloads/umux-layouts-2026-11-22-120000.json',
+    )
+    // The file export never rewrites the app's own store and never opens a
+    // wizard — the settings dialog stays open with the confirmation line.
+    expect(invokeMock.mock.calls.some((c) => c[0] === 'save_workspaces')).toBe(false)
+    expect(screen.queryByTestId('import-wizard-dialog')).toBeNull()
+    expect(screen.getByTestId('settings-dialog')).toBeTruthy()
+  })
+
+  it('the "Exported to…" confirmation disappears after 7 seconds (PO, 2026-11-22)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'load_workspaces')
+          return Promise.resolve({
+            workspaces: [{ id: 'dw-1', name: 'Desk Proj' }],
+            groups: [],
+            order: ['dw-1'],
+          })
+        if (cmd === 'workspaces_export_file')
+          return Promise.resolve({ path: '/home/adam/Downloads/umux-layouts-1.json' })
+        return Promise.resolve(undefined)
+      })
+      render(<WorkspaceShell />)
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('load_workspaces'))
+
+      fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+      fireEvent.click(await screen.findByTestId('export-toggle'))
+      fireEvent.click(await screen.findByTestId('export-file'))
+      expect(await screen.findByTestId('export-status')).toBeTruthy()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(7000)
+      })
+      expect(screen.queryByTestId('export-status')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('keyboard handoff on switch (HITL, #53 fix round)', () => {
   beforeEach(() => {
     invokeMock.mockReset()

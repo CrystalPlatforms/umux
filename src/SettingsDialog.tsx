@@ -12,7 +12,7 @@
 // a stale key in an old settings.json is ignored.
 //
 // Import row (#59, HITL rework 2026-08-30): the "from cmux" item now OPENS
-// the import wizard (CmuxImportWizard — scan → choose with a live preview →
+// the import wizard (ImportWizardDialog — scan → choose with a live preview →
 // apply) instead of applying immediately; this dialog only reports the
 // outcome through its status line. Hidden on Windows (v1.2.0 decision #4).
 //
@@ -212,8 +212,9 @@ export function SettingsDialog({
   onSessionExtend,
   onSessionStop,
   onSessionExpiry,
-  onTransfer,
-  transferStatus = null,
+  onTransferWizard,
+  onExportFile,
+  exportStatus = null,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
@@ -300,16 +301,18 @@ export function SettingsDialog({
   // whose settled view (active=false, lastEndedAt) is the end state's
   // source — the UI never declares expiry on its own.
   onSessionExpiry?: () => void
-  // The Desktop↔Terminal transfer (#80, v1.9.0 F1): the two buttons report
-  // UPWARD like every control here (this component stays invoke-free) — the
-  // parent runs the transfer through the backend command that rides
-  // store_core::transfer::merge_states, the same merge the B7 CLI commands
-  // perform. Absent = the row is not rendered.
-  onTransfer?: (direction: 'export' | 'import') => void
-  // The last transfer outcome, mirrored from the parent. `busy` disables the
-  // buttons (two transfers must never race); `error` renders in the error
-  // style. null = no status line.
-  transferStatus?: { kind: 'busy' | 'info' | 'error'; text: string } | null
+  // The Desktop↔Terminal moves (#80, REWORKED 2026-11-22): import + export
+  // live in TWO dropdowns beside each other — Import ("from cmux" / "from
+  // umux Terminal") and Export ("to umux Terminal" wizard / "to file (.json)"
+  // written straight to Downloads). Each item reports UPWARD and the shell
+  // opens the wizard or runs the export (the standalone Desktop↔Terminal row
+  // is gone). Absent = the item is not rendered.
+  onTransferWizard?: (direction: 'import' | 'export') => void
+  onExportFile?: () => void
+  // The file export's last outcome, mirrored from the parent (busy disables
+  // the item so two writes never race; info shows the written path; error
+  // renders in the error style). null = no line.
+  exportStatus?: { kind: 'busy' | 'info' | 'error'; text: string } | null
 }) {
   // The sub-views (2026-10-02 rework, Adam): 'main' is the regular settings
   // page; 'storestation', 'core' and 'reset' are the dedicated screens the
@@ -384,21 +387,28 @@ export function SettingsDialog({
   // it — the same interaction pattern as the header's "+" dropdown.
   const [importOpen, setImportOpen] = useState(false)
   const importRef = useRef<HTMLDivElement | null>(null)
+  // The Export dropdown (PO round 2, 2026-11-22): the same pattern, one
+  // independent menu — opening one never implies the other.
+  const [exportOpen, setExportOpen] = useState(false)
+  const exportRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
-    if (!importOpen) return
+    if (!importOpen && !exportOpen) return
     const close = (e: PointerEvent) => {
-      if (
+      const inImport =
         importRef.current != null &&
         e.target instanceof Node &&
         importRef.current.contains(e.target)
-      ) {
-        return
-      }
+      const inExport =
+        exportRef.current != null &&
+        e.target instanceof Node &&
+        exportRef.current.contains(e.target)
+      if (inImport || inExport) return
       setImportOpen(false)
+      setExportOpen(false)
     }
     window.addEventListener('pointerdown', close)
     return () => window.removeEventListener('pointerdown', close)
-  }, [importOpen])
+  }, [importOpen, exportOpen])
 
   // The Default-shell picker (#77) reuses that exact dropdown interaction —
   // open state + close on any press outside it. The menu is FIXED-positioned
@@ -704,90 +714,121 @@ export function SettingsDialog({
           </>
         )}
 
-        {/* Import row: same layout as the switches — label on the left, the
-            action on the right. "Import" unfolds a dropdown; its "from cmux"
-            item opens the import WIZARD (#59 rework). Hidden on Windows
-            (v1.2.0 decision #4). */}
-        {onImportWizard != null && !isWindowsPlatform() && (
+        {/* Import + Export row (#80 rework, PO round 2): TWO buttons in the
+            right-hand slot. Import unfolds "from cmux" (hidden on Windows,
+            v1.2.0 decision #4 — but the BUTTON stays there for the Terminal
+            item, which works everywhere) and "from umux Terminal". Export
+            unfolds "to umux Terminal" (the wizard) and "to file (.json)" (a
+            direct Downloads write). The file export's outcome mirrors back
+            as the status line under the row; a busy write disables its item
+            so two writes never race. */}
+        {((onImportWizard != null && !isWindowsPlatform()) ||
+          onTransferWizard != null ||
+          onExportFile != null) && (
           <>
             <div className="settings-row">
               <div className="settings-row__text">
                 <span className="settings-row__label">
-                  Import your layouts from another apps
+                  Import / export your layouts
                 </span>
               </div>
-              <div className="settings-import" ref={importRef}>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  data-testid="import-toggle"
-                  aria-expanded={importOpen}
-                  onClick={() => setImportOpen((o) => !o)}
-                >
-                  Import
-                </button>
-                {importOpen && (
-                  <div className="create-dropdown" role="menu">
+              <div className="settings-import settings-import--pair">
+                {((onImportWizard != null && !isWindowsPlatform()) ||
+                  onTransferWizard != null) && (
+                  <div className="settings-import" ref={importRef}>
                     <button
-                      className="menu-item"
-                      role="menuitem"
-                      data-testid="import-cmux"
-                      onClick={() => {
-                        setImportOpen(false)
-                        onImportWizard()
-                      }}
+                      type="button"
+                      className="btn-primary"
+                      data-testid="import-toggle"
+                      aria-expanded={importOpen}
+                      onClick={() => setImportOpen((o) => !o)}
                     >
-                      from cmux
+                      Import
                     </button>
+                    {importOpen && (
+                      <div className="create-dropdown" role="menu">
+                        {onImportWizard != null && !isWindowsPlatform() && (
+                          <button
+                            className="menu-item"
+                            role="menuitem"
+                            data-testid="import-cmux"
+                            onClick={() => {
+                              setImportOpen(false)
+                              onImportWizard()
+                            }}
+                          >
+                            from cmux
+                          </button>
+                        )}
+                        {onTransferWizard != null && (
+                          <button
+                            className="menu-item"
+                            role="menuitem"
+                            data-testid="import-terminal"
+                            onClick={() => {
+                              setImportOpen(false)
+                              onTransferWizard('import')
+                            }}
+                          >
+                            from umux Terminal
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
+                {((onTransferWizard != null || onExportFile != null) && (
+                  <div className="settings-import" ref={exportRef}>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      data-testid="export-toggle"
+                      aria-expanded={exportOpen}
+                      onClick={() => setExportOpen((o) => !o)}
+                    >
+                      Export
+                    </button>
+                    {exportOpen && (
+                      <div className="create-dropdown" role="menu">
+                        {onTransferWizard != null && (
+                          <button
+                            className="menu-item"
+                            role="menuitem"
+                            data-testid="export-terminal"
+                            onClick={() => {
+                              setExportOpen(false)
+                              onTransferWizard('export')
+                            }}
+                          >
+                            to umux Terminal
+                          </button>
+                        )}
+                        {onExportFile != null && (
+                          <button
+                            className="menu-item"
+                            role="menuitem"
+                            data-testid="export-file"
+                            disabled={exportStatus?.kind === 'busy'}
+                            onClick={() => {
+                              setExportOpen(false)
+                              onExportFile()
+                            }}
+                          >
+                            to file (.json)
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
-          </>
-        )}
-        {/* Desktop ↔ Terminal transfer (#80, v1.9.0 F1): the same moves the
-            `umux workspaces import desk|term` CLI commands perform — one
-            merge code path behind the parent's invoke. The row renders only
-            when the parent wires the transfer (onTransfer); a failed run
-            degrades into the status line, never silence. While a transfer is
-            busy both buttons disable, so two transfers can never race. */}
-        {onTransfer != null && (
-          <>
-            <div className="settings-row" data-testid="transfer-row">
-              <div className="settings-row__text">
-                <span className="settings-row__label">Desktop ↔ Terminal</span>
-                <span className="settings-row__description">
-                  Move your workspaces between this app and umux Terminal.
-                  Merges — nothing is overwritten.
-                </span>
-              </div>
-              <div className="settings-import">
-                <button
-                  type="button"
-                  className="btn-primary"
-                  data-testid="transfer-export"
-                  disabled={transferStatus?.kind === 'busy'}
-                  onClick={() => onTransfer('export')}
-                >
-                  Export to Terminal
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  data-testid="transfer-import"
-                  disabled={transferStatus?.kind === 'busy'}
-                  onClick={() => onTransfer('import')}
-                >
-                  Import from Terminal
-                </button>
-              </div>
-            </div>
-            {transferStatus != null && (
+            {exportStatus != null && (
               <p
-                className={`settings-status${transferStatus.kind === 'error' ? ' settings-status--error' : ''}`}
-                data-testid="transfer-status"
+                className={`settings-status${exportStatus.kind === 'error' ? ' settings-status--error' : ''}`}
+                data-testid="export-status"
               >
-                {transferStatus.text}
+                {exportStatus.text}
               </p>
             )}
           </>

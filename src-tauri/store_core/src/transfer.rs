@@ -177,6 +177,70 @@ pub fn merge_states(
     next
 }
 
+/// One preview row of the Desktop↔Terminal wizard (#80 rework, 2026-11-22):
+/// a workspace the planned merge ADDS over the target, with the FINAL
+/// collision-suffixed name, its resolved group name (None = top level) and
+/// its tab count. Serialized camelCase — the rows ride the preview command's
+/// JSON straight into the frontend's tree builder.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddedWorkspaceRow {
+    pub name: String,
+    pub group_name: Option<String>,
+    pub tab_count: usize,
+}
+
+/// A group node the planned merge ADDS over the target, with how many of the
+/// planned workspaces file into it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddedGroupRow {
+    pub name: String,
+    pub child_count: usize,
+}
+
+/// Diff a planned merge result against its target (PURE): every workspace
+/// and group whose id the target does not have (mergeStates mints FRESH ids
+/// for the incoming side, so id absence is exactly "added") becomes a row —
+/// the wizard's preview list. Names are the FINAL ones (suffixes resolved),
+/// so what the user previews is what lands. The cmux wizard's
+/// `buildImportPreview`, expressed over whole store states.
+pub fn added_rows(
+    live: &WorkspaceData,
+    planned: &WorkspaceData,
+) -> (Vec<AddedWorkspaceRow>, Vec<AddedGroupRow>) {
+    let live_ws_ids: HashSet<&str> = live.workspaces.iter().map(|w| w.id.as_str()).collect();
+    let live_group_ids: HashSet<&str> = live.groups.iter().map(|g| g.id.as_str()).collect();
+    let rows = planned
+        .workspaces
+        .iter()
+        .filter(|w| !live_ws_ids.contains(w.id.as_str()))
+        .map(|w| AddedWorkspaceRow {
+            name: w.name.clone(),
+            group_name: w
+                .group_id
+                .as_ref()
+                .and_then(|gid| planned.groups.iter().find(|g| &g.id == gid))
+                .map(|g| g.name.clone()),
+            tab_count: w.tabs.len(),
+        })
+        .collect();
+    let group_rows = planned
+        .groups
+        .iter()
+        .filter(|g| !live_group_ids.contains(g.id.as_str()))
+        .map(|g| AddedGroupRow {
+            name: g.name.clone(),
+            child_count: planned
+                .workspaces
+                .iter()
+                .filter(|w| w.group_id.as_deref() == Some(g.id.as_str()))
+                .count(),
+        })
+        .collect();
+    (rows, group_rows)
+}
+
 #[cfg(test)]
 mod tests {
     //! The merge contract's pure core: collisions never overwrite, ids are
@@ -233,6 +297,71 @@ mod tests {
         };
         let next = merge_states(&live, &WorkspaceData::default(), "desk", &mut sequential_ids());
         assert_eq!(next, live);
+    }
+
+    // --- added_rows: the wizard's preview rows --------------------------------
+    //
+    // The Desktop↔Terminal wizard (#80 rework, 2026-11-22) previews the merge
+    // through THESE rows: every entity the planned state adds over the target
+    // (fresh ids — nothing else can differ), with the FINAL collision-suffixed
+    // names, the resolved group name and the tab count. The cmux wizard's
+    // buildImportPreview, expressed over whole store states.
+
+    #[test]
+    fn added_rows_list_only_the_planned_additions_with_final_names() {
+        let live = WorkspaceData {
+            workspaces: vec![ws("w1", "proj")],
+            ..Default::default()
+        };
+        let incoming = WorkspaceData {
+            workspaces: vec![ws("w2", "proj"), {
+                let mut w = ws("w3", "solo");
+                w.tabs = vec![tab("t1", "leaf-1"), tab("t2", "leaf-2")];
+                w
+            }],
+            groups: vec![group("g1", "client", None)],
+            ..Default::default()
+        };
+        let planned = merge_states(&live, &incoming, "term", &mut sequential_ids());
+        let (rows, group_rows) = added_rows(&live, &planned);
+        assert_eq!(rows.len(), 2, "the target's own row never lists");
+        assert_eq!(rows[0].name, "proj from term");
+        assert_eq!(rows[0].group_name, None);
+        assert_eq!(rows[0].tab_count, 0);
+        assert_eq!(rows[1].name, "solo");
+        assert_eq!(rows[1].tab_count, 2);
+        assert_eq!(group_rows.len(), 1);
+        assert_eq!(group_rows[0].name, "client");
+    }
+
+    #[test]
+    fn added_rows_resolve_the_group_name_and_count_its_planned_members() {
+        let live = WorkspaceData::default();
+        let incoming = WorkspaceData {
+            workspaces: vec![{
+                let mut w = ws("w1", "inner");
+                w.group_id = Some("g1".into());
+                w
+            }],
+            groups: vec![group("g1", "client", None)],
+            ..Default::default()
+        };
+        let planned = merge_states(&live, &incoming, "desk", &mut sequential_ids());
+        let (rows, group_rows) = added_rows(&live, &planned);
+        assert_eq!(rows[0].group_name.as_deref(), Some("client"));
+        assert_eq!(group_rows[0].child_count, 1);
+    }
+
+    #[test]
+    fn added_rows_of_an_empty_merge_are_empty() {
+        let live = WorkspaceData {
+            workspaces: vec![ws("w1", "proj")],
+            ..Default::default()
+        };
+        let planned = merge_states(&live, &WorkspaceData::default(), "desk", &mut sequential_ids());
+        let (rows, group_rows) = added_rows(&live, &planned);
+        assert!(rows.is_empty());
+        assert!(group_rows.is_empty());
     }
 
     #[test]

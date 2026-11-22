@@ -119,7 +119,13 @@ import { type NotificationTarget } from './notificationRouting'
 import { isAiCliProcess } from './aiCli'
 import { SettingsDialog } from './SettingsDialog'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
-import { CmuxImportWizard } from './CmuxImportWizard'
+import {
+  ImportWizard,
+  cmuxImportSource,
+  type ImportWizardSource,
+} from './ImportWizardDialog'
+import { scopeWorkspaceState, type TransferSourceState } from './transferWizard'
+import type { ImportPreview, ImportPreviewGroup } from './importWizard'
 import { coerceSettings, defaultSettings, type Settings } from './settings'
 import {
   detectShells,
@@ -1879,7 +1885,7 @@ export function WorkspaceShell() {
   }, [])
 
   // --- cmux import wizard (#59, HITL rework 2026-08-30) -----------------------
-  // Settings → Import → "from cmux" opens the CmuxImportWizard dialog:
+  // Settings → Import opens the import wizard dialog (ImportWizardDialog):
   // scan (read-only) → choose categories with a LIVE preview → apply. The
   // shell's glue is exactly two things: the read-only source read, and the
   // persist for Apply — which ALSO closes the Settings dialog (PO call:
@@ -1893,53 +1899,118 @@ export function WorkspaceShell() {
     setSettingsOpen(false)
   }
 
-  // --- Desktop↔Terminal transfer (#80 UI, v1.9.0 F1) --------------------------
-  // Settings → "Desktop ↔ Terminal": the two buttons perform the SAME moves
-  // the B7 CLI commands do — the backend command rides
-  // store_core::transfer::merge_states, the one merge implementation the CLI
-  // and the UI share. Export writes the TERM store in the backend (no live
-  // owner); Import returns the merged tree, which the shell ADOPTS as its
-  // live state and persists — the app stays the single writer of its own
-  // store. The status line mirrors the outcome; a refusal is never silent.
-  const [transferStatus, setTransferStatus] = useState<{
+  // --- Desktop↔Terminal transfer wizard (#80 UI, REWORKED 2026-11-22) --------
+  // Settings → Import → "from Terminal" / "to Terminal": both open the SAME
+  // wizard the cmux import uses. The merge itself stays in ONE place —
+  // store_core::transfer::merge_states, the implementation the CLI rides —
+  // behind the preview command, which returns the FULL planned tree plus the
+  // display rows; Apply lands exactly the previewed state. Import adopts the
+  // planned tree through the app's normal save path (the app stays the
+  // single writer of its own store); export hands the planned tree to the
+  // backend, which writes the TERM store (it has no live owner). A failed
+  // scan, preview or export shows the wizard's failure state — never
+  // silence.
+  type TransferWizardKind = 'cmux' | 'transfer-import' | 'transfer-export'
+  const [wizardKind, setWizardKind] = useState<TransferWizardKind>('cmux')
+
+  const transferWizardSource = (
+    direction: 'import' | 'export',
+  ): ImportWizardSource<TransferSourceState> => ({
+    title: direction === 'import' ? 'Import from Terminal' : 'Export to Terminal',
+    scanningText:
+      direction === 'import' ? 'Scanning umux Terminal…' : "Reading this app's layouts…",
+    emptyText:
+      direction === 'import'
+        ? 'Nothing to import — umux Terminal has no workspaces yet.'
+        : 'Nothing to export — this app has no workspaces yet.',
+    failureLabel: direction === 'import' ? 'Import' : 'Export',
+    scan: async () => {
+      // Read-only: the OTHER store's raw doc (serde camelCase — the same
+      // shapes as here, minus the runtime-only records). groups/order are
+      // `skip_serializing_if` on the Rust side — absent keys normalize to
+      // empty.
+      const doc = await invoke<TransferSourceState>('workspaces_transfer_read', {
+        direction,
+      })
+      const workspaces = doc.workspaces ?? []
+      const groups = doc.groups ?? []
+      return workspaces.length === 0 && groups.length === 0
+        ? { kind: 'empty' }
+        : {
+            kind: 'ready',
+            selectable: { workspaces, groups, order: doc.order ?? [] },
+          }
+    },
+    preview: async (doc, scope) => {
+      const out = await invoke<{
+        state: WorkspaceState
+        workspaces: ImportPreview['workspaces']
+        groups: ImportPreviewGroup[]
+      }>('workspaces_transfer_preview', {
+        direction,
+        source: scopeWorkspaceState(doc, scope),
+      })
+      // `state` is the persisted subset (no runtime records, and the empty
+      // collections may be absent keys) — persist() below writes only the
+      // three persisted collections, so normalize here.
+      return {
+        planned: {
+          ...out.state,
+          groups: out.state.groups ?? [],
+          order: out.state.order ?? [],
+        },
+        workspaces: out.workspaces ?? [],
+        groups: out.groups ?? [],
+      }
+    },
+    apply: async (planned) => {
+      if (direction === 'import') {
+        // The planned tree rides the app's normal save path — but it is a
+        // PERSISTED doc (no runtime records), so the three collections merge
+        // into the live state and the runtime records (openIds, active…)
+        // survive untouched: imported workspaces stay CLOSED until opened.
+        applyWizardState({
+          ...stateRef.current,
+          workspaces: planned.workspaces,
+          groups: planned.groups,
+          order: planned.order,
+        })
+        return
+      }
+      await invoke('workspaces_transfer_export', { planned })
+      // Export is done: the result lands in umux Terminal, not the sidebar.
+      setSettingsOpen(false)
+    },
+    onClose: () => setWizardOpen(false),
+  })
+
+  // "to file (.json)" (PO round 2, 2026-11-22): ONE invoke, no wizard — the
+  // backend writes the whole persisted layout doc as pretty JSON into the
+  // user's Downloads folder. The outcome mirrors back into the Settings row
+  // (the written path is the confirmation; a refusal is never silent), and
+  // a busy marker disables the item so two writes never race. The
+  // "Exported to…" line is EPHEMERAL — PO call, 2026-11-22: it clears itself
+  // after 7 seconds (a busy/error line stays until the next attempt).
+  const [exportStatus, setExportStatus] = useState<{
     kind: 'busy' | 'info' | 'error'
     text: string
   } | null>(null)
-  const runTransfer = (direction: 'export' | 'import') => {
-    setTransferStatus({
-      kind: 'busy',
-      text:
-        direction === 'export'
-          ? 'Exporting to umux Terminal…'
-          : 'Importing from umux Terminal…',
-    })
-    invoke<{
-      imported: { from: string; workspaces: number; groups: number }
-      state?: { workspaces: Workspace[]; groups: Group[]; order: string[] }
-    }>('workspaces_transfer', { direction })
-      .then((doc) => {
-        if (direction === 'import' && doc.state != null) {
-          persist({
-            ...stateRef.current,
-            workspaces: doc.state.workspaces,
-            groups: doc.state.groups,
-            order: doc.state.order,
-          })
-        }
-        const { workspaces, groups } = doc.imported
-        setTransferStatus(
-          workspaces === 0 && groups === 0
-            ? {
-                kind: 'info',
-                text: 'Nothing to move — the other store has no workspaces or groups yet.',
-              }
-            : {
-                kind: 'info',
-                text: `Merged ${workspaces} workspace${workspaces === 1 ? '' : 's'} and ${groups} group${groups === 1 ? '' : 's'} ${direction === 'export' ? 'into umux Terminal' : 'into this app'}.`,
-              },
-        )
+  const exportTimerRef = useRef<number | null>(null)
+  const runExportFile = () => {
+    if (exportTimerRef.current != null) {
+      clearTimeout(exportTimerRef.current)
+      exportTimerRef.current = null
+    }
+    setExportStatus({ kind: 'busy', text: 'Writing the layouts file…' })
+    invoke<{ path: string }>('workspaces_export_file')
+      .then((out) => {
+        setExportStatus({ kind: 'info', text: `Exported to ${out.path}` })
+        exportTimerRef.current = window.setTimeout(() => {
+          exportTimerRef.current = null
+          setExportStatus(null)
+        }, 7000)
       })
-      .catch((e) => setTransferStatus({ kind: 'error', text: String(e) }))
+      .catch((e) => setExportStatus({ kind: 'error', text: String(e) }))
   }
 
   const muted = !settings.notificationsEnabled
@@ -4608,9 +4679,16 @@ export function WorkspaceShell() {
           onChange={applySettings}
           onClose={() => setSettingsOpen(false)}
           onOpenSettingsFile={openSettingsFile}
-          onImportWizard={() => setWizardOpen(true)}
-          onTransfer={runTransfer}
-          transferStatus={transferStatus}
+          onImportWizard={() => {
+            setWizardKind('cmux')
+            setWizardOpen(true)
+          }}
+          onTransferWizard={(direction) => {
+            setWizardKind(direction === 'import' ? 'transfer-import' : 'transfer-export')
+            setWizardOpen(true)
+          }}
+          onExportFile={runExportFile}
+          exportStatus={exportStatus}
           onResetAll={() => {
             void resetAllAndRelaunch()
           }}
@@ -4739,19 +4817,31 @@ export function WorkspaceShell() {
         </div>
       )}
 
-      {/* The "from cmux" import wizard (#59): scan → choose + live preview →
-          apply. stateRef.current is captured at open time — the modal blocks
+      {/* The import/export wizard (#59; #80 rework 2026-11-22): scan →
+          choose + live preview → apply, ONE dialog for cmux and both
+          Terminal directions (each a descriptor; see the sources above).
+          stateRef.current is captured at cmux-open time — the modal blocks
           the app behind it, so the preview cannot race the live tree. Apply
           persists AND closes Settings (applyWizardState), so both dialogs
           leave together. */}
-      {wizardOpen && (
-        <CmuxImportWizard
-          liveState={stateRef.current}
-          onReadSources={readWizardSources}
-          onApply={applyWizardState}
-          onClose={() => setWizardOpen(false)}
+      {wizardOpen && wizardKind === 'cmux' && (
+        <ImportWizard
+          source={cmuxImportSource({
+            liveState: stateRef.current,
+            onReadSources: readWizardSources,
+            onApply: applyWizardState,
+            onClose: () => setWizardOpen(false),
+          })}
         />
       )}
+      {wizardOpen &&
+        (wizardKind === 'transfer-import' || wizardKind === 'transfer-export') && (
+          <ImportWizard
+            source={transferWizardSource(
+              wizardKind === 'transfer-import' ? 'import' : 'export',
+            )}
+          />
+        )}
 
       {pendingClose != null && (
         <CloseConfirmDialog
