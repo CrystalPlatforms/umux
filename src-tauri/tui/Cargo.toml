@@ -1,6 +1,6 @@
 [package]
 name = "umux-tui"
-version = "1.9.0"
+version = "1.9.1"
 edition = "2021"
 rust-version = "1.77.2"
 description = "umux Terminal (the terminal-native UI, TUI v1.9.0): sidebar, tabs, unlimited panes, mouse and context-menu chrome, agent statuses"
