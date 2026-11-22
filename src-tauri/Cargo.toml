@@ -1,10 +1,10 @@
 [package]
 name = "app"
 version = "1.9.1"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+description = "umux — terminal workspace manager"
+authors = ["CrystalPlatforms"]
+license = "MIT"
+repository = "https://github.com/CrystalPlatforms/umux"
 edition = "2021"
 rust-version = "1.77.2"
 
